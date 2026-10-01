@@ -4,14 +4,52 @@ on:
   push:
     branches: [main, master]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 发布标签（留空则用 app/pubspec.yaml 里的版本号）
+        required: false
+        default: ""
 
 permissions:
   contents: read
 
+# 同一个分支上连续推送时，取消上一次还在跑的构建。
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # 固定 Flutter 版本：flutter-action 的缓存 key 才会稳定，避免每次重新保存缓存
+  FLUTTER_VERSION: 3.47.5
+
 jobs:
+  analyze:
+    name: 静态检查
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: 生成工程骨架
+        working-directory: app
+        run: flutter create --project-name tonicuisc --org com.tonicuisc --platforms=linux .
+
+      - name: 静态检查
+        working-directory: app
+        run: |
+          flutter pub get
+          flutter analyze --no-fatal-infos --no-fatal-warnings
+
   desktop:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
@@ -32,12 +70,21 @@ jobs:
             bundle: build/macos/Build/Products/Release
             artifact: tonicuisc-macos
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: subosito/flutter-action@v2
         with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
           cache: true
+
+      - name: 缓存 CocoaPods
+        if: runner.os == 'macOS'
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/CocoaPods
+          key: pods-${{ runner.os }}-${{ hashFiles('app/pubspec.yaml') }}
+          restore-keys: pods-${{ runner.os }}-
 
       - name: Linux 构建依赖
         if: matrix.platform == 'linux'
@@ -62,10 +109,6 @@ jobs:
         working-directory: app
         run: flutter pub get
 
-      - name: 静态检查
-        working-directory: app
-        run: flutter analyze --no-fatal-infos --no-fatal-warnings
-
       - name: 构建
         working-directory: app
         run: flutter build ${{ matrix.platform }} --release
@@ -85,7 +128,7 @@ jobs:
           cd "app/${{ matrix.bundle }}"
           zip -qry "$GITHUB_WORKSPACE/tonicuisc-macos.zip" tonicuisc.app
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: ${{ matrix.artifact }}
           path: tonicuisc-*
@@ -94,13 +137,22 @@ jobs:
   ios:
     name: iOS (未签名)
     runs-on: macos-latest
+    timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: subosito/flutter-action@v2
         with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
           cache: true
+
+      - name: 缓存 CocoaPods
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/CocoaPods
+          key: pods-${{ runner.os }}-${{ hashFiles('app/pubspec.yaml') }}
+          restore-keys: pods-${{ runner.os }}-
 
       - name: 生成 iOS 工程
         working-directory: app
@@ -123,8 +175,44 @@ jobs:
           cp -R app/build/ios/iphoneos/Runner.app Payload/
           zip -qry tonicuisc-ios-unsigned.ipa Payload
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: tonicuisc-ios-unsigned
           path: tonicuisc-ios-unsigned.ipa
           if-no-files-found: error
+
+  release:
+    name: 发布 Release
+    needs: [analyze, desktop, ios]
+    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v5
+        with:
+          path: dist
+
+      - name: 计算标签
+        id: version
+        run: |
+          version=$(grep -E '^version:' app/pubspec.yaml | head -1 | sed -E 's/^version:[[:space:]]*//' | cut -d+ -f1)
+          tag='${{ inputs.tag }}'
+          [ -n "$tag" ] || tag="v${version:-0.0.0}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "标签: $tag"
+
+      - name: 列出产物
+        run: find dist -type f | sort
+
+      - name: 上传到 Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "Tonicuisc $TAG" --generate-notes
+          mapfile -d '' assets < <(find dist -type f -print0)
+          gh release upload "$TAG" "${assets[@]}" --clobber

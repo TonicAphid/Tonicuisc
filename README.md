@@ -86,7 +86,12 @@ flutter build windows --release
 ## CI
 
 - `server-ci.yml`：安装依赖 → 编译检查 → pytest。
-- `build.yml`：矩阵构建 Windows / Linux / macOS + 单独的 iOS 未签名 ipa，产物通过 Artifact 上传（不自动发布 Release）。
+- `build.yml`：
+  - `静态检查` job 在三平台构建前先跑一次 `flutter analyze`；
+  - `Windows / Linux / macOS / iOS` 矩阵构建，Flutter 版本固定在 `env.FLUTTER_VERSION`（固定版本才能让 `flutter-action` 缓存命中，否则每次都要重新保存缓存）；
+  - 全部成功后由 `发布 Release` job 汇总产物并上传到 GitHub Release，标签取 `app/pubspec.yaml` 的版本号（如 `v1.0.0`）；手动触发时可自定义标签，重复运行会覆盖同名产物。
+
+Release 产物：`tonicuisc-windows-x64.zip`、`tonicuisc-linux-x64.tar.gz`、`tonicuisc-macos.zip`、`tonicuisc-ios-unsigned.ipa`。
 
 iOS 产物为未签名 `.ipa`，安装需要自行用 Xcode 重签。
 
