@@ -49,6 +49,7 @@ python -m tonicuisc_server          # 默认 0.0.0.0:8000
 | `TONICUISC_SOURCES` | `migu,kuwo` | 启用音源 |
 | `TONICUISC_SEARCH_SIZE` | `10` | 每个音源返回数量（调大要翻页，更慢） |
 | `TONICUISC_CACHE_DIR` | `server/.cache` | 下载缓存目录 |
+| `TONICUISC_DB` | `<CACHE_DIR>/tonicuisc.db` | SQLite 数据库文件 |
 
 接口：
 
@@ -57,12 +58,29 @@ python -m tonicuisc_server          # 默认 0.0.0.0:8000
 | GET | `/api/health` | 服务状态 |
 | GET | `/api/sources` | 可用音源 |
 | GET | `/api/search?keyword=&sources=migu,kuwo&limit=50&refresh=false` | 搜索（`refresh=true` 跳过搜索缓存） |
+| GET | `/api/history?limit=20` | 搜索历史（按关键词聚合） |
 | GET | `/api/url/{id}` | 直链（best effort） |
 | GET | `/api/lyric/{id}` | 歌词 |
 | GET | `/api/stream/{id}` | 音频流，支持 HTTP Range |
 | GET | `/api/download/{id}` | 附件下载 |
 
 `{id}` 形如 `migu:123456`（实际是 `MiguMusicClient:600929000000096577`），由 `/api/search` 返回；服务端缓存 3 小时，过期需重新搜索。
+
+### 数据库（SQLite）
+
+`server/.cache/tonicuisc.db`，Python 自带 `sqlite3`，没有额外依赖。三张表：
+
+- `songs`：搜到的歌曲元信息 + musicdl 的 `SongInfo` 序列化结果（JSON）
+- `searches` / `search_results`：搜索历史与当时的结果列表
+
+**只存元信息，不把直链当长期有效**：酷我/咪咕的 `download_url` 是带签名的临时 token，所以库里给直链记了一个保守的 30 分钟有效期（`URL_TTL_SECONDS`）。重启服务后：
+
+1. 内存缓存空了 → 从 `songs` 表恢复歌曲（实测重启后仍能拿到歌名/格式）；
+2. 直链还在有效期内 → 直接播；
+3. 直链过期 → 用「歌名 + 歌手」自动重搜一次换新链接；
+4. 重搜也失败（比如那首歌下架了）→ 返回 404/502，客户端重新搜索即可。
+
+搜索时顺手写入，`searches` 保留最近 500 条、`songs` 保留最近 5000 首，自动裁剪。
 
 ### 缓存
 
@@ -113,7 +131,8 @@ flutter build windows --release
   - `静态检查` job 跑 `flutter analyze` + `flutter test`；
   - `Windows / Linux / macOS / iOS` 矩阵构建，Flutter 版本固定在 `env.FLUTTER_VERSION`（固定版本才能让 `flutter-action` 缓存命中，否则每次都要重新保存缓存）；
   - 全部成功后由 `发布 Release` job 汇总产物并上传到 GitHub Release；
-  - **Release 名 = 推送的 tag 名**：`git tag v0.0.2 && git push origin v0.0.2` → Release 就叫 `v0.0.2`。手动触发时可自定义标签；直接推 main（没有 tag）时回退用 `app/pubspec.yaml` 里的版本号。重复运行同一标签会覆盖同名产物。
+  - **Release 标题 = 提交标题**（commit message 的第一行），Actions 列表里那一行也是提交标题（`run-name`）。
+  - **Release 标签从提交标题里取 `v0.0.x`**：比如提交信息写 `v0.0.3 修复播放转圈`，tag 就是 `v0.0.3`、标题是整行。没写版本号时依次回退：推送的 tag → 手动输入 → `app/pubspec.yaml` 版本号。重复同一版本会更新标题并覆盖同名产物，不需要手动打 tag。
 
 Release 产物：`tonicuisc-windows-x64.zip`、`tonicuisc-linux-x64.tar.gz`、`tonicuisc-macos.zip`、`tonicuisc-ios-unsigned.ipa`。
 

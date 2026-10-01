@@ -101,7 +101,15 @@ async def health() -> dict:
         "status": "ok",
         "sources": resolve_sources(SETTINGS.sources),
         "work_dir": str(SETTINGS.work_dir),
+        "database": str(SETTINGS.db_path),
     }
+
+
+@app.get("/api/history")
+async def history(limit: int = Query(20, ge=1, le=200)) -> dict:
+    """搜索历史（按关键词聚合，最近的在前）。"""
+    items = await asyncio.to_thread(get_service().history, limit)
+    return {"total": len(items), "items": items}
 
 
 @app.get("/api/sources")

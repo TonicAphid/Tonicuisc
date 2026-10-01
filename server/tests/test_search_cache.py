@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from tonicuisc_server.service import MusicService
+from tonicuisc_server.storage import Storage
 
 
 def _song(identifier: str) -> SimpleNamespace:
@@ -48,11 +49,32 @@ def service() -> MusicService:
     svc.files_dir = root / "files"
     svc.work_dir.mkdir(parents=True, exist_ok=True)
     svc.files_dir.mkdir(parents=True, exist_ok=True)
+    svc.storage.close()
+    svc.storage = Storage(root / "test.db")
     svc._client = _FakeClient()
     try:
         yield svc
     finally:
+        svc.storage.close()
         shutil.rmtree(root, ignore_errors=True)
+
+
+def test_song_restored_from_database(service: MusicService) -> None:
+    items = service.search("天地龙鳞")
+    service._songs.clear()  # 模拟进程重启：内存缓存没了，只剩 SQLite
+
+    song = service.get_song(items[0]["id"])
+
+    assert song.song_name == items[0]["name"]
+    assert service.storage.song_meta(items[0]["id"]) is not None
+
+
+def test_search_records_history(service: MusicService) -> None:
+    service.search("天地龙鳞")
+    service.search("龙", refresh=True)
+
+    keywords = [row["keyword"] for row in service.history()]
+    assert keywords == ["龙", "天地龙鳞"]
 
 
 def test_same_keyword_hits_cache(service: MusicService) -> None:

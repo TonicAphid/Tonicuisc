@@ -1,5 +1,8 @@
 name: Build
 
+# Actions 列表里显示的名字 = 提交标题（手动触发时用分支/tag 名）
+run-name: ${{ github.event.head_commit.message || github.ref_name }}
+
 on:
   push:
     branches: [main, master]
@@ -198,25 +201,35 @@ jobs:
         with:
           path: dist
 
-      - name: 计算标签
+      - name: 计算标签与标题
         id: version
         env:
           REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
           INPUT_TAG: ${{ inputs.tag }}
+          COMMIT_TITLE: ${{ github.event.head_commit.message }}
         run: |
-          # 推 tag（如 v0.0.2）时，Release 就用这个 tag 名；
-          # 手动触发可以用输入框指定；都没有才回退到 pubspec 版本号。
-          if [ "$REF_TYPE" = "tag" ]; then
-            tag="$REF_NAME"
+          # 提交标题的第一行，作为 Release 标题
+          title=$(printf '%s' "$COMMIT_TITLE" | head -n 1 | tr -d '\r' | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')
+
+          # 提交标题里的 v0.0.x（必须带 v，避免把 "修了 2 个问题" 之类当成版本号）
+          tag=$(printf '%s' "$COMMIT_TITLE" | grep -oiE 'v[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n 1 | tr 'A-Z' 'a-z')
+          if [ -n "$tag" ]; then
+            source="提交标题"
+          elif [ "$REF_TYPE" = "tag" ]; then
+            tag="$REF_NAME"; source="推送的 tag"
           elif [ -n "$INPUT_TAG" ]; then
-            tag="$INPUT_TAG"
+            tag="$INPUT_TAG"; source="手动输入"
           else
             version=$(grep -E '^version:' app/pubspec.yaml | head -1 | sed -E 's/^version:[[:space:]]*//' | cut -d+ -f1)
-            tag="v${version:-0.0.0}"
+            tag="v${version:-0.0.0}"; source="pubspec 版本号"
           fi
+
+          [ -n "$title" ] || title="Tonicuisc $tag"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "Release 标签: $tag"
+          echo "title=$title" >> "$GITHUB_OUTPUT"
+          echo "Release 标签: $tag（来源：$source）"
+          echo "Release 标题: $title"
 
       - name: 列出产物
         run: find dist -type f | sort
@@ -225,7 +238,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.version.outputs.tag }}
+          TITLE: ${{ steps.version.outputs.title }}
         run: |
-          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "Tonicuisc $TAG" --generate-notes
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --title "$TITLE"
+          else
+            gh release create "$TAG" --title "$TITLE" --generate-notes
+          fi
           mapfile -d '' assets < <(find dist -type f -print0)
           gh release upload "$TAG" "${assets[@]}" --clobber

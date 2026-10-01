@@ -76,5 +76,10 @@ class Settings:
         """Where musicdl stores downloaded audio files."""
         return self.cache_dir / "music"
 
+    @property
+    def db_path(self) -> Path:
+        """SQLite 数据库位置（存搜索结果 / 历史，不含音频本体）。"""
+        return Path(os.getenv("TONICUISC_DB", self.cache_dir / "tonicuisc.db")).resolve()
+
 
 SETTINGS = Settings()

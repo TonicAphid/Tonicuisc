@@ -12,11 +12,13 @@ import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import requests
 
 from .config import SETTINGS, resolve_sources, source_label
+from .storage import Storage
 
 #: How long a search result stays addressable through /api/stream/{id}.
 ITEM_TTL_SECONDS = 3 * 60 * 60
@@ -83,6 +85,8 @@ class MusicService:
         #: 把文件挪到这里，缓存才能跨搜索命中。
         self.files_dir = SETTINGS.cache_dir / "files"
         self.files_dir.mkdir(parents=True, exist_ok=True)
+        #: 搜索结果 / 歌曲元信息 / 搜索历史
+        self.storage = Storage()
 
     # ------------------------------------------------------------------ client
     @property
@@ -171,11 +175,14 @@ class MusicService:
                 items.append(item)
         if limit:
             items = items[:limit]
+        self.storage.record_search(keyword, sorted(wanted), [item["id"] for item in items])
         return items
 
     # ------------------------------------------------------------------ cache
     def _remember(self, song: Any) -> None:
-        self._songs[song_to_item(song)["id"]] = (song, time.time() + ITEM_TTL_SECONDS)
+        item = song_to_item(song)
+        self._songs[item["id"]] = (song, time.time() + ITEM_TTL_SECONDS)
+        self.storage.upsert_song(item, song)
         self._purge()
 
     def _purge(self) -> None:
@@ -185,9 +192,64 @@ class MusicService:
 
     def get_song(self, item_id: str) -> Any:
         entry = self._songs.get(item_id)
-        if entry is None or entry[1] < time.time():
+        if entry is not None and entry[1] >= time.time():
+            return entry[0]
+        song = self._restore(item_id)
+        if song is None:
             raise SongNotFound(item_id)
-        return entry[0]
+        return song
+
+    def _restore(self, item_id: str) -> Any | None:
+        """内存没有就去 SQLite 找；音源直链过期就重搜一次刷新。"""
+        payload = self.storage.load_song(item_id)
+        if payload is None:
+            return None
+        song = self._rebuild(payload)
+        if song is None:
+            return None
+        if self.storage.url_expired(item_id):
+            refreshed = self._refresh(song)
+            if refreshed is song:
+                # 刷新失败：不写内存，下次请求再试一次
+                return song
+            self._songs[item_id] = (refreshed, time.time() + ITEM_TTL_SECONDS)
+            return refreshed
+        self._songs[item_id] = (song, time.time() + ITEM_TTL_SECONDS)
+        return song
+
+    def _rebuild(self, payload: dict[str, Any]) -> Any | None:
+        try:
+            from musicdl.musicdl import SongInfo  # 没有 musicdl 时退化成简单对象
+
+            song = SongInfo.fromdict(payload)
+            if song.identifier:
+                return song
+        except Exception:
+            pass
+        try:
+            return SimpleNamespace(**payload)
+        except Exception:
+            return None
+
+    def _refresh(self, song: Any) -> Any:
+        """直链失效后就地重搜一次，拿到新的 download_url。失败返回原对象。"""
+        keyword = " ".join(
+            part for part in (str(getattr(song, "song_name", "") or ""), str(getattr(song, "singers", "") or "")) if part
+        ).strip()
+        if not keyword:
+            return song
+        try:
+            results = self.client.search(keyword) or {}
+        except Exception:
+            return song
+        for candidate in results.get(getattr(song, "source", None), []) or []:
+            if str(getattr(candidate, "identifier", "")) == str(getattr(song, "identifier", "")):
+                self._remember(candidate)
+                return candidate
+        return song
+
+    def history(self, limit: int = 20) -> list[dict[str, Any]]:
+        return self.storage.recent_searches(limit)
 
     def lyric(self, item_id: str) -> str:
         song = self.get_song(item_id)
@@ -308,10 +370,17 @@ class MusicService:
             legacy = self._legacy_path(song)
             if legacy is not None and legacy.exists() and legacy.stat().st_size > 0:
                 return self._promote(legacy, target)
-            try:
-                downloaded = self.client.download(song_infos=[song]) or []
-            except Exception as exc:  # network / source side failure
-                raise DownloadFailed(str(exc)) from exc
+            downloaded: list[Any] = []
+            for attempt in range(2):
+                try:
+                    downloaded = self.client.download(song_infos=[song]) or []
+                except Exception as exc:  # network / source side failure
+                    refreshed = self._refresh(song)  # 直链过期就换一条再试
+                    if attempt == 0 and refreshed is not song:
+                        song = refreshed
+                        continue
+                    raise DownloadFailed(str(exc)) from exc
+                break
             for candidate in [*downloaded, song]:
                 candidate_path = self._legacy_path(candidate)
                 if candidate_path is not None and candidate_path.exists() and candidate_path.stat().st_size > 0:
@@ -346,30 +415,45 @@ class MusicService:
         先拿到响应头再交给 StreamingResponse，这样上游报错还能正常返回 502。
         请求走 musicdl 自己的会话（UA / cookies / 代理都已就绪），
         直接用裸 requests 会被 CDN 403。
+        403/404 多半是直链过期，会自动重搜一次换新链接再试。
         """
         song = self.get_song(item_id)
-        url = song.download_url
-        if not isinstance(url, str) or not url.startswith("http"):
-            raise DownloadFailed("该歌曲没有可用下载链接")
-        headers = {str(k): str(v) for k, v in dict(song.default_download_headers or {}).items()}
-        cookies = dict(song.default_download_cookies or {})
+        response: Any = None
+        last_error: Exception | None = None
+        for attempt in range(2):
+            url = getattr(song, "download_url", None)
+            if not isinstance(url, str) or not url.startswith("http"):
+                raise DownloadFailed("该歌曲没有可用下载链接")
+            try:
+                response = self._open_url(song, url)
+                break
+            except Exception as exc:
+                last_error = exc
+                refreshed = self._refresh(song)
+                if attempt == 1 or refreshed is song:
+                    break
+                song = refreshed
+        if response is None:
+            raise DownloadFailed(str(last_error))
+        target = self.cache_path(song)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        return response, target, target.with_name(target.name + ".part")
+
+    def _open_url(self, song: Any, url: str) -> Any:
+        headers = {str(k): str(v) for k, v in dict(getattr(song, "default_download_headers", None) or {}).items()}
+        cookies = dict(getattr(song, "default_download_cookies", None) or {})
         kwargs: dict[str, Any] = {"stream": True, "timeout": (10, 30)}
         if headers:
             kwargs["headers"] = headers
         if cookies:
             kwargs["cookies"] = cookies
-        source_client = (getattr(self.client, "music_clients", None) or {}).get(song.source)
-        try:
-            if source_client is not None and hasattr(source_client, "get"):
-                response = source_client.get(url, **kwargs)
-            else:  # 兜底：至少带上 UA
-                response = requests.get(url, stream=True, timeout=(10, 30), headers=headers or {"User-Agent": USER_AGENT})
-            response.raise_for_status()
-        except Exception as exc:
-            raise DownloadFailed(str(exc)) from exc
-        target = self.cache_path(song)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        return response, target, target.with_name(target.name + ".part")
+        source_client = (getattr(self.client, "music_clients", None) or {}).get(getattr(song, "source", None))
+        if source_client is not None and hasattr(source_client, "get"):
+            response = source_client.get(url, **kwargs)
+        else:  # 兜底：至少带上 UA
+            response = requests.get(url, stream=True, timeout=(10, 30), headers=headers or {"User-Agent": USER_AGENT})
+        response.raise_for_status()
+        return response
 
     def relay(self, response: Any, target: Path, temp_path: Path, chunk_size: int = 512 * 1024) -> Iterator[bytes]:
         """边吐给播放器边写缓存；中断就丢掉半截文件，不污染缓存。"""
