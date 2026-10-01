@@ -1,12 +1,15 @@
 import 'package:flutter/material.dart';
 
+import '../api/api_client.dart';
+import '../pages/now_playing_page.dart';
 import '../player/player_controller.dart';
 
-/// 底部播放条：播放/暂停、进度、拖动跳转。
+/// 底部播放条：播放/暂停、进度、拖动跳转；点一下展开全屏播放页。
 class PlayerBar extends StatelessWidget {
-  const PlayerBar({super.key, required this.controller});
+  const PlayerBar({super.key, required this.controller, required this.api});
 
   final PlayerController controller;
+  final ApiClient api;
 
   @override
   Widget build(BuildContext context) {
@@ -35,15 +38,35 @@ class PlayerBar extends StatelessWidget {
                   Row(
                     children: [
                       Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(song.name, maxLines: 1, overflow: TextOverflow.ellipsis, style: theme.textTheme.titleSmall),
-                            Text('${song.singers} · ${song.sourceLabel}',
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: theme.textTheme.bodySmall),
-                          ],
+                        child: InkWell(
+                          onTap: () => NowPlayingPage.open(context, controller, api),
+                          child: Row(
+                            children: [
+                              if (song.coverUrl.isNotEmpty)
+                                ClipRRect(
+                                  borderRadius: BorderRadius.circular(6),
+                                  child: Image.network(
+                                    song.coverUrl,
+                                    width: 40,
+                                    height: 40,
+                                    fit: BoxFit.cover,
+                                    errorBuilder: (_, __, ___) => const SizedBox(width: 40, height: 40),
+                                  ),
+                                ),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(song.name,
+                                        maxLines: 1, overflow: TextOverflow.ellipsis, style: theme.textTheme.titleSmall),
+                                    Text('${song.singers} · ${song.sourceLabel}',
+                                        maxLines: 1, overflow: TextOverflow.ellipsis, style: theme.textTheme.bodySmall),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
                         ),
                       ),
                       if (controller.loading)

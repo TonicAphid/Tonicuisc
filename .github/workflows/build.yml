@@ -3,6 +3,7 @@ name: Build
 on:
   push:
     branches: [main, master]
+    tags: ["v*"]
   workflow_dispatch:
     inputs:
       tag:
@@ -40,11 +41,12 @@ jobs:
         working-directory: app
         run: flutter create --project-name tonicuisc --org com.tonicuisc --platforms=linux .
 
-      - name: 静态检查
+      - name: 静态检查与单元测试
         working-directory: app
         run: |
           flutter pub get
           flutter analyze --no-fatal-infos --no-fatal-warnings
+          flutter test
 
   desktop:
     name: ${{ matrix.name }}
@@ -184,7 +186,7 @@ jobs:
   release:
     name: 发布 Release
     needs: [analyze, desktop, ios]
-    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    if: github.event_name == 'workflow_dispatch' || github.ref_type == 'tag' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -198,12 +200,23 @@ jobs:
 
       - name: 计算标签
         id: version
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_TAG: ${{ inputs.tag }}
         run: |
-          version=$(grep -E '^version:' app/pubspec.yaml | head -1 | sed -E 's/^version:[[:space:]]*//' | cut -d+ -f1)
-          tag='${{ inputs.tag }}'
-          [ -n "$tag" ] || tag="v${version:-0.0.0}"
+          # 推 tag（如 v0.0.2）时，Release 就用这个 tag 名；
+          # 手动触发可以用输入框指定；都没有才回退到 pubspec 版本号。
+          if [ "$REF_TYPE" = "tag" ]; then
+            tag="$REF_NAME"
+          elif [ -n "$INPUT_TAG" ]; then
+            tag="$INPUT_TAG"
+          else
+            version=$(grep -E '^version:' app/pubspec.yaml | head -1 | sed -E 's/^version:[[:space:]]*//' | cut -d+ -f1)
+            tag="v${version:-0.0.0}"
+          fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "标签: $tag"
+          echo "Release 标签: $tag"
 
       - name: 列出产物
         run: find dist -type f | sort

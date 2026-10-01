@@ -72,6 +72,15 @@ class ApiClient {
 
   Uri downloadUri(String id) => _uri('/api/download/$id');
 
+  /// 歌词（可能是带时间戳的 LRC 文本）。
+  Future<String> lyric(String id) async {
+    final resp = await http.get(_uri('/api/lyric/$id')).timeout(const Duration(seconds: 20));
+    if (resp.statusCode != 200) {
+      throw ApiException(_messageOf(resp));
+    }
+    return utf8.decode(resp.bodyBytes);
+  }
+
   /// 取音源直链；失败时抛 [ApiException]，调用方回退到服务端代理流。
   Future<DirectSource> directUrl(String id) async {
     final resp = await http.get(_uri('/api/url/$id')).timeout(const Duration(seconds: 20));

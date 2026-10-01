@@ -204,7 +204,7 @@ class _HomePageState extends State<HomePage> {
           ),
         ],
       ),
-      bottomNavigationBar: PlayerBar(controller: _player),
+      bottomNavigationBar: PlayerBar(controller: _player, api: _api),
     );
   }
 }

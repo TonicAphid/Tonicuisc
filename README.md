@@ -84,6 +84,13 @@ python -m tonicuisc_server          # 默认 0.0.0.0:8000
 
 Flutter 原生工程目录（`app/windows`、`app/linux`、`app/macos`、`app/ios`）不入库，用脚本生成；`flutter create` 不会覆盖已有的 `lib/` 代码。
 
+界面：
+
+- **搜索页**：关键词搜索、音源勾选（咪咕 / 酷我）、试听、下载、右上角改后端地址。
+- **底部播放条**：封面缩略图、播放/暂停、进度拖动；**点一下展开全屏播放页**。
+- **全屏播放页**（`lib/pages/now_playing_page.dart`）：大封面 + 歌词随进度高亮自动滚动（点歌词行可跳转播放位置）+ 进度条 + 播放/暂停/前后 10 秒；向下滑动或点顶部箭头收起。无时间轴的纯文本歌词只展示、不跟随。
+- 手机端锁屏 / 控制中心控制见下方"播放链路"。
+
 ```bash
 # Windows
 pwsh -File tool/bootstrap_platforms.ps1
@@ -103,9 +110,10 @@ flutter build windows --release
 
 - `server-ci.yml`：安装依赖 → 编译检查 → pytest。
 - `build.yml`：
-  - `静态检查` job 在三平台构建前先跑一次 `flutter analyze`；
+  - `静态检查` job 跑 `flutter analyze` + `flutter test`；
   - `Windows / Linux / macOS / iOS` 矩阵构建，Flutter 版本固定在 `env.FLUTTER_VERSION`（固定版本才能让 `flutter-action` 缓存命中，否则每次都要重新保存缓存）；
-  - 全部成功后由 `发布 Release` job 汇总产物并上传到 GitHub Release，标签取 `app/pubspec.yaml` 的版本号（如 `v1.0.0`）；手动触发时可自定义标签，重复运行会覆盖同名产物。
+  - 全部成功后由 `发布 Release` job 汇总产物并上传到 GitHub Release；
+  - **Release 名 = 推送的 tag 名**：`git tag v0.0.2 && git push origin v0.0.2` → Release 就叫 `v0.0.2`。手动触发时可自定义标签；直接推 main（没有 tag）时回退用 `app/pubspec.yaml` 里的版本号。重复运行同一标签会覆盖同名产物。
 
 Release 产物：`tonicuisc-windows-x64.zip`、`tonicuisc-linux-x64.tar.gz`、`tonicuisc-macos.zip`、`tonicuisc-ios-unsigned.ipa`。
 
