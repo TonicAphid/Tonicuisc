@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:just_audio_background/just_audio_background.dart';
@@ -62,14 +64,28 @@ class PlayerController extends ChangeNotifier {
     notifyListeners();
     try {
       await _start(song, api);
-      await _player.play();
     } catch (err) {
       _error = '播放失败：$err';
       _playing = false;
-    } finally {
       _loading = false;
       notifyListeners();
+      return;
     }
+    _loading = false;
+    notifyListeners();
+    // 注意：just_audio 的 play() 要到暂停/播放结束才完成，await 会把 loading 卡死。
+    _resume();
+  }
+
+  /// 播放（不等待 Future 完成，否则会一直卡在 loading 状态）。
+  void _resume() {
+    unawaited(
+      _player.play().catchError((Object error) {
+        _error = '播放失败：$error';
+        _playing = false;
+        notifyListeners();
+      }),
+    );
   }
 
   Future<void> _start(Song song, ApiClient api) async {
@@ -96,7 +112,7 @@ class PlayerController extends ChangeNotifier {
       _usingDirect = false;
       try {
         await _player.setAudioSource(AudioSource.uri(fallback, tag: _mediaItem(song)));
-        await _player.play();
+        _resume();
         return;
       } catch (err) {
         _error = '播放失败：$err';
@@ -122,7 +138,7 @@ class PlayerController extends ChangeNotifier {
     if (_player.playing) {
       await _player.pause();
     } else {
-      await _player.play();
+      _resume();
     }
   }
 
