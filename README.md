@@ -47,7 +47,7 @@ python -m tonicuisc_server          # 默认 0.0.0.0:8000
 | `TONICUISC_HOST` | `0.0.0.0` | 监听地址 |
 | `TONICUISC_PORT` | `8000` | 端口 |
 | `TONICUISC_SOURCES` | `migu,kuwo` | 启用音源 |
-| `TONICUISC_SEARCH_SIZE` | `15` | 每个音源返回数量 |
+| `TONICUISC_SEARCH_SIZE` | `10` | 每个音源返回数量（调大要翻页，更慢） |
 | `TONICUISC_CACHE_DIR` | `server/.cache` | 下载缓存目录 |
 
 接口：
@@ -56,13 +56,29 @@ python -m tonicuisc_server          # 默认 0.0.0.0:8000
 | --- | --- | --- |
 | GET | `/api/health` | 服务状态 |
 | GET | `/api/sources` | 可用音源 |
-| GET | `/api/search?keyword=&sources=migu,kuwo&limit=50` | 搜索 |
+| GET | `/api/search?keyword=&sources=migu,kuwo&limit=50&refresh=false` | 搜索（`refresh=true` 跳过搜索缓存） |
 | GET | `/api/url/{id}` | 直链（best effort） |
 | GET | `/api/lyric/{id}` | 歌词 |
 | GET | `/api/stream/{id}` | 音频流，支持 HTTP Range |
 | GET | `/api/download/{id}` | 附件下载 |
 
-`{id}` 形如 `migu:123456`，由 `/api/search` 返回；服务端缓存 3 小时，过期需重新搜索。
+`{id}` 形如 `migu:123456`（实际是 `MiguMusicClient:600929000000096577`），由 `/api/search` 返回；服务端缓存 3 小时，过期需重新搜索。
+
+### 缓存
+
+- **搜索缓存**：相同关键词 + 音源 + limit 在 10 分钟内直接返回，不再联网；并发相同请求只会真正搜一次。
+- **音频缓存**：下载后的文件统一放在 `.cache/files/<音源>_<id>.<ext>`，同一首歌不会重复下载。
+- musicdl 每次搜索都会新建 `.cache/music/<音源>/<时间戳> <关键词>/`，服务端下载完会把文件搬走、顺手清掉 `search_results.pkl` 之类的记录文件（搜索前也会清理闲置 10 分钟以上的空壳目录）。
+
+### 播放链路
+
+客户端点歌时：
+
+1. 先请求 `/api/url/{id}` 拿音源直链，直接连 CDN 播放（最快出声，服务端不中转）；请求时带 `/api/url` 返回的 headers（部分 CDN 需要 UA / Cookie）。
+2. 直链拿不到、或播放器报错，自动回退 `/api/stream/{id}`。
+3. `/api/stream/{id}` 未缓存时**边下边播**：从音源拉数据的同时写缓存并吐给播放器（实测首字节 ~0.5s，不用等整首下完）；中断会丢掉半截文件；缓存完成后转为按 Range 读本地文件，支持拖动进度。
+
+手机端锁屏 / 控制中心的控制由 `just_audio_background` 提供，iOS 还依赖 [tool/platform_patches/ios/Runner/Info.plist](tool/platform_patches/ios/Runner/Info.plist) 里的 `UIBackgroundModes: audio`（构建时由 `apply_patches` 打上）。
 
 ## 客户端
 

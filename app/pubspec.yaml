@@ -11,6 +11,8 @@ dependencies:
     sdk: flutter
   http: ^1.2.0
   just_audio: ^0.9.40
+  # 手机端锁屏 / 控制中心控制（仅 Android / iOS 生效）
+  just_audio_background: ^0.0.1-beta.11
   # Windows / Linux 上为 just_audio 提供播放后端
   just_audio_media_kit: ^2.0.5
   media_kit_libs_audio: ^1.0.5

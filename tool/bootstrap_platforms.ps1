@@ -1,5 +1,7 @@
-# 生成 app/ 下缺失的原生平台工程（windows / linux / macos / ios），然后打补丁并装依赖。
-# 已存在的文件不会被 flutter create 覆盖，lib/ 下的代码始终保留。
+# Generate the missing native platform projects under app/ (windows / linux /
+# macos / ios), then apply the native patches and fetch dependencies.
+# Existing files are never overwritten by "flutter create", so lib/ is safe.
+# ASCII-only on purpose: Windows PowerShell 5.1 reads .ps1 as ANSI.
 param(
     [string]$Platforms = 'windows,linux,macos,ios'
 )
@@ -12,7 +14,7 @@ $app = Join-Path $root 'app'
 Push-Location $app
 try {
     flutter create --project-name tonicuisc --org com.tonicuisc --platforms=$Platforms .
-    if ($LASTEXITCODE -ne 0) { throw "flutter create 失败" }
+    if ($LASTEXITCODE -ne 0) { throw "flutter create failed" }
 }
 finally {
     Pop-Location
@@ -23,10 +25,10 @@ finally {
 Push-Location $app
 try {
     flutter pub get
-    if ($LASTEXITCODE -ne 0) { throw "flutter pub get 失败" }
+    if ($LASTEXITCODE -ne 0) { throw "flutter pub get failed" }
 }
 finally {
     Pop-Location
 }
 
-Write-Host "完成：平台工程已生成，可以直接 flutter run / flutter build"
+Write-Host "Done. You can now run: flutter run / flutter build"

@@ -6,15 +6,34 @@ musicdl is imported lazily so that ``/api/health`` works even when the
 
 from __future__ import annotations
 
+import re
+import shutil
 import threading
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
+
+import requests
 
 from .config import SETTINGS, resolve_sources, source_label
 
 #: How long a search result stays addressable through /api/stream/{id}.
 ITEM_TTL_SECONDS = 3 * 60 * 60
+
+#: 相同关键词的搜索结果缓存时间，避免每次重新联网搜索。
+SEARCH_TTL_SECONDS = 10 * 60
+
+#: 搜索残留目录（只有 *.pkl）至少闲置这么久才清理，避免打断正在进行的下载。
+SEARCH_RESIDUE_MAX_AGE = 600
+
+AUDIO_SUFFIXES = {".mp3", ".flac", ".m4a", ".aac", ".wav", ".ogg", ".ape", ".wma", ".wv", ".tta"}
+
+#: 兜底请求用的浏览器 UA
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
 
 
 class SongNotFound(KeyError):
@@ -54,10 +73,16 @@ class MusicService:
         self._client: Any | None = None
         self._client_lock = threading.Lock()
         self._songs: dict[str, tuple[Any, float]] = {}
+        self._search_cache: dict[tuple[str, tuple[str, ...], int], tuple[list[dict[str, Any]], float]] = {}
+        self._search_locks: dict[tuple[str, tuple[str, ...], int], threading.Lock] = {}
         self._download_locks: dict[str, threading.Lock] = {}
         self._locks_guard = threading.Lock()
         self.work_dir = SETTINGS.work_dir
         self.work_dir.mkdir(parents=True, exist_ok=True)
+        #: musicdl 每次搜索都会新建 "<时间戳> <关键词>" 目录，所以下载完要
+        #: 把文件挪到这里，缓存才能跨搜索命中。
+        self.files_dir = SETTINGS.cache_dir / "files"
+        self.files_dir.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------ client
     @property
@@ -80,11 +105,54 @@ class MusicService:
             return self._client
 
     # ------------------------------------------------------------------ search
-    def search(self, keyword: str, sources: list[str] | None = None, limit: int | None = None) -> list[dict[str, Any]]:
+    def search(
+        self,
+        keyword: str,
+        sources: list[str] | None = None,
+        limit: int | None = None,
+        refresh: bool = False,
+    ) -> list[dict[str, Any]]:
         keyword = keyword.strip()
         if not keyword:
             return []
-        wanted = set(resolve_sources(sources)) if sources else set(resolve_sources(SETTINGS.sources))
+        selected = resolve_sources(sources) if sources else resolve_sources(SETTINGS.sources)
+        key = (keyword.lower(), tuple(sorted(selected)), limit or 0)
+        if not refresh:
+            cached = self._cached_search(key)
+            if cached is not None:
+                return cached
+        # 同一个关键词并发进来时只查一次，其余的等结果。
+        with self._search_lock(key):
+            if not refresh:
+                cached = self._cached_search(key)
+                if cached is not None:
+                    return cached
+            items = self._search_sources(keyword, set(selected), limit)
+            self._search_cache[key] = (items, time.time() + SEARCH_TTL_SECONDS)
+            self._purge_search_cache()
+            return [dict(item) for item in items]
+
+    def _cached_search(self, key: tuple[str, tuple[str, ...], int]) -> list[dict[str, Any]] | None:
+        entry = self._search_cache.get(key)
+        if entry is None or entry[1] < time.time():
+            return None
+        return [dict(item) for item in entry[0]]
+
+    def _search_lock(self, key: tuple[str, tuple[str, ...], int]) -> threading.Lock:
+        with self._locks_guard:
+            return self._search_locks.setdefault(key, threading.Lock())
+
+    def _purge_search_cache(self) -> None:
+        now = time.time()
+        for key in [k for k, (_, deadline) in self._search_cache.items() if deadline < now]:
+            self._search_cache.pop(key, None)
+        if len(self._search_cache) > 200:  # 兜底，避免无限增长
+            oldest = sorted(self._search_cache, key=lambda k: self._search_cache[k][1])[: len(self._search_cache) - 200]
+            for key in oldest:
+                self._search_cache.pop(key, None)
+
+    def _search_sources(self, keyword: str, wanted: set[str], limit: int | None) -> list[dict[str, Any]]:
+        self._prune_search_dirs()
         results = self.client.search(keyword) or {}
         items: list[dict[str, Any]] = []
         seen: set[str] = set()
@@ -122,16 +190,27 @@ class MusicService:
         return entry[0]
 
     def lyric(self, item_id: str) -> str:
-        return _clean(self.get_song(item_id).lyric, "")
+        song = self.get_song(item_id)
+        text = _clean(song.lyric)
+        if text:
+            return text
+        lrc = self.cache_path(song).with_suffix(".lrc")
+        if lrc.exists():
+            return lrc.read_text(encoding="utf-8", errors="ignore")
+        return ""
 
     def direct_url(self, item_id: str) -> dict[str, Any]:
         song = self.get_song(item_id)
         url = song.download_url
         if not isinstance(url, str) or not url.startswith("http"):
             raise DownloadFailed("该歌曲没有可直接播放的链接")
+        headers = {str(k): str(v) for k, v in dict(song.default_download_headers or {}).items()}
+        cookies = dict(song.default_download_cookies or {})
+        if cookies:
+            headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in cookies.items())
         return {
             "url": url,
-            "headers": dict(song.default_download_headers or {}),
+            "headers": headers,
             "ext": _clean(song.ext).lstrip("."),
         }
 
@@ -140,24 +219,174 @@ class MusicService:
         with self._locks_guard:
             return self._download_locks.setdefault(item_id, threading.Lock())
 
+    def cache_path(self, song: Any) -> Path:
+        """稳定的缓存文件名：<音源>_<id>.<格式>。"""
+        ext = _clean(song.ext).lstrip(".") or "mp3"
+        stem = re.sub(r'[\\/:*?"<>|]', "_", f"{song.source}_{song.identifier}")
+        return self.files_dir / f"{stem}.{ext}"
+
+    def _promote(self, source_path: Path, target: Path) -> Path:
+        """把 musicdl 下载的文件挪到稳定缓存路径，并清掉那次的时间戳目录。"""
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            if source_path.resolve() == target.resolve():
+                return target
+        except OSError:
+            pass
+        try:
+            shutil.move(str(source_path), str(target))
+        except OSError:
+            shutil.copyfile(source_path, target)
+        lyric_source, lyric_target = source_path.with_suffix(".lrc"), target.with_suffix(".lrc")
+        if lyric_source.exists() and not lyric_target.exists():
+            try:
+                shutil.move(str(lyric_source), str(lyric_target))
+            except OSError:
+                pass
+        self._prune(source_path.parent)
+        return target
+
+    def _prune(self, directory: Path) -> None:
+        """清理下载残留：只删 *.pkl 之类的记录文件，音频一律不动。
+
+        多首歌可能落在同一个时间戳目录里，所以只有目录真的空了才删目录。
+        """
+        work_dir = self.work_dir.resolve()
+        current = directory
+        while True:
+            try:
+                current = current.resolve()
+            except OSError:
+                return
+            if current == work_dir or work_dir not in current.parents:
+                return
+            try:
+                for leftover in current.iterdir():
+                    if leftover.is_file() and leftover.suffix.lower() not in AUDIO_SUFFIXES:
+                        leftover.unlink(missing_ok=True)
+                current.rmdir()
+            except OSError:
+                return
+            current = current.parent
+
+    def _prune_search_dirs(self) -> None:
+        """清掉 musicdl 每次搜索留下的 "<时间戳> <关键词>" 空壳目录（只剩 *.pkl）。"""
+        if not self.work_dir.exists():
+            return
+        now = time.time()
+        for source_dir in self.work_dir.iterdir():
+            if not source_dir.is_dir():
+                continue
+            for run_dir in source_dir.iterdir():
+                if not run_dir.is_dir():
+                    continue
+                try:
+                    if now - run_dir.stat().st_mtime < SEARCH_RESIDUE_MAX_AGE:
+                        continue
+                    files = [p for p in run_dir.iterdir() if p.is_file()]
+                except OSError:
+                    continue
+                if any(p.suffix.lower() in AUDIO_SUFFIXES for p in files):
+                    continue
+                for leftover in files:
+                    leftover.unlink(missing_ok=True)
+                try:
+                    run_dir.rmdir()
+                except OSError:
+                    pass
+
     def ensure_file(self, item_id: str) -> Path:
         """Download the song once and return the local path (safe for threads)."""
         song = self.get_song(item_id)
-        path = Path(song.save_path)
-        if path.exists() and path.stat().st_size > 0:
-            return path
+        target = self.cache_path(song)
+        if target.exists() and target.stat().st_size > 0:
+            return target
         with self._lock_for(item_id):
-            path = Path(song.save_path)
-            if path.exists() and path.stat().st_size > 0:
-                return path
+            if target.exists() and target.stat().st_size > 0:
+                return target
+            # 之前 musicdl 直接下到时间戳目录的情况，直接搬过来复用
+            legacy = self._legacy_path(song)
+            if legacy is not None and legacy.exists() and legacy.stat().st_size > 0:
+                return self._promote(legacy, target)
             try:
                 downloaded = self.client.download(song_infos=[song]) or []
             except Exception as exc:  # network / source side failure
                 raise DownloadFailed(str(exc)) from exc
-            for candidate in downloaded:
-                candidate_path = Path(candidate.save_path)
-                if candidate_path.exists() and candidate_path.stat().st_size > 0:
-                    return candidate_path
-            if path.exists() and path.stat().st_size > 0:
-                return path
+            for candidate in [*downloaded, song]:
+                candidate_path = self._legacy_path(candidate)
+                if candidate_path is not None and candidate_path.exists() and candidate_path.stat().st_size > 0:
+                    return self._promote(candidate_path, target)
             raise DownloadFailed("下载失败：音源未返回可用文件")
+
+    # ------------------------------------------------- 边下边播（未缓存时用）
+    def _legacy_path(self, song: Any) -> Path | None:
+        """musicdl 自己算出来的保存路径（没有就返回 None）。"""
+        try:
+            raw = song.save_path
+        except Exception:
+            return None
+        if not raw or not str(raw).strip():
+            return None
+        return Path(str(raw))
+
+    def cached_file(self, item_id: str) -> Path | None:
+        """已经下载好的文件就返回路径，否则返回 None（不会再触发下载）。"""
+        song = self.get_song(item_id)
+        target = self.cache_path(song)
+        if target.exists() and target.stat().st_size > 0:
+            return target
+        legacy = self._legacy_path(song)
+        if legacy is not None and legacy.exists() and legacy.stat().st_size > 0:
+            return self._promote(legacy, target)
+        return None
+
+    def open_upstream(self, item_id: str) -> tuple[Any, Path, Path]:
+        """连上音源直链，返回 (响应, 缓存目标, 临时文件)。
+
+        先拿到响应头再交给 StreamingResponse，这样上游报错还能正常返回 502。
+        请求走 musicdl 自己的会话（UA / cookies / 代理都已就绪），
+        直接用裸 requests 会被 CDN 403。
+        """
+        song = self.get_song(item_id)
+        url = song.download_url
+        if not isinstance(url, str) or not url.startswith("http"):
+            raise DownloadFailed("该歌曲没有可用下载链接")
+        headers = {str(k): str(v) for k, v in dict(song.default_download_headers or {}).items()}
+        cookies = dict(song.default_download_cookies or {})
+        kwargs: dict[str, Any] = {"stream": True, "timeout": (10, 30)}
+        if headers:
+            kwargs["headers"] = headers
+        if cookies:
+            kwargs["cookies"] = cookies
+        source_client = (getattr(self.client, "music_clients", None) or {}).get(song.source)
+        try:
+            if source_client is not None and hasattr(source_client, "get"):
+                response = source_client.get(url, **kwargs)
+            else:  # 兜底：至少带上 UA
+                response = requests.get(url, stream=True, timeout=(10, 30), headers=headers or {"User-Agent": USER_AGENT})
+            response.raise_for_status()
+        except Exception as exc:
+            raise DownloadFailed(str(exc)) from exc
+        target = self.cache_path(song)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        return response, target, target.with_name(target.name + ".part")
+
+    def relay(self, response: Any, target: Path, temp_path: Path, chunk_size: int = 512 * 1024) -> Iterator[bytes]:
+        """边吐给播放器边写缓存；中断就丢掉半截文件，不污染缓存。"""
+        expected = int(response.headers.get("Content-Length") or 0)
+        written, completed = 0, False
+        try:
+            with temp_path.open("wb") as fp:
+                for chunk in response.iter_content(chunk_size=chunk_size):
+                    if not chunk:
+                        continue
+                    fp.write(chunk)
+                    written += len(chunk)
+                    yield chunk
+            completed = written > 0 and (expected == 0 or written >= expected)
+        finally:
+            response.close()
+            if completed:
+                temp_path.replace(target)
+            else:
+                temp_path.unlink(missing_ok=True)

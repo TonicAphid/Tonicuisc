@@ -120,10 +120,11 @@ async def search(
     keyword: str = Query(..., min_length=1, description="搜索关键词"),
     sources: str | None = Query(None, description="逗号分隔，如 migu,kuwo"),
     limit: int = Query(50, ge=1, le=200),
+    refresh: bool = Query(False, description="true = 跳过服务端搜索缓存，强制重新联网搜索"),
 ) -> dict:
     source_list = [s for s in (sources or "").replace(" ", ",").split(",") if s] if sources else None
     try:
-        items = await asyncio.to_thread(get_service().search, keyword, source_list, limit)
+        items = await asyncio.to_thread(get_service().search, keyword, source_list, limit, refresh)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:  # musicdl network failures
@@ -133,6 +134,7 @@ async def search(
 
 @app.get("/api/url/{item_id:path}")
 async def direct_url(item_id: str) -> dict:
+    """音源直链：客户端可以直接连 CDN 播放，最快出声。"""
     try:
         return await asyncio.to_thread(get_service().direct_url, item_id)
     except SongNotFound:
@@ -151,8 +153,30 @@ async def lyric(item_id: str) -> PlainTextResponse:
 
 @app.get("/api/stream/{item_id:path}")
 async def stream(item_id: str, request: Request) -> StreamingResponse:
-    """Byte-range aware stream, required by AVPlayer / ExoPlayer style players."""
-    path = await _prepare(item_id)
+    """播放流。
+
+    已缓存：按 Range 读本地文件（206，支持拖动进度）。
+    未缓存：边从音源拉边播，同时写入缓存，所以第一次点歌不用等整首下完。
+    """
+    service = get_service()
+    try:
+        path = await asyncio.to_thread(service.cached_file, item_id)
+        upstream = None
+        if path is None:
+            upstream = await asyncio.to_thread(service.open_upstream, item_id)
+    except SongNotFound:
+        raise HTTPException(status_code=404, detail="歌曲不存在或已过期，请重新搜索")
+    except DownloadFailed as exc:
+        raise HTTPException(status_code=502, detail=f"音源下载失败: {exc}")
+
+    if upstream is not None:
+        response, target, temp_path = upstream
+        return StreamingResponse(
+            service.relay(response, target, temp_path),
+            media_type=MIME_TYPES.get(target.suffix.lstrip(".").lower(), "application/octet-stream"),
+            headers={"Accept-Ranges": "none"},
+        )
+
     size = path.stat().st_size
     media_type = MIME_TYPES.get(path.suffix.lstrip(".").lower(), "application/octet-stream")
     rng = _parse_range(request.headers.get("range"), size)
@@ -184,7 +208,8 @@ async def download(item_id: str) -> FileResponse:
         filename = f"{item['name']} - {item['singers']}.{item['ext']}"
     except SongNotFound:
         filename = path.name
-    ascii_name = filename.encode("ascii", "ignore").decode() or "audio"
+    stem = Path(filename).stem.encode("ascii", "ignore").decode().strip(" .-_")
+    ascii_name = f"{stem}{path.suffix}" if any(ch.isalnum() for ch in stem) else f"tonicuisc{path.suffix}"
     disposition = f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(filename)}"
     return FileResponse(
         path,

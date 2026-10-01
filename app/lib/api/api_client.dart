@@ -24,6 +24,13 @@ class ApiException implements Exception {
   String toString() => message;
 }
 
+/// 音源直链：客户端直接连 CDN，不用等服务端中转。
+class DirectSource {
+  const DirectSource(this.url, this.headers);
+  final String url;
+  final Map<String, String> headers;
+}
+
 class ApiClient {
   ApiClient(this.baseUrl);
 
@@ -64,6 +71,25 @@ class ApiClient {
   Uri streamUri(String id) => _uri('/api/stream/$id');
 
   Uri downloadUri(String id) => _uri('/api/download/$id');
+
+  /// 取音源直链；失败时抛 [ApiException]，调用方回退到服务端代理流。
+  Future<DirectSource> directUrl(String id) async {
+    final resp = await http.get(_uri('/api/url/$id')).timeout(const Duration(seconds: 20));
+    if (resp.statusCode != 200) {
+      throw ApiException(_messageOf(resp));
+    }
+    final data = jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
+    final url = (data['url'] ?? '').toString();
+    if (url.isEmpty) {
+      throw ApiException('音源没有返回直链');
+    }
+    final headers = <String, String>{};
+    final rawHeaders = data['headers'];
+    if (rawHeaders is Map) {
+      rawHeaders.forEach((key, value) => headers['$key'] = '$value');
+    }
+    return DirectSource(url, headers);
+  }
 
   Future<String> downloadTo(Song song, Directory dir) async {
     final resp = await http.get(downloadUri(song.id)).timeout(const Duration(minutes: 15));

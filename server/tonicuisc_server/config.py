@@ -66,7 +66,7 @@ class Settings:
     port: int = int(os.getenv("TONICUISC_PORT", "8000"))
     reload: bool = os.getenv("TONICUISC_RELOAD", "0") in {"1", "true", "yes"}
     sources: list[str] = field(default_factory=lambda: _env_list("TONICUISC_SOURCES", ["migu", "kuwo"]))
-    search_size: int = int(os.getenv("TONICUISC_SEARCH_SIZE", "15"))
+    search_size: int = int(os.getenv("TONICUISC_SEARCH_SIZE", "10"))
     cache_dir: Path = field(
         default_factory=lambda: Path(os.getenv("TONICUISC_CACHE_DIR", SERVER_DIR / ".cache")).resolve()
     )

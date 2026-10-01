@@ -197,7 +197,7 @@ class _HomePageState extends State<HomePage> {
                           ],
                         ),
                         selected: isCurrent,
-                        onTap: () => _player.play(song, _api.streamUri(song.id)),
+                        onTap: () => _player.play(song, _api),
                       );
                     },
                   ),

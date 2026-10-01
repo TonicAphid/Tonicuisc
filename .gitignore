@@ -5,6 +5,7 @@ __pycache__/
 venv/
 .pytest_cache/
 server/.cache/
+server/tests/_scratch/
 server/.env
 
 # ---- Flutter / 前端 ----
