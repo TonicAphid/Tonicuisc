@@ -1,0 +1,130 @@
+name: Build
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  desktop:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64
+            os: windows-latest
+            platform: windows
+            bundle: build/windows/x64/runner/Release
+            artifact: tonicuisc-windows-x64
+          - name: Linux x64
+            os: ubuntu-latest
+            platform: linux
+            bundle: build/linux/x64/release/bundle
+            artifact: tonicuisc-linux-x64
+          - name: macOS
+            os: macos-latest
+            platform: macos
+            bundle: build/macos/Build/Products/Release
+            artifact: tonicuisc-macos
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Linux 构建依赖
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev libstdc++-12-dev libmpv-dev
+
+      - name: 生成平台工程
+        working-directory: app
+        run: flutter create --project-name tonicuisc --org com.tonicuisc --platforms=${{ matrix.platform }} .
+
+      - name: 应用原生补丁（Windows）
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./tool/apply_patches.ps1
+
+      - name: 应用原生补丁（macOS / Linux）
+        if: runner.os != 'Windows'
+        run: bash ./tool/apply_patches.sh
+
+      - name: 安装依赖
+        working-directory: app
+        run: flutter pub get
+
+      - name: 静态检查
+        working-directory: app
+        run: flutter analyze --no-fatal-infos --no-fatal-warnings
+
+      - name: 构建
+        working-directory: app
+        run: flutter build ${{ matrix.platform }} --release
+
+      - name: 打包 (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: Compress-Archive -Path "${{ matrix.bundle }}" -DestinationPath "tonicuisc-windows-x64.zip" -Force
+
+      - name: 打包 (Linux)
+        if: matrix.platform == 'linux'
+        run: tar -C "$(dirname ${{ matrix.bundle }})" -czf tonicuisc-linux-x64.tar.gz "$(basename ${{ matrix.bundle }})"
+
+      - name: 打包 (macOS)
+        if: matrix.platform == 'macos'
+        run: |
+          cd "${{ matrix.bundle }}"
+          zip -qry "$GITHUB_WORKSPACE/tonicuisc-macos.zip" tonicuisc.app
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: tonicuisc-*
+          if-no-files-found: error
+
+  ios:
+    name: iOS (未签名)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: 生成 iOS 工程
+        working-directory: app
+        run: flutter create --project-name tonicuisc --org com.tonicuisc --platforms=ios .
+
+      - name: 应用原生补丁
+        run: bash ./tool/apply_patches.sh
+
+      - name: 安装依赖
+        working-directory: app
+        run: flutter pub get
+
+      - name: 构建（不签名）
+        working-directory: app
+        run: flutter build ios --release --no-codesign
+
+      - name: 打包为 ipa
+        run: |
+          mkdir -p Payload
+          cp -R app/build/ios/iphoneos/Runner.app Payload/
+          zip -qry tonicuisc-ios-unsigned.ipa Payload
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tonicuisc-ios-unsigned
+          path: tonicuisc-ios-unsigned.ipa
+          if-no-files-found: error

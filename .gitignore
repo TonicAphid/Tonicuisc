@@ -1,0 +1,36 @@
+# ---- Python / 后端 ----
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+server/.cache/
+server/.env
+
+# ---- Flutter / 前端 ----
+app/.dart_tool/
+app/.flutter-plugins
+app/.flutter-plugins-dependencies
+app/.packages
+app/build/
+app/pubspec.lock
+app/**/Flutter/ephemeral/
+app/**/GeneratedPluginRegistrant.*
+app/ios/Pods/
+app/ios/.symlinks/
+app/macos/Pods/
+app/macos/.symlinks/
+app/macos/Flutter/ephemeral/
+app/windows/flutter/ephemeral/
+app/linux/flutter/ephemeral/
+app/windows/flutter/generated_*
+app/linux/flutter/generated_*
+
+# ---- 原生构建产物 ----
+app/android/.gradle/
+
+# ---- 其他 ----
+.tmp/
+.DS_Store
+Thumbs.db
+*.log

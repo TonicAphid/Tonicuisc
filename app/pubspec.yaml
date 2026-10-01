@@ -1,0 +1,26 @@
+name: tonicuisc
+description: Tonicuisc - 咪咕/酷我 音乐播放器（Windows / Linux / macOS / iOS）
+publish_to: "none"
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.4.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  http: ^1.2.0
+  just_audio: ^0.9.40
+  # Windows / Linux 上为 just_audio 提供播放后端
+  just_audio_media_kit: ^2.0.5
+  media_kit_libs_audio: ^1.0.5
+  path_provider: ^2.1.3
+  shared_preferences: ^2.2.3
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true
