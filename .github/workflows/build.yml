@@ -73,16 +73,16 @@ jobs:
       - name: 打包 (Windows)
         if: matrix.platform == 'windows'
         shell: pwsh
-        run: Compress-Archive -Path "${{ matrix.bundle }}" -DestinationPath "tonicuisc-windows-x64.zip" -Force
+        run: Compress-Archive -Path "app/${{ matrix.bundle }}" -DestinationPath "tonicuisc-windows-x64.zip" -Force
 
       - name: 打包 (Linux)
         if: matrix.platform == 'linux'
-        run: tar -C "$(dirname ${{ matrix.bundle }})" -czf tonicuisc-linux-x64.tar.gz "$(basename ${{ matrix.bundle }})"
+        run: tar -C "app/$(dirname ${{ matrix.bundle }})" -czf tonicuisc-linux-x64.tar.gz "$(basename ${{ matrix.bundle }})"
 
       - name: 打包 (macOS)
         if: matrix.platform == 'macos'
         run: |
-          cd "${{ matrix.bundle }}"
+          cd "app/${{ matrix.bundle }}"
           zip -qry "$GITHUB_WORKSPACE/tonicuisc-macos.zip" tonicuisc.app
 
       - uses: actions/upload-artifact@v4
