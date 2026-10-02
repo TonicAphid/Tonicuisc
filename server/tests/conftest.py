@@ -18,7 +18,7 @@ SCRATCH = Path(__file__).resolve().parent / "_scratch"
 
 @pytest.fixture()
 def app_env():
-    """临时 SQLite + 已生成配对码的 AuthManager + 临时的 MusicService。"""
+    """临时 SQLite + AuthManager + 临时的 MusicService。"""
     root = SCRATCH / uuid.uuid4().hex
     root.mkdir(parents=True, exist_ok=True)
     store = Storage(root / "test.db")
@@ -32,11 +32,10 @@ def app_env():
     service.files_dir.mkdir(parents=True, exist_ok=True)
 
     auth = AuthManager(store, ttl=300)
-    code, _ = auth.current_code()
     main_module._service = service
     main_module._auth = auth
     try:
-        yield {"service": service, "auth": auth, "code": code, "store": store, "root": root}
+        yield {"service": service, "auth": auth, "store": store, "root": root}
     finally:
         main_module._service = None
         main_module._auth = None

@@ -64,6 +64,8 @@ def resolve_sources(aliases: list[str]) -> list[str]:
 class Settings:
     host: str = os.getenv("TONICUISC_HOST", "0.0.0.0")
     port: int = int(os.getenv("TONICUISC_PORT", "8000"))
+    #: 对外地址，用来在启动横幅里打印登录链接，例如 https://106-35-196-104.nip.io
+    public_url: str = os.getenv("TONICUISC_PUBLIC_URL", "").strip()
     reload: bool = os.getenv("TONICUISC_RELOAD", "0") in {"1", "true", "yes"}
     sources: list[str] = field(default_factory=lambda: _env_list("TONICUISC_SOURCES", ["migu", "kuwo"]))
     #: 每个音源要多少首
@@ -74,8 +76,8 @@ class Settings:
     search_threads: int = int(os.getenv("TONICUISC_SEARCH_THREADS", "10"))
     #: 设备级 API Key 校验（关闭后任何人都能调用接口）
     auth_enabled: bool = os.getenv("TONICUISC_AUTH", "1").lower() not in {"0", "false", "no", "off"}
-    #: 配对码有效期（秒）
-    pairing_ttl: int = int(os.getenv("TONICUISC_PAIRING_TTL", "300"))
+    #: 设备码（登录请求）有效期（秒）
+    device_code_ttl: int = int(os.getenv("TONICUISC_DEVICE_CODE_TTL", "600"))
     cache_dir: Path = field(
         default_factory=lambda: Path(os.getenv("TONICUISC_CACHE_DIR", SERVER_DIR / ".cache")).resolve()
     )

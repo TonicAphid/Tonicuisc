@@ -25,12 +25,21 @@ def _format_time(value: float | None) -> str:
 def _devices_command(store) -> int:
     devices = store.list_devices()
     if not devices:
-        print("还没有配对设备")
+        print("还没有已登录设备")
         return 0
-    print(f"{'设备 ID':<34}{'名称':<18}{'状态':<8}最后使用")
+    print(f"{'设备 ID':<34}{'名称':<16}{'账户':<14}{'状态':<8}最后使用")
     for device in devices:
         state = "已吊销" if device.get("revoked") else "正常"
-        print(f"{device['id']:<34}{str(device.get('name'))[:16]:<18}{state:<8}{_format_time(device.get('last_seen'))}")
+        name = str(device.get("name") or "-")[:14]
+        user = str(device.get("username") or "-")[:12]
+        print(f"{device['id']:<34}{name:<16}{user:<14}{state:<8}{_format_time(device.get('last_seen'))}")
+
+    users = store.list_users()
+    if users:
+        print("\n账户：")
+        for user in users:
+            print(f"  {user['username']:<16}创建于 {_format_time(user.get('created_at'))}"
+                  f"  最后登录 {_format_time(user.get('last_login_at'))}")
     return 0
 
 

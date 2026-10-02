@@ -9,6 +9,7 @@ class Credentials {
   static const String _apiKeyKey = 'tonicuisc_api_key';
   static const String _deviceIdKey = 'tonicuisc_device_id';
   static const String _deviceNameKey = 'tonicuisc_device_name';
+  static const String _usernameKey = 'tonicuisc_username';
 
   static const FlutterSecureStorage _storage = FlutterSecureStorage(
     aOptions: AndroidOptions(encryptedSharedPreferences: true),
@@ -19,20 +20,26 @@ class Credentials {
   static Future<String?> apiKey() => _storage.read(key: _apiKeyKey);
   static Future<String?> deviceId() => _storage.read(key: _deviceIdKey);
   static Future<String?> deviceName() => _storage.read(key: _deviceNameKey);
+  static Future<String?> username() => _storage.read(key: _usernameKey);
 
   static Future<void> save({
     required String apiKey,
     required String deviceId,
     required String deviceName,
+    String? username,
   }) async {
     await _storage.write(key: _apiKeyKey, value: apiKey);
     await _storage.write(key: _deviceIdKey, value: deviceId);
     await _storage.write(key: _deviceNameKey, value: deviceName);
+    if (username != null && username.isNotEmpty) {
+      await _storage.write(key: _usernameKey, value: username);
+    }
   }
 
   static Future<void> clear() async {
     await _storage.delete(key: _apiKeyKey);
     await _storage.delete(key: _deviceIdKey);
     await _storage.delete(key: _deviceNameKey);
+    await _storage.delete(key: _usernameKey);
   }
 }

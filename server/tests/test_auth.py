@@ -1,4 +1,4 @@
-"""AuthManager 单元测试：配对码一次性、过期、哈希校验。"""
+"""AuthManager 单元测试：密码哈希、设备码流程、key 只存哈希。"""
 
 from __future__ import annotations
 
@@ -9,7 +9,15 @@ from pathlib import Path
 
 import pytest
 
-from tonicuisc_server.auth import AuthManager, hash_key, new_api_key
+from tonicuisc_server.auth import (
+    AuthManager,
+    hash_key,
+    hash_password,
+    new_api_key,
+    new_user_code,
+    normalize_user_code,
+    verify_password,
+)
 from tonicuisc_server.storage import Storage
 
 
@@ -26,37 +34,106 @@ def auth():
         shutil.rmtree(root, ignore_errors=True)
 
 
-def test_pairing_code_format(auth: AuthManager) -> None:
-    code, expires = auth.current_code()
-    assert len(code) == 6 and code.isdigit()
-    assert expires > time.time()
+# ------------------------------------------------------------------ 密码
+def test_password_hash_roundtrip() -> None:
+    stored = hash_password("hunter2x")
+    assert stored.startswith("pbkdf2_sha256$")
+    assert "hunter2x" not in stored
+    assert verify_password("hunter2x", stored)
+    assert not verify_password("wrong", stored)
+    assert not verify_password("hunter2x", "garbage")
 
 
-def test_pair_returns_key_once(auth: AuthManager) -> None:
-    code, _ = auth.current_code()
-    result = auth.pair(code, "手机")
-    assert result is not None
-    assert len(result["api_key"]) >= 32
-
-    # 配对码用过就废
-    assert auth.pair(code, "另一台") is None
+def test_password_hash_uses_random_salt() -> None:
+    assert hash_password("same") != hash_password("same")
 
 
-def test_wrong_code_rejected(auth: AuthManager) -> None:
-    code, _ = auth.current_code()
-    wrong = "000000" if code != "000000" else "111111"
-    assert auth.pair(wrong, "陌生人") is None
+# ------------------------------------------------------------------ 用户名
+def test_register_and_authenticate(auth: AuthManager) -> None:
+    user = auth.register("aphid", "hunter2x")
+    assert user is not None and user["username"] == "aphid"
+
+    assert auth.authenticate("aphid", "hunter2x") is not None
+    assert auth.authenticate("aphid", "bad") is None
+    assert auth.authenticate("nobody", "hunter2x") is None
 
 
-def test_expired_code_rejected(auth: AuthManager) -> None:
-    code, _ = auth.current_code()
-    auth._code_expires = time.time() - 1  # 手动过期
-    assert auth.pair(code, "迟到的设备") is None
+def test_register_rejects_bad_input(auth: AuthManager) -> None:
+    assert auth.register("a", "hunter2x") is None  # 用户名太短
+    assert auth.register("bad name", "hunter2x") is None  # 含空格
+    assert auth.register("aphid", "123") is None  # 密码太短
+    assert auth.register("aphid", "hunter2x") is not None
+    assert auth.register("aphid", "hunter2x") is None  # 重名
 
 
-def test_verify_accepts_own_key_only(auth: AuthManager) -> None:
-    code, _ = auth.current_code()
-    api_key = auth.pair(code, "手机")["api_key"]
+def test_user_list_has_no_password(auth: AuthManager) -> None:
+    auth.register("aphid", "hunter2x")
+    users = auth.users()
+    assert users and "password_hash" not in users[0]
+
+
+# ------------------------------------------------------------------ 设备码
+def test_user_code_format() -> None:
+    code = new_user_code()
+    assert len(code) == 9 and code[4] == "-"
+    assert normalize_user_code(code.lower().replace("-", "")) == code
+
+
+def test_device_flow_grants_key_once(auth: AuthManager) -> None:
+    code, secret = new_user_code(), "poll-secret-value"
+    assert auth.start_device_request(code, secret, "手机") is not None
+    assert auth.request_status(code, secret)["status"] == "pending"
+
+    user = auth.register("aphid", "hunter2x")
+    assert auth.approve(code, user["id"]) is True
+
+    granted = auth.request_status(code, secret)
+    assert granted["status"] == "approved"
+    assert granted["username"] == "aphid"
+    assert auth.verify(granted["api_key"]) is not None
+
+    # 再问一次就不给了
+    assert auth.request_status(code, secret)["status"] == "claimed"
+
+
+def test_device_flow_rejects_wrong_secret(auth: AuthManager) -> None:
+    code = new_user_code()
+    auth.start_device_request(code, "right-secret", "手机")
+    assert auth.request_status(code, "wrong-secret")["status"] == "expired"
+    assert auth.request_status(code, "right-secret")["status"] == "pending"
+
+
+def test_device_flow_rejects_duplicate_code(auth: AuthManager) -> None:
+    code = new_user_code()
+    assert auth.start_device_request(code, "secret-1", "A") is not None
+    assert auth.start_device_request(code, "secret-2", "B") is None
+
+
+def test_device_flow_rejects_bad_code(auth: AuthManager) -> None:
+    assert auth.start_device_request("nope", "secret-1", "A") is None
+    assert auth.request_status("nope", "secret-1")["status"] == "expired"
+
+
+def test_unapproved_code_gives_no_key(auth: AuthManager) -> None:
+    code, secret = new_user_code(), "poll-secret-value"
+    auth.start_device_request(code, secret, "手机")
+    status = auth.request_status(code, secret)
+    assert status["status"] == "pending" and "api_key" not in status
+
+
+def test_denied_request(auth: AuthManager) -> None:
+    code, secret = new_user_code(), "poll-secret-value"
+    auth.start_device_request(code, secret, "手机")
+    assert auth.deny(code) is True
+    assert auth.request_status(code, secret)["status"] == "denied"
+
+
+def test_verify_accepts_only_own_key(auth: AuthManager) -> None:
+    code, secret = new_user_code(), "poll-secret-value"
+    auth.start_device_request(code, secret, "手机")
+    user = auth.register("aphid", "hunter2x")
+    auth.approve(code, user["id"])
+    api_key = auth.request_status(code, secret)["api_key"]
 
     assert auth.verify(api_key) is not None
     assert auth.verify(new_api_key()) is None
@@ -64,23 +141,16 @@ def test_verify_accepts_own_key_only(auth: AuthManager) -> None:
     assert auth.verify(None) is None
 
 
-def test_revoked_device_fails_verify(auth: AuthManager) -> None:
-    code, _ = auth.current_code()
-    result = auth.pair(code, "手机")
-    assert auth.verify(result["api_key"]) is not None
-
-    auth.storage.revoke_device(result["device_id"])
-    assert auth.verify(result["api_key"]) is None
-
-
-def test_storage_keeps_only_hash(auth: AuthManager) -> None:
-    code, _ = auth.current_code()
-    api_key = auth.pair(code, "手机")["api_key"]
+def test_devices_store_only_hash(auth: AuthManager) -> None:
+    code, secret = new_user_code(), "poll-secret-value"
+    auth.start_device_request(code, secret, "手机")
+    user = auth.register("aphid", "hunter2x")
+    auth.approve(code, user["id"])
+    api_key = auth.request_status(code, secret)["api_key"]
 
     device = auth.storage.find_device_by_hash(hash_key(api_key))
     assert device is not None
     assert device["key_hash"] == hash_key(api_key)
-    assert api_key not in device["key_hash"]
-
-    listed = auth.storage.list_devices()
-    assert listed and "key_hash" not in listed[0], "列设备时不能带出哈希"
+    assert device["username"] == "aphid"
+    assert "api_key" not in auth.storage.list_devices()[0]
+    assert "key_hash" not in auth.storage.list_devices()[0]

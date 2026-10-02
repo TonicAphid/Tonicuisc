@@ -37,6 +37,14 @@ class PairResult {
   final String deviceName;
 }
 
+/// 设备码登录：`POST /api/device/start` 的返回。
+class DeviceLoginStart {
+  const DeviceLoginStart({required this.userCode, required this.expiresIn, required this.loginPath});
+  final String userCode;
+  final int expiresIn;
+  final String loginPath;
+}
+
 /// 音源直链：客户端直接连 CDN，不用等服务端中转。
 class DirectSource {
   const DirectSource(this.url, this.headers);
@@ -91,6 +99,48 @@ class ApiClient {
       deviceId: (data['device_id'] ?? '').toString(),
       deviceName: (data['name'] ?? '').toString(),
     );
+  }
+
+  /// 设备码登录第一步：把 App 生成的设备码登记到服务端。
+  static Future<DeviceLoginStart> startDeviceLogin({
+    required String baseUrl,
+    required String userCode,
+    required String pollSecret,
+    required String deviceName,
+  }) async {
+    final resp = await http
+        .post(
+          Uri.parse('${normalizeBaseUrl(baseUrl)}/api/device/start'),
+          headers: {'Content-Type': 'application/json'},
+          body: jsonEncode({'user_code': userCode, 'poll_secret': pollSecret, 'name': deviceName}),
+        )
+        .timeout(const Duration(seconds: 20));
+    if (resp.statusCode != 200) {
+      throw ApiException(_detailOf(resp, 'HTTP ${resp.statusCode}'));
+    }
+    final data = jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
+    return DeviceLoginStart(
+      userCode: (data['user_code'] ?? userCode).toString(),
+      expiresIn: (data['expires_in'] as num?)?.toInt() ?? 0,
+      loginPath: (data['login_path'] ?? '/login').toString(),
+    );
+  }
+
+  /// 设备码登录第二步：轮询状态；approved 时会带一次 api_key。
+  static Future<Map<String, dynamic>> deviceStatus({
+    required String baseUrl,
+    required String userCode,
+    required String pollSecret,
+  }) async {
+    final uri = Uri.parse('${normalizeBaseUrl(baseUrl)}/api/device/status').replace(queryParameters: {
+      'user_code': userCode,
+      'poll_secret': pollSecret,
+    });
+    final resp = await http.get(uri).timeout(const Duration(seconds: 20));
+    if (resp.statusCode != 200) {
+      throw ApiException(_detailOf(resp, 'HTTP ${resp.statusCode}'));
+    }
+    return jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
   }
 
   static Future<String> loadBaseUrl() async {
@@ -179,6 +229,27 @@ class ApiClient {
     final detail = _messageOf(resp);
     if (resp.statusCode == 401) return UnauthorizedException(detail);
     return ApiException(detail);
+  }
+
+  /// 「我的」页面：当前账户 + 本设备信息。
+  Future<Map<String, dynamic>> me() async {
+    final resp = await http.get(_uri('/api/me'), headers: _headers).timeout(const Duration(seconds: 20));
+    if (resp.statusCode != 200) throw _errorOf(resp);
+    return jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
+  }
+
+  /// 已登录设备列表。
+  Future<List<Map<String, dynamic>>> devices() async {
+    final resp = await http.get(_uri('/api/devices'), headers: _headers).timeout(const Duration(seconds: 20));
+    if (resp.statusCode != 200) throw _errorOf(resp);
+    final data = jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
+    return ((data['items'] as List?) ?? const []).map((e) => (e as Map).cast<String, dynamic>()).toList();
+  }
+
+  /// 吊销某台设备（不需要知道它的 key）。
+  Future<void> revokeDevice(String deviceId) async {
+    final resp = await http.delete(_uri('/api/devices/$deviceId'), headers: _headers).timeout(const Duration(seconds: 20));
+    if (resp.statusCode != 200) throw _errorOf(resp);
   }
 
   String _messageOf(http.Response resp) {

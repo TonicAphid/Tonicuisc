@@ -51,7 +51,30 @@ CREATE TABLE IF NOT EXISTS devices (
     key_hash   TEXT NOT NULL UNIQUE,
     created_at REAL NOT NULL,
     last_seen  REAL,
-    revoked    INTEGER NOT NULL DEFAULT 0
+    revoked    INTEGER NOT NULL DEFAULT 0,
+    user_id    TEXT
+);
+
+CREATE TABLE IF NOT EXISTS users (
+    id            TEXT PRIMARY KEY,
+    username      TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    password_hash TEXT NOT NULL,
+    created_at    REAL NOT NULL,
+    last_login_at REAL
+);
+
+-- 设备码登录的中间状态：App 生成 user_code，用户在 /login 批准
+CREATE TABLE IF NOT EXISTS device_requests (
+    user_code   TEXT PRIMARY KEY,
+    poll_hash   TEXT NOT NULL,
+    device_name TEXT,
+    status      TEXT NOT NULL DEFAULT 'pending',
+    created_at  REAL NOT NULL,
+    expires_at  REAL NOT NULL,
+    user_id     TEXT,
+    api_key     TEXT,
+    device_id   TEXT,
+    claimed_at  REAL
 );
 
 CREATE TABLE IF NOT EXISTS searches (
@@ -94,7 +117,14 @@ class Storage:
         with self._lock:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.executescript(SCHEMA)
+            self._migrate()
             self._conn.commit()
+
+    def _migrate(self) -> None:
+        """老库补列（已经有的表不重建）。"""
+        columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(devices)")}
+        if "user_id" not in columns:
+            self._conn.execute("ALTER TABLE devices ADD COLUMN user_id TEXT")
 
     def close(self) -> None:
         with self._lock:
@@ -244,21 +274,35 @@ class Storage:
         return [row["song_id"] for row in rows]
 
     # ---------------------------------------------------------------- devices
-    def create_device(self, name: str, key_hash: str, device_id: str | None = None) -> dict[str, Any]:
-        """只存 key 的哈希，明文 key 永远不落库。"""
+    def create_device(
+        self,
+        name: str,
+        key_hash: str,
+        device_id: str | None = None,
+        user_id: str | None = None,
+    ) -> dict[str, Any]:
+        """只存 key 的哈希，明文 key 不落库。"""
         device_id = device_id or uuid.uuid4().hex
         now = time.time()
         with self._lock:
             self._conn.execute(
-                "INSERT INTO devices (id, name, key_hash, created_at, last_seen, revoked) VALUES (?, ?, ?, ?, ?, 0)",
-                (device_id, name, key_hash, now, now),
+                "INSERT INTO devices (id, name, key_hash, created_at, last_seen, revoked, user_id)"
+                " VALUES (?, ?, ?, ?, ?, 0, ?)",
+                (device_id, name, key_hash, now, now, user_id),
             )
             self._conn.commit()
-        return {"id": device_id, "name": name, "created_at": now, "last_seen": now, "revoked": 0}
+        return {"id": device_id, "name": name, "created_at": now, "last_seen": now, "revoked": 0, "user_id": user_id}
 
     def find_device_by_hash(self, key_hash: str) -> dict[str, Any] | None:
         with self._lock:
-            row = self._conn.execute("SELECT * FROM devices WHERE key_hash = ?", (key_hash,)).fetchone()
+            row = self._conn.execute(
+                """
+                SELECT devices.*, users.username AS username
+                FROM devices LEFT JOIN users ON users.id = devices.user_id
+                WHERE devices.key_hash = ?
+                """,
+                (key_hash,),
+            ).fetchone()
         return dict(row) if row is not None else None
 
     def touch_device(self, device_id: str) -> None:
@@ -268,7 +312,13 @@ class Storage:
 
     def list_devices(self) -> list[dict[str, Any]]:
         with self._lock:
-            rows = self._conn.execute("SELECT * FROM devices ORDER BY created_at").fetchall()
+            rows = self._conn.execute(
+                """
+                SELECT devices.*, users.username AS username
+                FROM devices LEFT JOIN users ON users.id = devices.user_id
+                ORDER BY devices.created_at
+                """
+            ).fetchall()
         return [{k: v for k, v in dict(row).items() if k != "key_hash"} for row in rows]
 
     def revoke_device(self, device_id: str) -> bool:
@@ -276,3 +326,102 @@ class Storage:
             cursor = self._conn.execute("UPDATE devices SET revoked = 1 WHERE id = ?", (device_id,))
             self._conn.commit()
             return cursor.rowcount > 0
+
+    # ------------------------------------------------------------------ users
+    def create_user(self, username: str, password_hash: str, user_id: str | None = None) -> dict[str, Any] | None:
+        """用户名已存在时返回 None。"""
+        user_id = user_id or uuid.uuid4().hex
+        now = time.time()
+        with self._lock:
+            try:
+                self._conn.execute(
+                    "INSERT INTO users (id, username, password_hash, created_at) VALUES (?, ?, ?, ?)",
+                    (user_id, username, password_hash, now),
+                )
+                self._conn.commit()
+            except sqlite3.IntegrityError:
+                return None
+        return {"id": user_id, "username": username, "created_at": now}
+
+    def find_user(self, username: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM users WHERE username = ?", (username.strip(),)).fetchone()
+        return dict(row) if row is not None else None
+
+    def get_user(self, user_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        return dict(row) if row is not None else None
+
+    def list_users(self) -> list[dict[str, Any]]:
+        """给登录页用；不带密码哈希。"""
+        with self._lock:
+            rows = self._conn.execute("SELECT id, username, created_at, last_login_at FROM users ORDER BY created_at").fetchall()
+        return [dict(row) for row in rows]
+
+    def touch_user_login(self, user_id: str) -> None:
+        with self._lock:
+            self._conn.execute("UPDATE users SET last_login_at = ? WHERE id = ?", (time.time(), user_id))
+            self._conn.commit()
+
+    # --------------------------------------------------------- device requests
+    def create_device_request(
+        self,
+        user_code: str,
+        poll_hash: str,
+        device_name: str,
+        ttl: float,
+    ) -> dict[str, Any] | None:
+        """user_code 已被占用（且未过期）时返回 None，让 App 换一个码。"""
+        now = time.time()
+        with self._lock:
+            self._conn.execute("DELETE FROM device_requests WHERE expires_at < ?", (now,))
+            try:
+                self._conn.execute(
+                    "INSERT INTO device_requests (user_code, poll_hash, device_name, status, created_at, expires_at)"
+                    " VALUES (?, ?, ?, 'pending', ?, ?)",
+                    (user_code, poll_hash, device_name, now, now + ttl),
+                )
+                self._conn.commit()
+            except sqlite3.IntegrityError:
+                return None
+        return {"user_code": user_code, "device_name": device_name, "expires_at": now + ttl}
+
+    def get_device_request(self, user_code: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM device_requests WHERE user_code = ?", (user_code,)).fetchone()
+        return dict(row) if row is not None else None
+
+    def approve_device_request(
+        self,
+        user_code: str,
+        user_id: str,
+        api_key: str,
+        device_id: str,
+    ) -> bool:
+        """批准：把明文 key 暂存在请求行里，等 App 取走后清掉。"""
+        with self._lock:
+            cursor = self._conn.execute(
+                "UPDATE device_requests SET status = 'approved', user_id = ?, api_key = ?, device_id = ?"
+                " WHERE user_code = ? AND status = 'pending' AND expires_at > ?",
+                (user_id, api_key, device_id, user_code, time.time()),
+            )
+            self._conn.commit()
+            return cursor.rowcount > 0
+
+    def deny_device_request(self, user_code: str) -> bool:
+        with self._lock:
+            cursor = self._conn.execute(
+                "UPDATE device_requests SET status = 'denied' WHERE user_code = ? AND status = 'pending'",
+                (user_code,),
+            )
+            self._conn.commit()
+            return cursor.rowcount > 0
+
+    def clear_device_request_key(self, user_code: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE device_requests SET api_key = NULL, claimed_at = ? WHERE user_code = ?",
+                (time.time(), user_code),
+            )
+            self._conn.commit()

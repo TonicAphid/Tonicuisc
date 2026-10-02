@@ -18,14 +18,15 @@ import time
 from collections.abc import Iterator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from .auth import API_KEY_HEADER, PUBLIC_PATHS, AuthManager, code_banner
+from . import weblogin
+from .auth import API_KEY_HEADER, PUBLIC_PATHS, AuthManager
 from .config import SETTINGS, SOURCE_ALIASES, resolve_sources, source_label
 from .service import DownloadFailed, MusicService, SongNotFound, song_to_item
 
@@ -43,10 +44,9 @@ MIME_TYPES = {
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """启动时打印一次性配对码。"""
+    """启动时提示登录地址。"""
     auth = get_auth()
-    code, _ = auth.current_code()
-    print(code_banner(code, auth.ttl, enabled=auth.enabled), flush=True)
+    print(login_banner(SETTINGS, enabled=auth.enabled), flush=True)
     yield
 
 
@@ -59,6 +59,23 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["Content-Range", "Accept-Ranges", "Content-Length", "Content-Disposition"],
 )
+
+
+def login_banner(settings, enabled: bool = True) -> str:
+    """启动横幅：告诉用户去哪登录。"""
+    if not enabled:
+        return (
+            "\n" + "=" * 56 + "\n"
+            "  警告：API Key 校验已关闭 (TONICUISC_AUTH=0)\n"
+            "  任何人都能调用本服务的接口\n" + "=" * 56
+        )
+    base = settings.public_url or f"http://{settings.host}:{settings.port}"
+    return (
+        "\n" + "=" * 56 + "\n"
+        "  Tonicuisc 服务已启动\n"
+        f"  登录页: {base.rstrip('/')}/login\n"
+        "  在 App 里点「登录」拿到设备码，再用手机浏览器打开上面的链接\n" + "=" * 56
+    )
 
 
 @app.middleware("http")
@@ -153,19 +170,66 @@ async def health() -> dict:
     }
 
 
-class PairRequest(BaseModel):
-    code: str = Field(..., min_length=1, max_length=12, description="控制台打印的一次性配对码")
-    name: str = Field("", max_length=60, description="设备名，方便以后辨认")
+class DeviceStartRequest(BaseModel):
+    user_code: str = Field(..., min_length=8, max_length=12, description="App 生成的设备码，如 A1B1-C1D1")
+    poll_secret: str = Field(..., min_length=8, description="只有 App 知道的轮询密钥，别显示给用户")
+    name: str = Field("", max_length=60, description="设备名")
 
 
-@app.post("/api/pair")
-async def pair(payload: PairRequest) -> dict:
-    """用一次性配对码换一把本设备专属的 API Key（明文只在这里出现一次）。"""
-    result = await asyncio.to_thread(get_auth().pair, payload.code, payload.name)
+class DeviceStatus(BaseModel):
+    status: str
+
+
+@app.post("/api/device/start")
+async def device_start(payload: DeviceStartRequest) -> dict:
+    """App 发起登录：登记设备码，等待用户在 /login 批准。"""
+    result = await asyncio.to_thread(
+        get_auth().start_device_request, payload.user_code, payload.poll_secret, payload.name
+    )
     if result is None:
-        raise HTTPException(status_code=401, detail="配对码错误或已过期，请在服务端控制台重新获取")
-    print(f"[pair] 新设备已配对: {result['name']} ({result['device_id'][:8]}…)", flush=True)
-    return result
+        raise HTTPException(status_code=409, detail="设备码格式不对或已被占用，请重新生成")
+    return {
+        "user_code": result["user_code"],
+        "expires_in": max(int(result["expires_at"] - time.time()), 0),
+        "login_path": "/login",
+    }
+
+
+@app.get("/api/device/status")
+async def device_status(
+    user_code: str = Query(..., min_length=8, max_length=12),
+    poll_secret: str = Query(..., min_length=8),
+) -> dict:
+    """App 轮询：pending / approved（带 api_key，只给一次） / denied / expired / claimed。"""
+    return await asyncio.to_thread(get_auth().request_status, user_code, poll_secret)
+
+
+@app.get("/api/me")
+async def me(request: Request) -> dict:
+    """「我的」页面用：当前账户 + 本设备信息。"""
+    device = getattr(request.state, "device", {}) or {}
+    return {
+        "device_id": device.get("id"),
+        "device_name": device.get("name"),
+        "username": device.get("username"),
+        "user_id": device.get("user_id"),
+        "created_at": device.get("created_at"),
+        "last_seen": device.get("last_seen"),
+    }
+
+
+@app.get("/login", response_class=HTMLResponse)
+async def login_page() -> HTMLResponse:
+    """设备码登录页（浏览器打开）。"""
+    return HTMLResponse(weblogin.code_step(), headers={"Cache-Control": "no-store"})
+
+
+@app.post("/login", response_class=HTMLResponse)
+async def login_submit(request: Request) -> HTMLResponse:
+    raw = (await request.body()).decode("utf-8", "ignore")
+    form = {key: values[0] for key, values in parse_qs(raw).items() if values}
+    page = await asyncio.to_thread(weblogin.render, form, get_auth())
+    return HTMLResponse(page, headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/devices")

@@ -51,7 +51,8 @@ python -m tonicuisc_server          # 默认 0.0.0.0:8000
 | `TONICUISC_SEARCH_SIZE_PER_PAGE` | `1` | 每个请求取几条；`1` = 10 条拆成 10 个请求并行拿 |
 | `TONICUISC_SEARCH_THREADS` | `10` | 每个音源的并发请求数 |
 | `TONICUISC_AUTH` | `1` | 设备 API Key 校验（`0` 关闭） |
-| `TONICUISC_PAIRING_TTL` | `300` | 配对码有效期（秒） |
+| `TONICUISC_DEVICE_CODE_TTL` | `600` | 设备码有效期（秒） |
+| `TONICUISC_PUBLIC_URL` | 空 | 对外地址，启动横幅打印登录链接用 |
 | `TONICUISC_CACHE_DIR` | `server/.cache` | 下载缓存目录 |
 | `TONICUISC_DB` | `<CACHE_DIR>/tonicuisc.db` | SQLite 数据库文件 |
 
@@ -60,8 +61,12 @@ python -m tonicuisc_server          # 默认 0.0.0.0:8000
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/api/health` | 服务状态（**免鉴权**） |
-| POST | `/api/pair` | 用一次性配对码换设备 API Key（**免鉴权**） |
-| GET | `/api/devices` | 已配对设备列表 |
+| POST | `/api/device/start` | App 登记设备码，发起登录（**免鉴权**） |
+| GET | `/api/device/status` | App 轮询登录状态，批准后返回一次 `api_key`（**免鉴权**） |
+| GET | `/login` | 设备码登录网页（浏览器打开，**免鉴权**） |
+| POST | `/login` | 提交设备码 / 选择账户 / 注册（**免鉴权**） |
+| GET | `/api/me` | 当前账户 + 本设备信息 |
+| GET | `/api/devices` | 已登录设备列表 |
 | DELETE | `/api/devices/{device_id}` | 吊销设备 |
 | GET | `/api/sources` | 可用音源 |
 | GET | `/api/search?keyword=&sources=migu,kuwo&limit=50&refresh=false` | 搜索（`refresh=true` 跳过搜索缓存） |
@@ -71,33 +76,40 @@ python -m tonicuisc_server          # 默认 0.0.0.0:8000
 | GET | `/api/stream/{id}` | 音频流，支持 HTTP Range |
 | GET | `/api/download/{id}` | 附件下载 |
 
-除 `/api/health`、`/api/pair` 外，所有接口都必须带请求头 `X-API-Key`。
+除上表标注「免鉴权」的以外，所有 `/api` 接口都必须带请求头 `X-API-Key`。
 
 `{id}` 形如 `migu:123456`（实际是 `MiguMusicClient:600929000000096577`），由 `/api/search` 返回；服务端缓存 3 小时，过期需重新搜索。
 
-### 设备鉴权
+### 登录（设备码流）
 
-每台设备一把随机 key（256 bit，`secrets.token_urlsafe(32)`），**服务端只存 `sha256(key)`**——数据库泄露也还原不出明文，明文只在配对响应里出现一次。
+App 自己生成设备码，用户在网页上批准，服务端从不生成、也不打印任何码。
 
-1. 服务端启动时控制台打印 6 位配对码（默认 5 分钟、用过即废）：
+```
+App                         浏览器(/login)                 服务端
+ │ 生成 A1B1-C1D1 + poll_secret
+ │ POST /api/device/start ───────────────────────────────► 记录 pending(10 分钟)
+ │ 显示设备码
+ │                       打开 https://…/login
+ │                       输入 A1B1-C1D1 ─────────────────► 校验设备码
+ │                       选账户+密码 / 注册新账户 ────────► 建设备、发 key（暂存）
+ │ GET /api/device/status?code&poll_secret ───────────────► approved + api_key
+ │ 存进系统安全存储          ◄──────────────────────────── 立刻清掉暂存的明文
+```
 
-   ```
-   ====================================================
-     Tonicuisc 设备配对
-     配对码: 472 913      有效期 5 分钟
-     在 App 里「配对设备」输入此码（一次性，用完即废）
-   ====================================================
-   ```
+要点：
 
-2. App 里填服务器地址 + 配对码 → `POST /api/pair` → 拿到 `api_key`，存进系统安全存储（iOS Keychain 不进备份 / Android Keystore / Windows DPAPI / Linux libsecret），之后每个请求带 `X-API-Key`。
-3. 设备丢了就在服务器本机吊销，不用知道它的 key：
+- **设备码由 App 生成**（`A1B1-C1D1` 格式，去掉了容易看错的 `I/O/0/1`），10 分钟有效；
+- **轮询密钥 `poll_secret` 只有 App 知道**，别人猜到设备码也拿不到 key；
+- 账户密码用 **PBKDF2-HMAC-SHA256（20 万次迭代 + 随机盐）**存储；
+- 设备 API Key 256 bit 随机，`devices` 表里**只有 `sha256(key)`**；批准到领取之间的明文只暂存在 `device_requests` 行里，App 取走立刻清空；
+- App 收到 401 自动清凭据并回到登录页。
 
-   ```bash
-   python -m tonicuisc_server devices            # 列出设备（含最后使用时间）
-   python -m tonicuisc_server revoke <device_id> # 吊销
-   ```
+本机管理（不需要 key）：
 
-4. App 收到 401 会自动清掉本地凭据并提示重新配对。
+```bash
+python -m tonicuisc_server devices            # 设备 + 账户列表
+python -m tonicuisc_server revoke <device_id> # 吊销某台设备
+```
 
 关闭鉴权：`TONICUISC_AUTH=0`（任何人可调，仅限完全可信环境）。
 
@@ -108,17 +120,17 @@ python -m tonicuisc_server          # 默认 0.0.0.0:8000
 
 ### HTTPS（nip.io）
 
-`deploy/Caddyfile` 里已经写好模板：
+`deploy/Caddyfile` 里已经按你的公网 IP 写好：
 
 ```bash
-caddy run --config deploy/Caddyfile
+caddy run --config deploy/Caddyfile     # https://106-35-196-104.nip.io
 ```
 
-把 IP 里的点换成横杠（`203.0.113.7` → `203-0-113-7.nip.io`），Caddy 自动申请并续期 Let's Encrypt 证书。**前提是 80/443 能从公网回连**（有公网 IP 或做过端口映射）——nip.io 只是把域名解析到那个 IP，Let's Encrypt 校验时是从公网反连你的机器，所以纯内网 IP（`192.168.x.x`）签不下来。
+规则是把 IP 里的点换成横杠（`106.35.196.104` → `106-35-196-104.nip.io`），Caddy 自动申请并续期 Let's Encrypt 证书。**前提是 80/443 能从公网回连**——nip.io 只是把域名解析到那个 IP，Let's Encrypt 校验时是从公网反连你的机器，所以纯内网 IP（`192.168.x.x`）签不下来。
 
 内网自签就用 mkcert：`mkcert 192.168.1.10`，把根证书装到手机上（iOS 要在「关于本机 → 证书信任设置」里手动打开），Caddyfile 里注释掉的部分有示例。
 
-App 里服务器地址填 `https://xxx.nip.io` 即可，不需要额外配置。
+App 里服务器地址填 `https://106-35-196-104.nip.io` 即可。**注意公网暴露后：** `/login` 是免鉴权的，建议只开放 443、给 Caddy 加上访问限速，密码别用弱口令。
 
 ### 数据库（SQLite）
 
@@ -163,12 +175,14 @@ App 里服务器地址填 `https://xxx.nip.io` 即可，不需要额外配置。
 
 Flutter 原生工程目录（`app/windows`、`app/linux`、`app/macos`、`app/ios`）不入库，用脚本生成；`flutter create` 不会覆盖已有的 `lib/` 代码。
 
-界面：
+界面（底部两个 tab）：
 
-- **搜索页**：关键词搜索、音源勾选（咪咕 / 酷我）、试听、下载、右上角改后端地址。
+- **登录页**（未登录时的首屏，`lib/pages/login_page.dart`）：显示 App 生成的设备码 `A1B1-C1D1` + 登录地址，一键打开浏览器，同时后台每 2 秒轮询；用户在网页上选账户 / 注册并批准后自动完成登录。设备码点一下可复制，也可以「换一个设备码」。
+- **搜索 tab**（`lib/pages/search_page.dart`）：关键词搜索、音源勾选（咪咕 / 酷我）、显示「正在进行…」和用时、试听、下载。
+- **我的 tab**（`lib/pages/profile_page.dart`）：账户名、本机设备名与设备 ID、服务器地址、重新登录、退出登录，以及**已登录设备列表**（可逐台吊销）。
 - **底部播放条**：封面缩略图、播放/暂停、进度拖动；**点一下展开全屏播放页**。
 - **全屏播放页**（`lib/pages/now_playing_page.dart`）：大封面 + 歌词随进度高亮自动滚动（点歌词行可跳转播放位置）+ 进度条 + 播放/暂停/前后 10 秒；向下滑动或点顶部箭头收起。无时间轴的纯文本歌词只展示、不跟随。
-- 手机端锁屏 / 控制中心控制见下方"播放链路"。
+- 手机端锁屏 / 控制中心控制见上方"播放链路"。
 
 ```bash
 # Windows

@@ -20,6 +20,8 @@ dependencies:
   shared_preferences: ^2.2.3
   # 设备 API Key 只存系统安全存储（Keychain / Keystore / DPAPI / libsecret）
   flutter_secure_storage: ^9.2.2
+  # 「打开登录页」按钮
+  url_launcher: ^6.3.1
 
 dev_dependencies:
   flutter_test:

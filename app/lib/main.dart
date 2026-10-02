@@ -4,7 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:just_audio_background/just_audio_background.dart';
 import 'package:just_audio_media_kit/just_audio_media_kit.dart';
 
-import 'pages/home_page.dart';
+import 'pages/main_shell.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -34,7 +34,7 @@ class TonicuiscApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       theme: ThemeData(colorScheme: scheme, useMaterial3: true),
       darkTheme: ThemeData(colorScheme: scheme.copyWith(brightness: Brightness.dark), useMaterial3: true),
-      home: const HomePage(),
+      home: const MainShell(),
     );
   }
 }
