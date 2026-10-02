@@ -238,42 +238,76 @@ class MusicService:
                 items.append(item)
         if limit:
             items = items[:limit]
+        self._apply_cover_policy(items)
         self.storage.record_search(keyword, sorted(wanted), [item["id"] for item in items])
         return items
 
     # ------------------------------------------------------------------ 封面
+    def _apply_cover_policy(self, items: list[dict[str, Any]]) -> None:
+        """封面策略：**宁可先空着，也别先糊一张音源的图**。
+
+        - QQ 有封面 → 用它
+        - 查过但没有（''）→ 退回音源原图（总比空着强）
+        - 还没查过（NULL）→ 先留空，等客户端调 /api/covers 补上
+        """
+        if not items or not SETTINGS.qq_cover:
+            return
+        try:
+            cached = self.storage.qq_covers_for([item["id"] for item in items])
+        except Exception:
+            return
+        for item in items:
+            state = cached.get(item["id"])
+            if state:
+                item["cover_url"] = state
+            elif state == "":
+                continue  # 查过没有，保留音源原图
+            else:
+                item["cover_url"] = ""
+                item["cover_pending"] = True
+
     def covers(self, item_ids: list[str]) -> dict[str, str]:
-        """按需补封面：只返回「有 QQ 封面」的那些 id。
+        """按需补封面：返回每个 id 能用的最好封面（QQ 优先，其次音源原图）。
 
         搜索接口不等这个，客户端拿到列表之后再单独来问，查到就换图。
         查过的结果落库（'' = 查过没有），所以同一首歌只真的查一次。
         """
-        if not item_ids or not SETTINGS.qq_cover:
+        if not item_ids:
             return {}
         found: dict[str, str] = {}
-        pending: list[tuple[str, str, str]] = []
+        pending: list[tuple[str, str, str, str]] = []
         for item_id in item_ids[:200]:
-            cached = self.storage.qq_cover_of(item_id)
-            if cached is None:
-                meta = self.storage.song_meta(item_id) or {}
-                name = str(meta.get("name") or "")
-                if name:
-                    pending.append((item_id, name, str(meta.get("singers") or "")))
-            elif cached:
-                found[item_id] = cached
+            meta = self.storage.song_meta(item_id)
+            if meta is None:
+                continue
+            original = str(meta.get("cover_url") or "")
+            if not SETTINGS.qq_cover:
+                if original:
+                    found[item_id] = original
+                continue
+            state = meta.get("qq_cover")
+            if state:
+                found[item_id] = state
+            elif state == "":
+                if original:
+                    found[item_id] = original  # QQ 没有，用音源原图兜底
+            else:
+                pending.append((item_id, str(meta.get("name") or ""), str(meta.get("singers") or ""), original))
 
         if pending:
-            def lookup(entry: tuple[str, str, str]) -> tuple[str, str | None]:
-                return entry[0], qq_cover(entry[1], entry[2])
+            def lookup(entry: tuple[str, str, str, str]) -> tuple[str, str | None, str]:
+                return entry[0], qq_cover(entry[1], entry[2]), entry[3]
 
             with ThreadPoolExecutor(max_workers=max(SETTINGS.qq_cover_threads, 1)) as pool:
-                for item_id, url in pool.map(lookup, pending):
+                for item_id, url, original in pool.map(lookup, pending):
                     try:
                         self.storage.set_qq_cover(item_id, url)
                     except Exception:
                         pass
                     if url:
                         found[item_id] = url
+                    elif original:
+                        found[item_id] = original
         return found
 
     def _search_selected(self, keyword: str, wanted: set[str], need: int | None = None) -> dict[str, list[Any]]:

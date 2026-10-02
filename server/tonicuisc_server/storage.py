@@ -221,6 +221,18 @@ class Storage:
         row = self._row(item_id)
         return None if row is None else row["qq_cover"]
 
+    def qq_covers_for(self, item_ids: list[str]) -> dict[str, str | None]:
+        """批量查封面缓存（列表用，别一首一首查）。"""
+        if not item_ids:
+            return {}
+        placeholders = ",".join("?" for _ in item_ids)
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT id, qq_cover FROM songs WHERE id IN ({placeholders})",
+                item_ids,
+            ).fetchall()
+        return {row["id"]: row["qq_cover"] for row in rows}
+
     def set_qq_cover(self, item_id: str, url: str | None) -> None:
         """写封面缓存；url 为 None 表示查过但没找到（存空串）。"""
         with self._lock:
@@ -538,12 +550,20 @@ class Storage:
             return cursor.rowcount
 
     def library_items(self, user_id: str, kind: str, limit: int = 200) -> list[dict[str, Any]]:
+        # 和搜索接口同一套封面策略：没查过 QQ 就先留空，查过没有才用音源原图
+        cover_expr = (
+            "CASE WHEN songs.qq_cover IS NULL THEN ''"
+            " WHEN songs.qq_cover = '' THEN songs.cover_url"
+            " ELSE songs.qq_cover END"
+            if SETTINGS.qq_cover
+            else "songs.cover_url"
+        )
         with self._lock:
             rows = self._conn.execute(
-                """
+                f"""
                 SELECT songs.id, songs.source, songs.source_label, songs.name, songs.singers, songs.album,
                        songs.ext, songs.duration, songs.duration_s, songs.file_size,
-                       COALESCE(NULLIF(songs.qq_cover, ''), songs.cover_url) AS cover_url,
+                       {cover_expr} AS cover_url,
                        songs.has_lyric, library.created_at, library.updated_at, library.play_count
                 FROM library JOIN songs ON songs.id = library.song_id
                 WHERE library.user_id = ? AND library.kind = ?

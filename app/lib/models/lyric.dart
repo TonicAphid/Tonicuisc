@@ -18,13 +18,17 @@ class LyricSheet {
 
   static final RegExp _stamp = RegExp(r'\[(\d{1,3}):(\d{1,2})(?:[.:](\d{1,3}))?\]');
 
+  /// LRC 的元信息标签，例如 `[by:xxx]`、`[offset:0]`、`[ti:歌名]`——不该当歌词显示。
+  static final RegExp _metaTag = RegExp(r'\[[^\]]*\]');
+
   static LyricSheet parse(String? raw) {
     final text = (raw ?? '').replaceAll('\r\n', '\n').trim();
     if (text.isEmpty || text.toUpperCase() == 'NULL') return empty;
 
     final lines = <LyricLine>[];
     for (final rawLine in text.split('\n')) {
-      final content = rawLine.replaceAll(_stamp, '').trim();
+      // 先去掉时间戳，再去掉剩下的元信息标签
+      final content = rawLine.replaceAll(_stamp, '').replaceAll(_metaTag, '').trim();
       final stamps = _stamp.allMatches(rawLine).toList();
       if (stamps.isEmpty) {
         if (content.isNotEmpty) lines.add(LyricLine(Duration.zero, content));

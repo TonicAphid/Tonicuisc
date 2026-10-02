@@ -38,4 +38,16 @@ void main() {
     final sheet = LyricSheet.parse('[1:02.5]短横杠');
     expect(sheet.lines.first.time, const Duration(minutes: 1, seconds: 2, milliseconds: 500));
   });
+
+  test('跳过 [by:] / [offset:] 这类元信息行', () {
+    final sheet = LyricSheet.parse('[by:someone]\n[offset:0]\n[ti:大城小爱]\n[00:01.00]第一句\n[00:05.00]第二句');
+
+    expect(sheet.synced, isTrue);
+    expect(sheet.lines.length, 2, reason: '元信息行不该当歌词');
+    expect(sheet.lines.first.text, '第一句');
+  });
+
+  test('整首只有元信息时算没有歌词', () {
+    expect(LyricSheet.parse('[by:someone]\n[offset:0]').lines, isEmpty);
+  });
 }

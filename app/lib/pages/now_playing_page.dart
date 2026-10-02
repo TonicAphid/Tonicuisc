@@ -4,6 +4,7 @@ import '../api/api_client.dart';
 import '../models/lyric.dart';
 import '../models/song.dart';
 import '../player/player_controller.dart';
+import '../state/cover_cache.dart';
 import '../state/library_state.dart';
 import '../widgets/play_mode_icons.dart';
 import 'artist_page.dart';
@@ -204,20 +205,28 @@ class _NowPlayingPageState extends State<NowPlayingPage> {
 
   Widget _cover(Song song, BoxConstraints constraints) {
     final size = (constraints.maxWidth * 0.62).clamp(140.0, constraints.maxHeight * 0.34).toDouble();
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(18),
-      child: SizedBox(
-        width: size,
-        height: size,
-        child: song.coverUrl.isEmpty
-            ? _coverFallback()
-            : Image.network(
-                song.coverUrl,
-                fit: BoxFit.cover,
-                errorBuilder: (_, __, ___) => _coverFallback(),
-                loadingBuilder: (context, child, progress) => progress == null ? child : _coverFallback(),
-              ),
-      ),
+    // 和列表共用同一个封面缓存：QQ 封面到了大图也会跟着换，里外一致
+    return ValueListenableBuilder<int>(
+      valueListenable: CoverCache.revision,
+      builder: (context, _, __) {
+        final cached = CoverCache.of(song.id);
+        final url = (cached != null && cached.isNotEmpty) ? cached : song.coverUrl;
+        return ClipRRect(
+          borderRadius: BorderRadius.circular(18),
+          child: SizedBox(
+            width: size,
+            height: size,
+            child: url.isEmpty
+                ? _coverFallback()
+                : Image.network(
+                    url,
+                    fit: BoxFit.cover,
+                    errorBuilder: (_, __, ___) => _coverFallback(),
+                    loadingBuilder: (context, child, progress) => progress == null ? child : _coverFallback(),
+                  ),
+          ),
+        );
+      },
     );
   }
 

@@ -16,7 +16,7 @@ from tonicuisc_server.service import MusicService
 from tonicuisc_server.storage import Storage
 
 
-def _song(identifier: str, source: str = "MiguMusicClient") -> SimpleNamespace:
+def _song(identifier: str, source: str = "MiguMusicClient", cover: str = "") -> SimpleNamespace:
     return SimpleNamespace(
         source=source,
         root_source=None,
@@ -29,7 +29,7 @@ def _song(identifier: str, source: str = "MiguMusicClient") -> SimpleNamespace:
         duration="00:03:00",
         duration_s=180,
         lyric=None,
-        cover_url=None,
+        cover_url=cover,
         identifier=identifier,
     )
 
@@ -48,10 +48,11 @@ class _FakeClient:
 class _SourceStub:
     """模拟单个音源的 client。"""
 
-    def __init__(self, source: str, singers: str = "歌手", count: int = 1) -> None:
+    def __init__(self, source: str, singers: str = "歌手", count: int = 1, cover: str = "") -> None:
         self.source = source
         self.singers = singers
         self.count = count
+        self.cover = cover
         self.calls = 0
         self.sizes: list[int] = []
 
@@ -60,7 +61,7 @@ class _SourceStub:
         self.sizes.append(getattr(self, "search_size_per_source", 0))
         songs = []
         for index in range(self.count):
-            song = _song(f"{self.source[:4]}-{index}", self.source)
+            song = _song(f"{self.source[:4]}-{index}", self.source, cover=self.cover)
             song.singers = self.singers
             songs.append(song)
         return songs
@@ -74,8 +75,9 @@ class _MultiClient:
         sources: tuple[str, ...] = ("MiguMusicClient", "KuwoMusicClient"),
         singers: str = "歌手",
         count: int = 1,
+        cover: str = "",
     ) -> None:
-        self.music_clients = {name: _SourceStub(name, singers, count) for name in sources}
+        self.music_clients = {name: _SourceStub(name, singers, count, cover) for name in sources}
         self.clients_threadings: dict = {}
         self.requests_overrides: dict = {}
         self.search_rules: dict = {}
@@ -217,6 +219,39 @@ def test_covers_disabled_returns_empty(service: MusicService) -> None:
     service._client = _MultiClient(sources=("KuwoMusicClient",))
     items = service.search("天地龙鳞", sources=["kuwo"])
     assert service.covers([items[0]["id"]]) == {}  # conftest 默认关了
+
+
+def test_cover_hidden_until_qq_lookup(service: MusicService, monkeypatch) -> None:
+    """QQ 还没查过时先别显示音源封面（免得列表里先糊一张），查完再兜底。"""
+    _enable_qq_cover(monkeypatch, lambda name, singers="": None)  # QQ 查不到
+    service._client = _MultiClient(sources=("KuwoMusicClient",), cover="https://kuwo/original.jpg")
+
+    items = service.search("天地龙鳞", sources=["kuwo"])
+    assert items[0]["cover_url"] == "", "没查过就先留空"
+    assert items[0]["cover_pending"] is True
+
+    # 客户端来问一次：QQ 没有 → 退回音源原图，并记下「查过了」
+    found = service.covers([items[0]["id"]])
+    assert found[items[0]["id"]] == "https://kuwo/original.jpg"
+    assert service.storage.qq_cover_of(items[0]["id"]) == ""
+
+    # 再搜一次：知道 QQ 没有，直接给音源原图
+    service._search_cache.clear()
+    again = service.search("天地龙鳞", sources=["kuwo"], refresh=True)
+    assert again[0]["cover_url"] == "https://kuwo/original.jpg"
+
+
+def test_cover_prefers_qq_when_available(service: MusicService, monkeypatch) -> None:
+    _enable_qq_cover(monkeypatch, lambda name, singers="": "https://qq/cover.jpg")
+    service._client = _MultiClient(sources=("KuwoMusicClient",), cover="https://kuwo/original.jpg")
+
+    items = service.search("天地龙鳞", sources=["kuwo"])
+    assert items[0]["cover_url"] == "", "查之前先空着"
+
+    service.covers([items[0]["id"]])
+    service._search_cache.clear()
+    again = service.search("天地龙鳞", sources=["kuwo"], refresh=True)
+    assert again[0]["cover_url"] == "https://qq/cover.jpg"
 
 
 def test_only_selected_source_is_requested(service: MusicService) -> None:

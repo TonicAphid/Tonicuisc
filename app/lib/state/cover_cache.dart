@@ -30,8 +30,10 @@ class CoverCache {
     _requested.addAll(pending);
     try {
       final found = await api.covers(pending);
-      if (found.isEmpty) return;
-      _covers.addAll(found);
+      // 服务端没返回的（真的没封面）也记成空串，别一直重试
+      for (final id in pending) {
+        _covers.putIfAbsent(id, () => found[id] ?? '');
+      }
       revision.value++;
     } catch (_) {
       // 拿不到就用原图，下次进页面再试

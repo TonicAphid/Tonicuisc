@@ -25,7 +25,12 @@ class SongAvatar extends StatelessWidget {
   Widget build(BuildContext context) {
     return ValueListenableBuilder<int>(
       valueListenable: CoverCache.revision,
-      builder: (context, _, __) => _build(context, CoverCache.of(song.id) ?? song.coverUrl),
+      builder: (context, _, __) {
+        final cached = CoverCache.of(song.id);
+        // 缓存里是空串说明「服务端确实没有更好的封面」，这时才用音源原图
+        final url = (cached != null && cached.isNotEmpty) ? cached : song.coverUrl;
+        return _build(context, url);
+      },
     );
   }
 
