@@ -47,7 +47,9 @@ python -m tonicuisc_server          # 默认 0.0.0.0:8000
 | `TONICUISC_HOST` | `0.0.0.0` | 监听地址 |
 | `TONICUISC_PORT` | `8000` | 端口 |
 | `TONICUISC_SOURCES` | `migu,kuwo` | 启用音源 |
-| `TONICUISC_SEARCH_SIZE` | `10` | 每个音源返回数量（调大要翻页，更慢） |
+| `TONICUISC_SEARCH_SIZE` | `10` | 每个音源返回数量 |
+| `TONICUISC_SEARCH_SIZE_PER_PAGE` | `1` | 每个请求取几条；`1` = 10 条拆成 10 个请求并行拿 |
+| `TONICUISC_SEARCH_THREADS` | `10` | 每个音源的并发请求数 |
 | `TONICUISC_CACHE_DIR` | `server/.cache` | 下载缓存目录 |
 | `TONICUISC_DB` | `<CACHE_DIR>/tonicuisc.db` | SQLite 数据库文件 |
 
@@ -81,6 +83,13 @@ python -m tonicuisc_server          # 默认 0.0.0.0:8000
 4. 重搜也失败（比如那首歌下架了）→ 返回 404/502，客户端重新搜索即可。
 
 搜索时顺手写入，`searches` 保留最近 500 条、`songs` 保留最近 5000 首，自动裁剪。
+
+### 搜索过程
+
+- **只请求选中的音源**：musicdl 的 `MusicClient.search()` 会把配置里所有音源都打一遍，所以服务端直接调用选中音源的 client；没勾的音源不会被请求。
+- **并行拿结果**：`search_size_per_source=10` + `search_size_per_page=1` → musicdl 会生成 10 个搜索 URL（每页 1 条），再用 `search_threads` 个线程并发请求；多个音源之间也并行。
+- **不打印进度条**：给 musicdl 传一个 `disable=True` 的 rich `Progress`，它就不再往控制台刷进度条。
+- **耗时可见**：服务端每个 `/api` 请求打一行 `[access] GET /api/search 200 5.482s`；`/api/search` 另外在响应里返回 `elapsed`（服务端耗时）。客户端自己再量一次总耗时（含网络往返），显示成「搜索完成 · 用时 5.5 秒（服务端 2.9 秒）· 共 20 首」。
 
 ### 缓存
 

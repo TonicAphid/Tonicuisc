@@ -14,9 +14,9 @@ from tonicuisc_server.service import MusicService
 from tonicuisc_server.storage import Storage
 
 
-def _song(identifier: str) -> SimpleNamespace:
+def _song(identifier: str, source: str = "MiguMusicClient") -> SimpleNamespace:
     return SimpleNamespace(
-        source="MiguMusicClient",
+        source=source,
         root_source=None,
         song_name=f"歌 {identifier}",
         singers="歌手",
@@ -33,12 +33,36 @@ def _song(identifier: str) -> SimpleNamespace:
 
 
 class _FakeClient:
+    """没有 music_clients 结构，走兜底分支。"""
+
     def __init__(self) -> None:
         self.calls = 0
 
     def search(self, keyword: str) -> dict:
         self.calls += 1
         return {"MiguMusicClient": [_song("1"), _song("2")]}
+
+
+class _SourceStub:
+    """模拟单个音源的 client。"""
+
+    def __init__(self, source: str) -> None:
+        self.source = source
+        self.calls = 0
+
+    def search(self, **kwargs) -> list:
+        self.calls += 1
+        return [_song(f"{self.source[:4]}-1", self.source)]
+
+
+class _MultiClient:
+    """带 music_clients 结构的桩，用来验证「只打选中的音源」。"""
+
+    def __init__(self, sources: tuple[str, ...] = ("MiguMusicClient", "KuwoMusicClient")) -> None:
+        self.music_clients = {name: _SourceStub(name) for name in sources}
+        self.clients_threadings: dict = {}
+        self.requests_overrides: dict = {}
+        self.search_rules: dict = {}
 
 
 @pytest.fixture()
@@ -109,3 +133,31 @@ def test_expired_cache_searches_again(service: MusicService) -> None:
     service._search_cache[key] = (items, time.time() - 1)
     service.search("天地龙鳞")
     assert service._client.calls == 2
+
+
+def test_only_selected_source_is_requested(service: MusicService) -> None:
+    multi = _MultiClient()
+    service._client = multi
+
+    items = service.search("天地龙鳞", sources=["kuwo"])
+
+    assert multi.music_clients["KuwoMusicClient"].calls == 1
+    assert multi.music_clients["MiguMusicClient"].calls == 0, "没选咪咕就不该请求咪咕"
+    assert all(item["source"] == "KuwoMusicClient" for item in items)
+
+
+def test_both_selected_sources_are_requested(service: MusicService) -> None:
+    multi = _MultiClient()
+    service._client = multi
+
+    items = service.search("天地龙鳞", sources=["migu", "kuwo"])
+
+    assert multi.music_clients["MiguMusicClient"].calls == 1
+    assert multi.music_clients["KuwoMusicClient"].calls == 1
+    assert {item["source"] for item in items} == {"MiguMusicClient", "KuwoMusicClient"}
+
+
+def test_disabled_source_is_rejected(service: MusicService) -> None:
+    service._client = _MultiClient(sources=("MiguMusicClient",))
+    with pytest.raises(ValueError):
+        service.search("天地龙鳞", sources=["kuwo"])

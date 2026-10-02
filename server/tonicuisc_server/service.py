@@ -11,6 +11,7 @@ import shutil
 import threading
 import time
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -87,6 +88,15 @@ class MusicService:
         self.files_dir.mkdir(parents=True, exist_ok=True)
         #: 搜索结果 / 歌曲元信息 / 搜索历史
         self.storage = Storage()
+        self._quiet: Any | None = None
+
+    def _quiet_progress(self) -> Any:
+        """musicdl 的 search() 会自己建进度条；给它一个禁止渲染的就不会刷屏。"""
+        if self._quiet is None:
+            from rich.progress import Progress
+
+            self._quiet = Progress(disable=True)
+        return self._quiet
 
     # ------------------------------------------------------------------ client
     @property
@@ -102,9 +112,15 @@ class MusicService:
                         name: {
                             "work_dir": str(self.work_dir),
                             "search_size_per_source": SETTINGS.search_size,
+                            # 每页 1 条 → musicdl 会拆成 search_size 个请求
+                            "search_size_per_page": SETTINGS.search_size_per_page,
+                            "strict_limit_search_size_per_page": True,
+                            "disable_print": True,
                         }
                         for name in sources
                     },
+                    # 每个音源并发请求数
+                    clients_threadings={name: SETTINGS.search_threads for name in sources},
                 )
             return self._client
 
@@ -157,7 +173,7 @@ class MusicService:
 
     def _search_sources(self, keyword: str, wanted: set[str], limit: int | None) -> list[dict[str, Any]]:
         self._prune_search_dirs()
-        results = self.client.search(keyword) or {}
+        results = self._search_selected(keyword, wanted)
         items: list[dict[str, Any]] = []
         seen: set[str] = set()
         for source_name, songs in results.items():
@@ -177,6 +193,50 @@ class MusicService:
             items = items[:limit]
         self.storage.record_search(keyword, sorted(wanted), [item["id"] for item in items])
         return items
+
+    def _search_selected(self, keyword: str, wanted: set[str]) -> dict[str, list[Any]]:
+        """只请求被选中的音源。
+
+        musicdl 的 ``MusicClient.search()`` 会把配置里所有音源都打一遍，
+        所以这里直接调用对应音源 client 的 ``search()``。
+        """
+        client = self.client
+        clients = getattr(client, "music_clients", None)
+        if not isinstance(clients, dict) or not clients:
+            # 兜底：没有 music_clients 结构的桩 / 旧版 musicdl
+            return client.search(keyword) or {}
+
+        selected = [name for name in sorted(wanted) if name in clients]
+        if not selected:
+            raise ValueError(f"没有可用的音源；服务端已启用: {', '.join(sorted(clients))}")
+
+        threadings = getattr(client, "clients_threadings", None) or {}
+        overrides = getattr(client, "requests_overrides", None) or {}
+        rules = getattr(client, "search_rules", None) or {}
+
+        def run(name: str) -> list[Any]:
+            return (
+                clients[name].search(
+                    keyword=keyword,
+                    num_threadings=threadings.get(name, 5),
+                    request_overrides=overrides.get(name, {}),
+                    rule=rules.get(name, {}),
+                    # 传一个禁用输出的 Progress，musicdl 就不会再打印进度条
+                    main_process_context=self._quiet_progress(),
+                )
+                or []
+            )
+
+        results: dict[str, list[Any]] = {}
+        with ThreadPoolExecutor(max_workers=max(len(selected), 1)) as pool:
+            futures = {pool.submit(run, name): name for name in selected}
+            for future in as_completed(futures):
+                name = futures[future]
+                try:
+                    results[name] = future.result()
+                except Exception:
+                    results[name] = []
+        return results
 
     # ------------------------------------------------------------------ cache
     def _remember(self, song: Any) -> None:
@@ -239,7 +299,8 @@ class MusicService:
         if not keyword:
             return song
         try:
-            results = self.client.search(keyword) or {}
+            # 只重搜这首歌所在的音源，别把其他音源也打一遍
+            results = self._search_selected(keyword, {str(getattr(song, "source", ""))})
         except Exception:
             return song
         for candidate in results.get(getattr(song, "source", None), []) or []:

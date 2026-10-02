@@ -14,6 +14,7 @@ GET /api/download/{item_id}        附件下载
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from urllib.parse import quote
@@ -45,6 +46,17 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["Content-Range", "Accept-Ranges", "Content-Length", "Content-Disposition"],
 )
+
+@app.middleware("http")
+async def access_log(request: Request, call_next):
+    """给每个 /api 请求打一行耗时日志：``[access] GET /api/search 200 5.482s``。"""
+    started = time.perf_counter()
+    response = await call_next(request)
+    if request.url.path.startswith("/api"):
+        elapsed = time.perf_counter() - started
+        print(f"[access] {request.method} {request.url.path} {response.status_code} {elapsed:.3f}s", flush=True)
+    return response
+
 
 _service: MusicService | None = None
 
@@ -131,13 +143,20 @@ async def search(
     refresh: bool = Query(False, description="true = 跳过服务端搜索缓存，强制重新联网搜索"),
 ) -> dict:
     source_list = [s for s in (sources or "").replace(" ", ",").split(",") if s] if sources else None
+    started = time.perf_counter()
     try:
         items = await asyncio.to_thread(get_service().search, keyword, source_list, limit, refresh)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:  # musicdl network failures
         raise HTTPException(status_code=502, detail=f"搜索失败: {exc}")
-    return {"keyword": keyword, "total": len(items), "items": items}
+    return {
+        "keyword": keyword,
+        "total": len(items),
+        # 搜索耗时（秒），客户端用它显示「用时 x.x 秒」
+        "elapsed": round(time.perf_counter() - started, 2),
+        "items": items,
+    }
 
 
 @app.get("/api/url/{item_id:path}")

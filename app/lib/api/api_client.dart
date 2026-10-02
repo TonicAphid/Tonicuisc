@@ -31,6 +31,14 @@ class DirectSource {
   final Map<String, String> headers;
 }
 
+/// 一次搜索的结果 + 服务端耗时（秒）。
+class SearchResult {
+  const SearchResult({required this.items, required this.elapsed});
+
+  final List<Song> items;
+  final double elapsed;
+}
+
 class ApiClient {
   ApiClient(this.baseUrl);
 
@@ -52,7 +60,7 @@ class ApiClient {
     return query == null ? uri : uri.replace(queryParameters: query);
   }
 
-  Future<List<Song>> search(String keyword, {List<String> sources = const [], int limit = 50}) async {
+  Future<SearchResult> search(String keyword, {List<String> sources = const [], int limit = 50}) async {
     final resp = await http
         .get(_uri('/api/search', {
           'keyword': keyword,
@@ -65,7 +73,10 @@ class ApiClient {
     }
     final data = jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
     final items = (data['items'] as List?) ?? const [];
-    return items.map((e) => Song.fromJson(e as Map<String, dynamic>)).toList();
+    return SearchResult(
+      items: items.map((e) => Song.fromJson(e as Map<String, dynamic>)).toList(),
+      elapsed: (data['elapsed'] as num?)?.toDouble() ?? 0,
+    );
   }
 
   Uri streamUri(String id) => _uri('/api/stream/$id');

@@ -21,6 +21,8 @@ class _HomePageState extends State<HomePage> {
   List<Song> _results = const [];
   bool _searching = false;
   String? _error;
+  double? _elapsed;
+  double? _serverElapsed;
   String _baseUrl = defaultBaseUrl();
 
   @override
@@ -51,12 +53,22 @@ class _HomePageState extends State<HomePage> {
     setState(() {
       _searching = true;
       _error = null;
+      _elapsed = null;
+      _serverElapsed = null;
     });
+    final stopwatch = Stopwatch()..start();
     try {
-      final items = await _api.search(keyword, sources: _sources.toList());
+      final result = await _api.search(keyword, sources: _sources.toList());
+      stopwatch.stop();
       if (!mounted) return;
-      setState(() => _results = items);
+      setState(() {
+        _results = result.items;
+        // 客户端实测的总耗时（含网络往返），服务端耗时单独显示
+        _elapsed = stopwatch.elapsedMilliseconds / 1000;
+        _serverElapsed = result.elapsed;
+      });
     } catch (err) {
+      stopwatch.stop();
       if (!mounted) return;
       setState(() {
         _results = const [];
@@ -159,7 +171,28 @@ class _HomePageState extends State<HomePage> {
               ],
             ),
           ),
-          if (_searching) const LinearProgressIndicator(),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 2, 16, 6),
+            child: Row(
+              children: [
+                if (_searching) ...[
+                  const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2)),
+                  const SizedBox(width: 10),
+                  const Text('正在进行…'),
+                ] else if (_elapsed != null)
+                  Expanded(
+                    child: Text(
+                      '搜索完成 · 用时 ${_elapsed!.toStringAsFixed(1)} 秒'
+                      '${_serverElapsed == null ? '' : '（服务端 ${_serverElapsed!.toStringAsFixed(1)} 秒）'}'
+                      ' · 共 ${_results.length} 首',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ),
+              ],
+            ),
+          ),
           if (_error != null)
             Padding(
               padding: const EdgeInsets.all(16),
@@ -169,7 +202,7 @@ class _HomePageState extends State<HomePage> {
             child: _results.isEmpty
                 ? Center(
                     child: Text(
-                      _searching ? '搜索中…' : '输入关键词开始搜索',
+                      _searching ? '正在进行…' : '输入关键词开始搜索',
                       style: Theme.of(context).textTheme.bodyMedium,
                     ),
                   )

@@ -21,8 +21,18 @@ def main() -> int:
     with TestClient(app) as client:
         print("health:", client.get("/api/health").json())
 
-        search = client.get("/api/search", params={"keyword": KEYWORD, "limit": 3})
-        print("search status:", search.status_code)
+        # 只勾选一个音源时，不应该再去请求另一个音源
+        only_migu = client.get(
+            "/api/search", params={"keyword": KEYWORD, "sources": "migu", "limit": 2, "refresh": True}
+        )
+        assert only_migu.status_code == 200, only_migu.text
+        migu_payload = only_migu.json()
+        migu_items = migu_payload["items"]
+        print("[sources=migu] elapsed:", migu_payload.get("elapsed"), "items:", [(i["id"], i["source"]) for i in migu_items])
+        assert all(item["source"] == "MiguMusicClient" for item in migu_items), "只选咪咕却返回了别的音源"
+
+        search = client.get("/api/search", params={"keyword": KEYWORD, "limit": 3, "refresh": True})
+        print("search status:", search.status_code, "elapsed:", search.json().get("elapsed"))
         if search.status_code != 200:
             print(search.text[:500])
             return 1

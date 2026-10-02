@@ -66,7 +66,12 @@ class Settings:
     port: int = int(os.getenv("TONICUISC_PORT", "8000"))
     reload: bool = os.getenv("TONICUISC_RELOAD", "0") in {"1", "true", "yes"}
     sources: list[str] = field(default_factory=lambda: _env_list("TONICUISC_SOURCES", ["migu", "kuwo"]))
+    #: 每个音源要多少首
     search_size: int = int(os.getenv("TONICUISC_SEARCH_SIZE", "10"))
+    #: 每个请求取多少首；设成 1 就是「10 首拆成 10 个请求并行拿」
+    search_size_per_page: int = int(os.getenv("TONICUISC_SEARCH_SIZE_PER_PAGE", "1"))
+    #: 每个音源同时并发多少个请求
+    search_threads: int = int(os.getenv("TONICUISC_SEARCH_THREADS", "10"))
     cache_dir: Path = field(
         default_factory=lambda: Path(os.getenv("TONICUISC_CACHE_DIR", SERVER_DIR / ".cache")).resolve()
     )
