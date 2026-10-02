@@ -550,13 +550,9 @@ class Storage:
             return cursor.rowcount
 
     def library_items(self, user_id: str, kind: str, limit: int = 200) -> list[dict[str, Any]]:
-        # 和搜索接口同一套封面策略：没查过 QQ 就先留空，查过没有才用音源原图
+        # QQ 封面优先；查过但没有（''）就用音源原图
         cover_expr = (
-            "CASE WHEN songs.qq_cover IS NULL THEN ''"
-            " WHEN songs.qq_cover = '' THEN songs.cover_url"
-            " ELSE songs.qq_cover END"
-            if SETTINGS.qq_cover
-            else "songs.cover_url"
+            "COALESCE(NULLIF(songs.qq_cover, ''), songs.cover_url)" if SETTINGS.qq_cover else "songs.cover_url"
         )
         with self._lock:
             rows = self._conn.execute(

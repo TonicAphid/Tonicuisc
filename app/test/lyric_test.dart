@@ -50,4 +50,29 @@ void main() {
   test('整首只有元信息时算没有歌词', () {
     expect(LyricSheet.parse('[by:someone]\n[offset:0]').lines, isEmpty);
   });
+
+  test('同一时间戳只留第一条（英文歌别显示中文翻译）', () {
+    final sheet = LyricSheet.parse('[00:10.00]I am what I am\n[00:10.00]我就是我\n[00:15.00]Second line\n[00:15.00]第二行');
+
+    expect(sheet.lines.length, 2);
+    expect(sheet.lines.first.text, 'I am what I am');
+    expect(sheet.lines.last.text, 'Second line');
+  });
+
+  test('去掉开头的歌名/歌手行', () {
+    final sheet = LyricSheet.parse(
+      '琵琶曲\n郑浩\n[00:12.00]第一句歌词\n[00:20.00]第二句歌词',
+      title: '琵琶行',
+      artist: '郑浩',
+    );
+
+    expect(sheet.lines.length, 2);
+    expect(sheet.lines.first.text, '第一句歌词');
+  });
+
+  test('歌词中间和歌名一样的句子不会被误删', () {
+    final sheet = LyricSheet.parse('[00:01.00]晴天\n[00:05.00]别的话\n[00:09.00]晴天', title: '晴天');
+
+    expect(sheet.lines.length, 3, reason: '掐头不掐中间');
+  });
 }

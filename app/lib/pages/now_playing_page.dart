@@ -95,7 +95,7 @@ class _NowPlayingPageState extends State<NowPlayingPage> {
     try {
       final raw = await widget.api.lyric(song.id);
       if (!mounted || _loadedSongId != song.id) return;
-      setState(() => _sheet = LyricSheet.parse(raw));
+      setState(() => _sheet = LyricSheet.parse(raw, title: song.name, artist: song.singers));
     } catch (err) {
       if (mounted) setState(() => _error = '歌词获取失败：$err');
     } finally {

@@ -21,11 +21,12 @@ class LyricSheet {
   /// LRC 的元信息标签，例如 `[by:xxx]`、`[offset:0]`、`[ti:歌名]`——不该当歌词显示。
   static final RegExp _metaTag = RegExp(r'\[[^\]]*\]');
 
-  static LyricSheet parse(String? raw) {
+  static LyricSheet parse(String? raw, {String? title, String? artist}) {
     final text = (raw ?? '').replaceAll('\r\n', '\n').trim();
     if (text.isEmpty || text.toUpperCase() == 'NULL') return empty;
 
     final lines = <LyricLine>[];
+    final seenTimes = <int>{};
     for (final rawLine in text.split('\n')) {
       // 先去掉时间戳，再去掉剩下的元信息标签
       final content = rawLine.replaceAll(_stamp, '').replaceAll(_metaTag, '').trim();
@@ -37,19 +38,45 @@ class LyricSheet {
       for (final stamp in stamps) {
         final fraction = stamp.group(3);
         final millis = fraction == null ? 0 : int.parse(fraction.padRight(3, '0').substring(0, 3));
-        lines.add(
-          LyricLine(
-            Duration(minutes: int.parse(stamp.group(1)!), seconds: int.parse(stamp.group(2)!), milliseconds: millis),
-            content,
-          ),
+        final time = Duration(
+          minutes: int.parse(stamp.group(1)!),
+          seconds: int.parse(stamp.group(2)!),
+          milliseconds: millis,
         );
+        // 同一个时间戳只留第一条：酷我英文歌是「原文 + 翻译」两行同一时间，
+        // 留后面的就会变成一直显示中文翻译。
+        if (time > Duration.zero && !seenTimes.add(time.inMilliseconds)) continue;
+        lines.add(LyricLine(time, content));
       }
     }
+    lines.removeWhere((line) => line.text.isEmpty);
     if (lines.isEmpty) return empty;
 
-    final synced = lines.any((line) => line.time > Duration.zero);
-    if (synced) lines.sort((a, b) => a.time.compareTo(b.time));
-    return LyricSheet(lines, synced);
+    final body = _stripHeader(lines, title, artist);
+    if (body.isEmpty) return empty;
+
+    final synced = body.any((line) => line.time > Duration.zero);
+    if (synced) body.sort((a, b) => a.time.compareTo(b.time));
+    return LyricSheet(body, synced);
+  }
+
+  static String _norm(String value) =>
+      value.toLowerCase().replaceAll(RegExp(r'[\s\-_–—·:：()（）\[\]【】]+'), '');
+
+  /// 去掉开头那几行「歌名 / 歌手 / 歌名 - 歌手」——酷我的 LRC 头部会写这些。
+  static List<LyricLine> _stripHeader(List<LyricLine> lines, String? title, String? artist) {
+    final wanted = <String>{
+      if (title != null) _norm(title),
+      if (artist != null) _norm(artist),
+      if (title != null && artist != null) _norm('$title$artist'),
+      if (title != null && artist != null) _norm('$title-$artist'),
+    }..remove('');
+
+    var index = 0;
+    while (index < lines.length && lines[index].time == Duration.zero && wanted.contains(_norm(lines[index].text))) {
+      index++;
+    }
+    return index == 0 ? lines : lines.sublist(index);
   }
 
   /// 当前播放位置对应的歌词行号，-1 表示还没有到第一句。

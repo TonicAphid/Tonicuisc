@@ -182,8 +182,8 @@ def test_search_page_grows_fetch_size(service: MusicService) -> None:
     assert stub.search_size_per_page >= 1
 
 
-def test_covers_are_looked_up_on_demand(service: MusicService, monkeypatch) -> None:
-    """搜索本身不等封面；封面是客户端另外来问的。"""
+def test_covers_endpoint_uses_cache(service: MusicService, monkeypatch) -> None:
+    """`/api/covers` 走缓存：搜索时已经查过的歌不会再问一次 QQ。"""
     calls: list[str] = []
 
     def fake_cover(name: str, singers: str = "") -> str:
@@ -194,16 +194,11 @@ def test_covers_are_looked_up_on_demand(service: MusicService, monkeypatch) -> N
     service._client = _MultiClient(sources=("KuwoMusicClient",))
 
     items = service.search("天地龙鳞", sources=["kuwo"])
-    assert calls == [], "搜索接口不该等封面"
-    assert items[0]["cover_url"] == ""
+    assert calls == ["歌 Kuwo-0"], "搜索时补过一次"
 
     found = service.covers([items[0]["id"]])
     assert found[items[0]["id"]] == "https://y.gtimg.cn/cover.jpg"
-    assert calls == ["歌 Kuwo-0"]
-
-    # 第二次：库里已经有缓存，不再请求 QQ
-    assert service.covers([items[0]["id"]]) == {items[0]["id"]: "https://y.gtimg.cn/cover.jpg"}
-    assert calls == ["歌 Kuwo-0"], "缓存过的封面不该重复查"
+    assert calls == ["歌 Kuwo-0"], "已经缓存了，不该重复查"
 
 
 def test_covers_skip_songs_without_qq_match(service: MusicService, monkeypatch) -> None:
@@ -221,37 +216,22 @@ def test_covers_disabled_returns_empty(service: MusicService) -> None:
     assert service.covers([items[0]["id"]]) == {}  # conftest 默认关了
 
 
-def test_cover_hidden_until_qq_lookup(service: MusicService, monkeypatch) -> None:
-    """QQ 还没查过时先别显示音源封面（免得列表里先糊一张），查完再兜底。"""
-    _enable_qq_cover(monkeypatch, lambda name, singers="": None)  # QQ 查不到
-    service._client = _MultiClient(sources=("KuwoMusicClient",), cover="https://kuwo/original.jpg")
-
-    items = service.search("天地龙鳞", sources=["kuwo"])
-    assert items[0]["cover_url"] == "", "没查过就先留空"
-    assert items[0]["cover_pending"] is True
-
-    # 客户端来问一次：QQ 没有 → 退回音源原图，并记下「查过了」
-    found = service.covers([items[0]["id"]])
-    assert found[items[0]["id"]] == "https://kuwo/original.jpg"
-    assert service.storage.qq_cover_of(items[0]["id"]) == ""
-
-    # 再搜一次：知道 QQ 没有，直接给音源原图
-    service._search_cache.clear()
-    again = service.search("天地龙鳞", sources=["kuwo"], refresh=True)
-    assert again[0]["cover_url"] == "https://kuwo/original.jpg"
-
-
-def test_cover_prefers_qq_when_available(service: MusicService, monkeypatch) -> None:
+def test_cover_is_ready_with_the_search_results(service: MusicService, monkeypatch) -> None:
+    """封面跟搜索结果一起出：列表、控制栏、播放页拿到的都是同一张 QQ 封面。"""
     _enable_qq_cover(monkeypatch, lambda name, singers="": "https://qq/cover.jpg")
     service._client = _MultiClient(sources=("KuwoMusicClient",), cover="https://kuwo/original.jpg")
 
     items = service.search("天地龙鳞", sources=["kuwo"])
-    assert items[0]["cover_url"] == "", "查之前先空着"
+    assert items[0]["cover_url"] == "https://qq/cover.jpg", "搜索返回时就该是 QQ 封面"
 
-    service.covers([items[0]["id"]])
-    service._search_cache.clear()
-    again = service.search("天地龙鳞", sources=["kuwo"], refresh=True)
-    assert again[0]["cover_url"] == "https://qq/cover.jpg"
+
+def test_cover_falls_back_to_source_cover(service: MusicService, monkeypatch) -> None:
+    _enable_qq_cover(monkeypatch, lambda name, singers="": None)
+    service._client = _MultiClient(sources=("KuwoMusicClient",), cover="https://kuwo/original.jpg")
+
+    items = service.search("天地龙鳞", sources=["kuwo"])
+    assert items[0]["cover_url"] == "https://kuwo/original.jpg", "QQ 没有就用音源原图"
+    assert service.storage.qq_cover_of(items[0]["id"]) == ""
 
 
 def test_only_selected_source_is_requested(service: MusicService) -> None:

@@ -238,17 +238,17 @@ class MusicService:
                 items.append(item)
         if limit:
             items = items[:limit]
-        self._apply_cover_policy(items)
+        self._enrich_covers(items)
         self.storage.record_search(keyword, sorted(wanted), [item["id"] for item in items])
         return items
 
     # ------------------------------------------------------------------ 封面
-    def _apply_cover_policy(self, items: list[dict[str, Any]]) -> None:
-        """封面策略：**宁可先空着，也别先糊一张音源的图**。
+    def _enrich_covers(self, items: list[dict[str, Any]]) -> None:
+        """搜索时就把 QQ 封面补好（并发 + 落库缓存）。
 
-        - QQ 有封面 → 用它
-        - 查过但没有（''）→ 退回音源原图（总比空着强）
-        - 还没查过（NULL）→ 先留空，等客户端调 /api/covers 补上
+        这样列表第一次渲染、底部播放条、全屏播放页拿到的都是同一张 QQ 封面，
+        不会出现「列表是 QQ 的、控制栏是酷我的」这种里外不一致。
+        只对没查过的歌发请求，所以第二次搜同一批歌不用再等。
         """
         if not items or not SETTINGS.qq_cover:
             return
@@ -256,15 +256,29 @@ class MusicService:
             cached = self.storage.qq_covers_for([item["id"] for item in items])
         except Exception:
             return
+        pending: list[dict[str, Any]] = []
         for item in items:
             state = cached.get(item["id"])
             if state:
                 item["cover_url"] = state
             elif state == "":
-                continue  # 查过没有，保留音源原图
+                continue  # 查过、QQ 没有 → 保留音源原图
             else:
-                item["cover_url"] = ""
-                item["cover_pending"] = True
+                pending.append(item)
+        if not pending:
+            return
+
+        def lookup(item: dict[str, Any]) -> tuple[str, str | None]:
+            return item["id"], qq_cover(str(item.get("name") or ""), str(item.get("singers") or ""))
+
+        with ThreadPoolExecutor(max_workers=max(SETTINGS.qq_cover_threads, 1)) as pool:
+            for item, (song_id, url) in zip(pending, pool.map(lookup, pending)):
+                try:
+                    self.storage.set_qq_cover(song_id, url)
+                except Exception:
+                    pass
+                if url:
+                    item["cover_url"] = url
 
     def covers(self, item_ids: list[str]) -> dict[str, str]:
         """按需补封面：返回每个 id 能用的最好封面（QQ 优先，其次音源原图）。
