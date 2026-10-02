@@ -53,6 +53,8 @@ jobs:
 
   desktop:
     name: ${{ matrix.name }}
+    # 静态检查 + 单元测试先过，再开始烧 4 个平台的构建时间
+    needs: analyze
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     strategy:
@@ -141,6 +143,7 @@ jobs:
 
   ios:
     name: iOS (未签名)
+    needs: analyze
     runs-on: macos-latest
     timeout-minutes: 40
     steps:
