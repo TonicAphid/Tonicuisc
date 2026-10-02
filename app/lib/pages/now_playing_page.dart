@@ -6,6 +6,7 @@ import '../models/song.dart';
 import '../player/player_controller.dart';
 import '../state/library_state.dart';
 import '../widgets/play_mode_icons.dart';
+import 'artist_page.dart';
 import 'queue_page.dart';
 
 /// 全屏播放页：封面 + 歌词（跟随进度高亮、可点击跳转）+ 进度条 + 播放控制。
@@ -242,12 +243,27 @@ class _NowPlayingPageState extends State<NowPlayingPage> {
             textAlign: TextAlign.center,
             style: theme.textTheme.titleLarge,
           ),
-          Text(
-            song.singers,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            textAlign: TextAlign.center,
-            style: theme.textTheme.bodyMedium,
+          // 点歌手名进歌手主页
+          InkWell(
+            onTap: song.singers.isEmpty
+                ? null
+                : () => ArtistPage.open(
+                      context,
+                      name: song.singers,
+                      api: widget.api,
+                      player: widget.controller,
+                      library: widget.library,
+                    ),
+            child: Text(
+              song.singers,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              textAlign: TextAlign.center,
+              style: theme.textTheme.bodyMedium?.copyWith(
+                color: theme.colorScheme.primary,
+                decoration: TextDecoration.underline,
+              ),
+            ),
           ),
         ],
       ),

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import shutil
 import time
 import uuid
@@ -10,6 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import tonicuisc_server.service as service_module
 from tonicuisc_server.service import MusicService
 from tonicuisc_server.storage import Storage
 
@@ -46,20 +48,34 @@ class _FakeClient:
 class _SourceStub:
     """模拟单个音源的 client。"""
 
-    def __init__(self, source: str) -> None:
+    def __init__(self, source: str, singers: str = "歌手", count: int = 1) -> None:
         self.source = source
+        self.singers = singers
+        self.count = count
         self.calls = 0
+        self.sizes: list[int] = []
 
     def search(self, **kwargs) -> list:
         self.calls += 1
-        return [_song(f"{self.source[:4]}-1", self.source)]
+        self.sizes.append(getattr(self, "search_size_per_source", 0))
+        songs = []
+        for index in range(self.count):
+            song = _song(f"{self.source[:4]}-{index}", self.source)
+            song.singers = self.singers
+            songs.append(song)
+        return songs
 
 
 class _MultiClient:
     """带 music_clients 结构的桩，用来验证「只打选中的音源」。"""
 
-    def __init__(self, sources: tuple[str, ...] = ("MiguMusicClient", "KuwoMusicClient")) -> None:
-        self.music_clients = {name: _SourceStub(name) for name in sources}
+    def __init__(
+        self,
+        sources: tuple[str, ...] = ("MiguMusicClient", "KuwoMusicClient"),
+        singers: str = "歌手",
+        count: int = 1,
+    ) -> None:
+        self.music_clients = {name: _SourceStub(name, singers, count) for name in sources}
         self.clients_threadings: dict = {}
         self.requests_overrides: dict = {}
         self.search_rules: dict = {}
@@ -129,10 +145,78 @@ def test_different_keyword_searches_again(service: MusicService) -> None:
 def test_expired_cache_searches_again(service: MusicService) -> None:
     service.search("天地龙鳞")
     key = next(k for k in service._search_cache if k[0] == "天地龙鳞")
-    items, _ = service._search_cache[key]
-    service._search_cache[key] = (items, time.time() - 1)
+    items, _, size = service._search_cache[key]
+    service._search_cache[key] = (items, time.time() - 1, size)
     service.search("天地龙鳞")
     assert service._client.calls == 2
+
+
+def test_search_page_returns_disjoint_pages(service: MusicService) -> None:
+    service._client = _MultiClient(sources=("KuwoMusicClient",), count=30)
+
+    first = service.search_page("天地龙鳞", sources=["kuwo"], offset=0, limit=15)
+    second = service.search_page("天地龙鳞", sources=["kuwo"], offset=15, limit=15)
+
+    assert len(first["items"]) == 15 and first["has_more"] is True
+    assert len(second["items"]) == 15
+    first_ids = {item["id"] for item in first["items"]}
+    second_ids = {item["id"] for item in second["items"]}
+    assert not (first_ids & second_ids), "两页不能有重复的歌"
+
+    # 再往后就没有了
+    third = service.search_page("天地龙鳞", sources=["kuwo"], offset=30, limit=15)
+    assert third["items"] == [] and third["has_more"] is False
+
+
+def test_search_page_grows_fetch_size(service: MusicService) -> None:
+    """翻页时抓取量跟着变大，但请求数保持在并发数附近。"""
+    service._client = _MultiClient(sources=("KuwoMusicClient",), count=60)
+
+    service.search_page("天地龙鳞", sources=["kuwo"], offset=0, limit=15)
+    service.search_page("天地龙鳞", sources=["kuwo"], offset=15, limit=15)
+
+    stub = service._client.music_clients["KuwoMusicClient"]
+    assert stub.sizes[-1] >= 30, "第二页要抓更多"
+    assert stub.search_size_per_page >= 1
+
+
+def test_covers_are_looked_up_on_demand(service: MusicService, monkeypatch) -> None:
+    """搜索本身不等封面；封面是客户端另外来问的。"""
+    calls: list[str] = []
+
+    def fake_cover(name: str, singers: str = "") -> str:
+        calls.append(name)
+        return "https://y.gtimg.cn/cover.jpg"
+
+    _enable_qq_cover(monkeypatch, fake_cover)
+    service._client = _MultiClient(sources=("KuwoMusicClient",))
+
+    items = service.search("天地龙鳞", sources=["kuwo"])
+    assert calls == [], "搜索接口不该等封面"
+    assert items[0]["cover_url"] == ""
+
+    found = service.covers([items[0]["id"]])
+    assert found[items[0]["id"]] == "https://y.gtimg.cn/cover.jpg"
+    assert calls == ["歌 Kuwo-0"]
+
+    # 第二次：库里已经有缓存，不再请求 QQ
+    assert service.covers([items[0]["id"]]) == {items[0]["id"]: "https://y.gtimg.cn/cover.jpg"}
+    assert calls == ["歌 Kuwo-0"], "缓存过的封面不该重复查"
+
+
+def test_covers_skip_songs_without_qq_match(service: MusicService, monkeypatch) -> None:
+    _enable_qq_cover(monkeypatch, lambda name, singers="": None)
+    service._client = _MultiClient(sources=("KuwoMusicClient",))
+    items = service.search("天地龙鳞", sources=["kuwo"])
+
+    assert service.covers([items[0]["id"]]) == {}, "没查到就不返回，客户端保持原图"
+    assert service.storage.qq_cover_of(items[0]["id"]) == "", "但记下查过了"
+
+
+def test_covers_disabled_returns_empty(service: MusicService) -> None:
+    service._client = _MultiClient(sources=("KuwoMusicClient",))
+    items = service.search("天地龙鳞", sources=["kuwo"])
+    assert service.covers([items[0]["id"]]) == {}  # conftest 默认关了
 
 
 def test_only_selected_source_is_requested(service: MusicService) -> None:
@@ -161,3 +245,33 @@ def test_disabled_source_is_rejected(service: MusicService) -> None:
     service._client = _MultiClient(sources=("MiguMusicClient",))
     with pytest.raises(ValueError):
         service.search("天地龙鳞", sources=["kuwo"])
+
+
+# ------------------------------------------------------------------ QQ 封面
+def _enable_qq_cover(monkeypatch, fake):
+    monkeypatch.setattr(
+        service_module, "SETTINGS", dataclasses.replace(service_module.SETTINGS, qq_cover=True)
+    )
+    monkeypatch.setattr(service_module, "qq_cover", fake)
+
+
+# ------------------------------------------------------------------ 歌手页
+def test_artist_keeps_only_matching_singers(service: MusicService) -> None:
+    service._client = _MultiClient(sources=("KuwoMusicClient",), singers="周杰伦")
+
+    result = service.artist("周杰伦", sources=["kuwo"])
+    assert result["filtered"] is True
+    assert result["total"] == 1 and result["items"][0]["singers"] == "周杰伦"
+
+
+def test_artist_falls_back_when_nothing_matches(service: MusicService) -> None:
+    service._client = _MultiClient(sources=("KuwoMusicClient",), singers="别人")
+
+    result = service.artist("周杰伦", sources=["kuwo"])
+    assert result["filtered"] is False, "一首都没匹配上就退回原始结果"
+    assert result["total"] == 1
+
+
+def test_artist_without_name(service: MusicService) -> None:
+    result = service.artist("   ")
+    assert result["total"] == 0 and result["filtered"] is False

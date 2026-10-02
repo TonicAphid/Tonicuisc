@@ -134,9 +134,13 @@ flutter build windows --release
 | `TONICUISC_SEARCH_SIZE` | `10` | 每个音源返回数量 |
 | `TONICUISC_SEARCH_SIZE_PER_PAGE` | `1` | 每个请求取几条；`1` = 10 条拆成 10 个请求并行拿 |
 | `TONICUISC_SEARCH_THREADS` | `10` | 每个音源的并发请求数 |
+| `TONICUISC_SEARCH_PAGE_SIZE` | `15` | 客户端一页多少条（滑到底再要下一页） |
+| `TONICUISC_SEARCH_MAX` | `60` | 一次搜索最多抓多少条（分页上限） |
 | `TONICUISC_AUTH` | `1` | 设备 API Key 校验（`0` 关闭） |
 | `TONICUISC_DEVICE_CODE_TTL` | `600` | 设备码有效期（秒） |
 | `TONICUISC_TRUST_PROXY` | `1` | 限速是否按反代写的 `X-Forwarded-For` 取来源 IP |
+| `TONICUISC_QQ_COVER` | `1` | 用 QQ 音乐补封面（咪咕/酷我的封面经常糊） |
+| `TONICUISC_QQ_COVER_THREADS` | `8` | 补封面时的并发数 |
 | `TONICUISC_PUBLIC_URL` | 空 | 对外地址，启动横幅打印登录链接用 |
 | `TONICUISC_CACHE_DIR` | `server/.cache` | 下载缓存目录 |
 | `TONICUISC_DB` | `<CACHE_DIR>/tonicuisc.db` | SQLite 数据库文件 |
@@ -159,6 +163,7 @@ flutter build windows --release
 | DELETE | `/api/library/{kind}` | 清空列表 |
 | GET | `/api/sources` | 可用音源 |
 | GET | `/api/search?keyword=&sources=migu,kuwo&limit=50&refresh=false` | 搜索（`refresh=true` 跳过搜索缓存） |
+| GET | `/api/artist?name=周杰伦&sources=&limit=50` | 歌手主页：这个歌手在音源上能搜到的歌 |
 | GET | `/api/history?limit=20` | 搜索历史（按关键词聚合） |
 | GET | `/api/url/{id}` | 音源直链（best effort） |
 | GET | `/api/lyric/{id}` | 歌词（LRC 文本） |
@@ -234,6 +239,29 @@ caddy run --config deploy/Caddyfile     # https://106-35-196-104.nip.io
 
 公网暴露后注意：`/login` 是免鉴权的，建议只开放 443、给 Caddy 加上访问限速，密码别用弱口令。
 
+## 封面（QQ 音乐）
+
+咪咕 / 酷我给的封面经常是小图或者糊的，所以默认**用 QQ 音乐补一次**：拿「歌名 + 歌手」搜一下 QQ 音乐，从结果的 `albummid` 拼出 500×500 的专辑图 `https://y.gtimg.cn/music/photo_new/T002R500x500M000{albummid}.jpg`。
+
+**搜索接口不等封面**——先按音源原图把列表画出来，客户端渲染完再调 `POST /api/covers {"ids":[...]}` 单独问一次，查到就换图（`lib/state/cover_cache.dart`）。所以补封面慢一点也不会拖慢搜索。
+
+- 服务端并发查（默认 8 线程），失败或不匹配就返回空、保持音源原始封面；
+- QQ 搜不到时会返回「最接近」的结果，所以做了匹配校验：歌名要相等、或短的那个（≥4 字）被长的包含，**并且歌手要对得上**——否则搜「不存在的歌名xyzabc」会被 `XY&Z` 这种短名字骗到；
+- 结果缓存在 `songs.qq_cover`：`NULL` = 没查过、`''` = 查过没有、其它 = 地址。同一首歌只真的查一次，重启也不丢；
+- 收藏 / 喜欢 / 历史列表读的是 `COALESCE(NULLIF(qq_cover,''), cover_url)`，所以老数据也会自动用上新封面；
+- 不想要就设 `TONICUISC_QQ_COVER=0`。
+
+## 歌手主页
+
+列表里**点歌手名**（搜索结果、全屏播放页）进歌手主页：`GET /api/artist?name=<歌手>`。
+
+**先说清楚它能做到什么、做不到什么**：音源只有关键词搜索，**没有「歌手 → 专辑 → 全部作品」这种接口**，所以这里是「搜歌手名，再只留歌手字段里真的包含这个名字的结果」（人名支持 `/`、`、`、`&` 分隔），同一个人名会多抓一些（2 倍且至少 60 条）再过滤。因此：
+
+- ✅ 能拿到这个歌手在咪咕/酷我上**关键词搜索排得比较靠前**的歌，比在搜索框里手打歌手名看到的多；
+- ❌ **不等于该歌手的完整曲库**。冷门歌、没上架的歌不会有，可能混进同名/翻唱，也可能因为音源只返回前 N 条而丢掉一部分。
+
+想要真·完整曲库，得接专门的歌手接口（比如 QQ 音乐的 `singer_mid` → 歌曲列表），但那些歌的**播放地址还得回咪咕/酷我搜一遍**，成本和复杂度都上一个台阶，暂时没做。
+
 ## 数据库（SQLite）
 
 `server/.cache/tonicuisc.db`，Python 自带 `sqlite3`，没有额外依赖。主要表：
@@ -259,7 +287,8 @@ caddy run --config deploy/Caddyfile     # https://106-35-196-104.nip.io
 ## 搜索过程
 
 - **只请求选中的音源**：musicdl 的 `MusicClient.search()` 会把配置里所有音源都打一遍，所以服务端直接调用选中音源的 client；没勾的音源不会被请求。
-- **并行拿结果**：`search_size_per_source=10` + `search_size_per_page=1` → musicdl 生成 10 个搜索 URL（每页 1 条），再用 `search_threads` 个线程并发请求；多个音源之间也并行。
+- **并行拿结果**：musicdl 会按 `search_size_per_source` / `search_size_per_page` 拆成多个搜索 URL 并发请求。服务端会根据「这次要多少条」自动调这两个值，让**请求数保持在并发数附近**：要 15 条 → 每页 2 条、8 个请求；要 30 条 → 每页 3 条、10 个请求。配置里的 `search_size_per_page` 是下限（默认 1，即「10 条分 10 个请求」）。
+- **分页**：`GET /api/search?offset=&limit=` 返回一页 + `has_more`。App 滑到底自动再要 15 条，**按 id 去重**，不会出现重复的歌；同一关键词的结果在服务端缓存 10 分钟，翻页时不需要重新搜（缓存不够多才会重新抓）。
 - **不打印进度条**：给 musicdl 传一个 `disable=True` 的 rich `Progress`，它就不再往控制台刷进度条。
 - **耗时可见**：服务端每个 `/api` 请求打一行 `[access] GET /api/search 200 5.482s`；`/api/search` 另外在响应里返回 `elapsed`（服务端耗时）。客户端自己再量一次总耗时（含网络往返），显示成「搜索完成 · 用时 5.5 秒（服务端 2.9 秒）· 共 20 首」。
 
@@ -282,14 +311,15 @@ caddy run --config deploy/Caddyfile     # https://106-35-196-104.nip.io
 ## 客户端界面
 
 - **登录页**（未登录时的首屏，`lib/pages/login_page.dart`）：进页面自动登记设备码，主按钮「打开登录页并复制设备码」弹出系统浏览器并把码放进剪贴板；后台每 2 秒轮询，批准后自动完成登录。连不上服务器时给人话提示（不是原始异常）。
-- **搜索 tab**（`lib/pages/search_page.dart`）：关键词搜索、音源勾选、显示「正在进行…」和用时、试听、下载、点红心加进「我喜欢」。
+- **搜索 tab**（`lib/pages/search_page.dart`）：关键词搜索、音源勾选、显示「正在进行…」和用时、试听、下载、点红心加进「我喜欢」；**点歌手名进歌手主页**；**滑到底自动再加载 15 条**（按 id 去重，不会重复）。
+- **歌手主页**（`lib/pages/artist_page.dart`）：这个歌手能搜到的所有歌、「全部播放」、逐首点红心（完整度见上面的「歌手主页」一节）。
 - **列表 tab**（`lib/pages/library_page.dart`）：最上面是**播放列表**（显示正在播放的歌、队列长度、播放模式），下面是 **我喜欢 / 收藏 / 播放历史**，各自显示数量，点进去可播放、单条移除、清空。
 - **播放队列**（`lib/pages/queue_page.dart`）：全屏播放页点列表按钮弹出，或在「列表」tab 里整页打开。
 - **播放模式**：顺序播放 / 列表循环 / 单曲循环 / 随机播放，在播放页和队列页都能切；播完自动按模式走下一首。
 - **我的 tab**（`lib/pages/profile_page.dart`）：账户名、本机设备名与设备 ID、服务器地址、重新登录、退出登录、版本号、已登录设备列表（可逐台吊销，删完即从列表消失）。
 - **底部播放条**：封面缩略图、播放/暂停、进度拖动；点一下展开全屏播放页。
 - **全屏播放页**（`lib/pages/now_playing_page.dart`）：大封面 + 喜欢/收藏 + 歌词跟随高亮（点歌词跳转）+ 进度条 + 上一首 / 播放暂停 / 下一首。**拖进度条时音频继续播，滑块跟手指走，松手才跳到那个位置**。
-- **封面**：所有列表都用搜到的 `cover_url`（`lib/widgets/song_avatar.dart`），加载失败或没有封面才退回音源首字。
+- **封面**：所有列表都用搜到的 `cover_url`（`lib/widgets/song_avatar.dart`），QQ 补的封面到了会自动换上去；加载失败或没有封面才退回音源首字。
 - **屏幕常亮**：App 在前台时不让系统自动息屏（`wakelock_plus`），切到后台自动放开，不会后台耗电。
 
 ## CI

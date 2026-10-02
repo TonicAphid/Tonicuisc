@@ -68,10 +68,21 @@ class DirectSource {
 
 /// 一次搜索的结果 + 服务端耗时（秒）。
 class SearchResult {
-  const SearchResult({required this.items, required this.elapsed});
+  const SearchResult({
+    required this.items,
+    required this.elapsed,
+    this.hasMore = false,
+    this.total = 0,
+  });
 
   final List<Song> items;
   final double elapsed;
+
+  /// 还有下一页（滑到底继续加载）。
+  final bool hasMore;
+
+  /// 服务端这次一共拿到多少条。
+  final int total;
 }
 
 /// 喜欢 / 收藏 / 历史 的数量与 id 集合。
@@ -174,13 +185,22 @@ class ApiClient {
     return query == null ? uri : uri.replace(queryParameters: query);
   }
 
-  Future<SearchResult> search(String keyword, {List<String> sources = const [], int limit = 50}) async {
+  /// 搜索。[offset] 不为 0 就是「滑到底再要 15 条」。
+  Future<SearchResult> search(
+    String keyword, {
+    List<String> sources = const [],
+    int offset = 0,
+    int limit = 15,
+    bool refresh = false,
+  }) async {
     final resp = await http
         .get(
           _uri('/api/search', {
             'keyword': keyword,
             if (sources.isNotEmpty) 'sources': sources.join(','),
+            'offset': '$offset',
             'limit': '$limit',
+            if (refresh) 'refresh': 'true',
           }),
           headers: _headers,
         )
@@ -193,7 +213,26 @@ class ApiClient {
     return SearchResult(
       items: items.map((e) => Song.fromJson(e as Map<String, dynamic>)).toList(),
       elapsed: (data['elapsed'] as num?)?.toDouble() ?? 0,
+      hasMore: data['has_more'] == true,
+      total: (data['total'] as num?)?.toInt() ?? 0,
     );
+  }
+
+  /// 按需取 QQ 封面，只返回查到的（没查到就用音源原图）。
+  Future<Map<String, String>> covers(List<String> ids) async {
+    if (ids.isEmpty) return const {};
+    final resp = await http
+        .post(
+          _uri('/api/covers'),
+          headers: {..._headers, 'Content-Type': 'application/json'},
+          body: jsonEncode({'ids': ids}),
+        )
+        .timeout(const Duration(seconds: 30));
+    if (resp.statusCode != 200) throw _errorOf(resp);
+    final data = jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
+    final raw = data['covers'];
+    if (raw is! Map) return const {};
+    return raw.map((key, value) => MapEntry('$key', '$value'));
   }
 
   Uri streamUri(String id) => _uri('/api/stream/$id');
@@ -287,6 +326,25 @@ class ApiClient {
     final resp = await http
         .get(_uri('/api/library/$kind', {'limit': '$limit'}), headers: _headers)
         .timeout(const Duration(seconds: 30));
+    if (resp.statusCode != 200) throw _errorOf(resp);
+    final data = jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
+    return ((data['items'] as List?) ?? const [])
+        .map((e) => Song.fromJson((e as Map).cast<String, dynamic>()))
+        .toList();
+  }
+
+  /// 歌手主页：这个歌手在音源上能搜到的歌。
+  Future<List<Song>> artist(String name, {List<String> sources = const [], int limit = 50}) async {
+    final resp = await http
+        .get(
+          _uri('/api/artist', {
+            'name': name,
+            if (sources.isNotEmpty) 'sources': sources.join(','),
+            'limit': '$limit',
+          }),
+          headers: _headers,
+        )
+        .timeout(const Duration(seconds: 90));
     if (resp.statusCode != 200) throw _errorOf(resp);
     final data = jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
     return ((data['items'] as List?) ?? const [])

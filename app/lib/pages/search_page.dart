@@ -1,10 +1,14 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../api/api_client.dart';
 import '../models/song.dart';
 import '../player/player_controller.dart';
+import '../state/cover_cache.dart';
 import '../state/library_state.dart';
 import '../widgets/song_avatar.dart';
+import 'artist_page.dart';
 
 /// 搜索页（首页 tab）：搜索、试听、下载、点红心。
 class SearchPage extends StatefulWidget {
@@ -26,19 +30,39 @@ class SearchPage extends StatefulWidget {
 }
 
 class _SearchPageState extends State<SearchPage> {
+  /// 一次要多少条；滑到底再要同样多（服务端会去重，不会给重复的）。
+  static const int _pageSize = 15;
+
   final TextEditingController _keyword = TextEditingController();
   final Set<String> _sources = <String>{'migu', 'kuwo'};
+  final ScrollController _scroll = ScrollController();
 
   List<Song> _results = const [];
   bool _searching = false;
+  bool _loadingMore = false;
+  bool _hasMore = false;
+  String _lastKeyword = '';
   String? _error;
   double? _elapsed;
   double? _serverElapsed;
 
   @override
+  void initState() {
+    super.initState();
+    _scroll.addListener(_onScroll);
+  }
+
+  @override
   void dispose() {
+    _scroll.dispose();
     _keyword.dispose();
     super.dispose();
+  }
+
+  void _onScroll() {
+    if (!_scroll.hasClients) return;
+    final remaining = _scroll.position.maxScrollExtent - _scroll.position.pixels;
+    if (remaining < 400) _loadMore();
   }
 
   Future<void> _search() async {
@@ -49,17 +73,27 @@ class _SearchPageState extends State<SearchPage> {
       _error = null;
       _elapsed = null;
       _serverElapsed = null;
+      _hasMore = false;
+      _lastKeyword = keyword;
     });
     final stopwatch = Stopwatch()..start();
     try {
-      final result = await widget.api.search(keyword, sources: _sources.toList());
+      final result = await widget.api.search(
+        keyword,
+        sources: _sources.toList(),
+        offset: 0,
+        limit: _pageSize,
+        refresh: true,
+      );
       stopwatch.stop();
       if (!mounted) return;
       setState(() {
         _results = result.items;
+        _hasMore = result.hasMore;
         _elapsed = stopwatch.elapsedMilliseconds / 1000;
         _serverElapsed = result.elapsed;
       });
+      unawaited(CoverCache.resolve(widget.api, result.items));
     } catch (err) {
       stopwatch.stop();
       if (!mounted) return;
@@ -69,10 +103,37 @@ class _SearchPageState extends State<SearchPage> {
       }
       setState(() {
         _results = const [];
-        _error = '$err';
+        _error = friendlyError(err, widget.api.baseUrl);
       });
     } finally {
       if (mounted) setState(() => _searching = false);
+    }
+  }
+
+  /// 滑到底：再要 15 条，按 id 去重，绝不重复显示。
+  Future<void> _loadMore() async {
+    if (!_hasMore || _loadingMore || _searching || _lastKeyword.isEmpty) return;
+    setState(() => _loadingMore = true);
+    try {
+      final result = await widget.api.search(
+        _lastKeyword,
+        sources: _sources.toList(),
+        offset: _results.length,
+        limit: _pageSize,
+      );
+      if (!mounted) return;
+      final existing = _results.map((song) => song.id).toSet();
+      final fresh = result.items.where((song) => !existing.contains(song.id)).toList();
+      setState(() {
+        _results = [..._results, ...fresh];
+        // 服务端说没有了、或者这一页全是我这儿已经有的，就不再要了
+        _hasMore = result.hasMore && fresh.isNotEmpty;
+      });
+      unawaited(CoverCache.resolve(widget.api, fresh));
+    } catch (err) {
+      if (mounted) setState(() => _hasMore = false);
+    } finally {
+      if (mounted) setState(() => _loadingMore = false);
     }
   }
 
@@ -190,15 +251,55 @@ class _SearchPageState extends State<SearchPage> {
                   ),
                 )
               : ListView.separated(
-                  itemCount: _results.length,
+                  controller: _scroll,
+                  // 最后多一格：加载中 / 没有更多了
+                  itemCount: _results.length + 1,
                   separatorBuilder: (_, __) => const Divider(height: 1),
                   itemBuilder: (context, index) {
+                    if (index >= _results.length) return _footer(context);
                     final song = _results[index];
                     final isCurrent = widget.player.current?.id == song.id;
                     return ListTile(
                       leading: SongAvatar(song: song, highlight: isCurrent),
                       title: Text(song.name, maxLines: 1, overflow: TextOverflow.ellipsis),
-                      subtitle: Text(song.subtitle, maxLines: 1, overflow: TextOverflow.ellipsis),
+                      subtitle: Row(
+                        children: [
+                          // 点歌手名进歌手主页
+                          Flexible(
+                            child: InkWell(
+                              onTap: song.singers.isEmpty
+                                  ? null
+                                  : () => ArtistPage.open(
+                                        context,
+                                        name: song.singers,
+                                        api: widget.api,
+                                        player: widget.player,
+                                        library: widget.library,
+                                        sources: _sources.toList(),
+                                        onUnauthorized: widget.onUnauthorized,
+                                      ),
+                              child: Text(
+                                song.singers,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  color: Theme.of(context).colorScheme.primary,
+                                  decoration: TextDecoration.underline,
+                                ),
+                              ),
+                            ),
+                          ),
+                          if (song.subtitleTail.isNotEmpty)
+                            Flexible(
+                              child: Text(
+                                ' · ${song.subtitleTail}',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: Theme.of(context).textTheme.bodySmall,
+                              ),
+                            ),
+                        ],
+                      ),
                       trailing: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
@@ -225,6 +326,41 @@ class _SearchPageState extends State<SearchPage> {
                 ),
           ),
         ],
+      ),
+    );
+  }
+
+  /// 列表底部：还有就自动加载，没有就说一声。
+  Widget _footer(BuildContext context) {
+    final theme = Theme.of(context);
+    if (_loadingMore) {
+      return const Padding(
+        padding: EdgeInsets.symmetric(vertical: 20),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
+            SizedBox(width: 10),
+            Text('正在加载更多…'),
+          ],
+        ),
+      );
+    }
+    if (_hasMore) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 12),
+        child: Center(
+          child: TextButton(
+            onPressed: _loadMore,
+            child: const Text('加载更多'),
+          ),
+        ),
+      );
+    }
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 16),
+      child: Center(
+        child: Text('共 ${_results.length} 首', style: theme.textTheme.labelSmall),
       ),
     );
   }

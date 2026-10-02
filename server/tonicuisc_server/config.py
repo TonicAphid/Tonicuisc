@@ -74,12 +74,20 @@ class Settings:
     search_size_per_page: int = int(os.getenv("TONICUISC_SEARCH_SIZE_PER_PAGE", "1"))
     #: 每个音源同时并发多少个请求
     search_threads: int = int(os.getenv("TONICUISC_SEARCH_THREADS", "10"))
+    #: 客户端一页多少条（滑到底再要下一页）
+    search_page_size: int = int(os.getenv("TONICUISC_SEARCH_PAGE_SIZE", "15"))
+    #: 一次搜索最多抓多少条（分页上限，别让请求数炸）
+    search_max: int = int(os.getenv("TONICUISC_SEARCH_MAX", "60"))
     #: 设备级 API Key 校验（关闭后任何人都能调用接口）
     auth_enabled: bool = os.getenv("TONICUISC_AUTH", "1").lower() not in {"0", "false", "no", "off"}
     #: 设备码（登录请求）有效期（秒）
     device_code_ttl: int = int(os.getenv("TONICUISC_DEVICE_CODE_TTL", "600"))
     #: 是否信任反向代理写的 X-Forwarded-For（限速按真实来源 IP 算）
     trust_proxy: bool = os.getenv("TONICUISC_TRUST_PROXY", "1").lower() not in {"0", "false", "no", "off"}
+    #: 用 QQ 音乐补封面（咪咕/酷我的封面经常糊）
+    qq_cover: bool = os.getenv("TONICUISC_QQ_COVER", "1").lower() not in {"0", "false", "no", "off"}
+    #: 补封面时的并发数
+    qq_cover_threads: int = int(os.getenv("TONICUISC_QQ_COVER_THREADS", "8"))
     cache_dir: Path = field(
         default_factory=lambda: Path(os.getenv("TONICUISC_CACHE_DIR", SERVER_DIR / ".cache")).resolve()
     )

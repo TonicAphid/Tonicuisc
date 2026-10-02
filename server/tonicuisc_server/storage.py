@@ -139,6 +139,11 @@ class Storage:
         if "user_id" not in columns:
             self._conn.execute("ALTER TABLE devices ADD COLUMN user_id TEXT")
 
+        song_columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(songs)")}
+        if "qq_cover" not in song_columns:
+            # NULL = 还没查过；'' = 查过但没有；其它 = QQ 音乐封面地址
+            self._conn.execute("ALTER TABLE songs ADD COLUMN qq_cover TEXT")
+
     def close(self) -> None:
         with self._lock:
             self._conn.close()
@@ -210,6 +215,29 @@ class Storage:
     def song_meta(self, item_id: str) -> dict[str, Any] | None:
         row = self._row(item_id)
         return dict(row) if row is not None else None
+
+    def qq_cover_of(self, item_id: str) -> str | None:
+        """已缓存的 QQ 封面：None = 还没查过，'' = 查过但没有。"""
+        row = self._row(item_id)
+        return None if row is None else row["qq_cover"]
+
+    def set_qq_cover(self, item_id: str, url: str | None) -> None:
+        """写封面缓存；url 为 None 表示查过但没找到（存空串）。"""
+        with self._lock:
+            self._conn.execute("UPDATE songs SET qq_cover = ? WHERE id = ?", (url or "", item_id))
+            self._conn.commit()
+
+    def covers_to_lookup(self, item_ids: list[str]) -> list[str]:
+        """哪些歌还没查过 QQ 封面。"""
+        if not item_ids:
+            return []
+        placeholders = ",".join("?" for _ in item_ids)
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT id FROM songs WHERE id IN ({placeholders}) AND qq_cover IS NULL",
+                item_ids,
+            ).fetchall()
+        return [row["id"] for row in rows]
 
     def url_expired(self, item_id: str) -> bool:
         row = self._row(item_id)
@@ -514,7 +542,8 @@ class Storage:
             rows = self._conn.execute(
                 """
                 SELECT songs.id, songs.source, songs.source_label, songs.name, songs.singers, songs.album,
-                       songs.ext, songs.duration, songs.duration_s, songs.file_size, songs.cover_url,
+                       songs.ext, songs.duration, songs.duration_s, songs.file_size,
+                       COALESCE(NULLIF(songs.qq_cover, ''), songs.cover_url) AS cover_url,
                        songs.has_lyric, library.created_at, library.updated_at, library.play_count
                 FROM library JOIN songs ON songs.id = library.song_id
                 WHERE library.user_id = ? AND library.kind = ?

@@ -19,6 +19,7 @@ from typing import Any
 import requests
 
 from .config import SETTINGS, resolve_sources, source_label
+from .qqmusic import search_cover as qq_cover
 from .storage import Storage
 
 #: How long a search result stays addressable through /api/stream/{id}.
@@ -50,6 +51,11 @@ class DownloadFailed(RuntimeError):
 def _clean(value: Any, default: str = "") -> str:
     text = "" if value is None else str(value).strip()
     return default if text.upper() in {"NULL", "NONE"} else text
+
+
+def _split_artists(text: str) -> list[str]:
+    """把「蒋雪儿/王力宏」这种人名串拆成单个歌手（都转小写）。"""
+    return [part.strip().lower() for part in re.split(r"[/,，、&；;|]+", text or "") if part.strip()]
 
 
 def song_to_item(song: Any) -> dict[str, Any]:
@@ -136,44 +142,85 @@ class MusicService:
         if not keyword:
             return []
         selected = resolve_sources(sources) if sources else resolve_sources(SETTINGS.sources)
-        key = (keyword.lower(), tuple(sorted(selected)), limit or 0)
+        key = (keyword.lower(), tuple(sorted(selected)))
+        need = limit or 0
         if not refresh:
-            cached = self._cached_search(key)
+            cached = self._cached_search(key, need)
             if cached is not None:
                 return cached
         # 同一个关键词并发进来时只查一次，其余的等结果。
         with self._search_lock(key):
             if not refresh:
-                cached = self._cached_search(key)
+                cached = self._cached_search(key, need)
                 if cached is not None:
                     return cached
             items = self._search_sources(keyword, set(selected), limit)
-            self._search_cache[key] = (items, time.time() + SEARCH_TTL_SECONDS)
+            self._search_cache[key] = (items, time.time() + SEARCH_TTL_SECONDS, len(items))
             self._purge_search_cache()
             return [dict(item) for item in items]
 
-    def _cached_search(self, key: tuple[str, tuple[str, ...], int]) -> list[dict[str, Any]] | None:
+    def search_page(
+        self,
+        keyword: str,
+        sources: list[str] | None = None,
+        offset: int = 0,
+        limit: int | None = None,
+    ) -> dict[str, Any]:
+        """分页搜索：客户端滑到底就要下一页，同一关键词不会重复给同一首。"""
+        offset = max(offset, 0)
+        size = SETTINGS.search_page_size if limit is None else max(1, min(limit, 100))
+        need = min(offset + size, SETTINGS.search_max)
+        items = self.search(keyword, sources=sources, limit=need)
+        page = items[offset : offset + size]
+        return {
+            "items": page,
+            "offset": offset,
+            "limit": size,
+            "total": len(items),
+            # 这一页是满的、音源还有货、并且没到上限 → 还能继续加载
+            "has_more": len(page) >= size and len(items) >= need and need < SETTINGS.search_max,
+        }
+
+    def _cached_search(self, key: tuple[str, tuple[str, ...]], need: int) -> list[dict[str, Any]] | None:
+        """缓存里够多就直接切片；不够多返回 None 让调用方重新搜。"""
         entry = self._search_cache.get(key)
         if entry is None or entry[1] < time.time():
             return None
-        return [dict(item) for item in entry[0]]
+        items, _, size = entry
+        if need and size < need:
+            return None
+        sliced = items if not need else items[:need]
+        return [dict(item) for item in sliced]
 
-    def _search_lock(self, key: tuple[str, tuple[str, ...], int]) -> threading.Lock:
+    def _search_lock(self, key: tuple[str, tuple[str, ...]]) -> threading.Lock:
         with self._locks_guard:
             return self._search_locks.setdefault(key, threading.Lock())
 
     def _purge_search_cache(self) -> None:
         now = time.time()
-        for key in [k for k, (_, deadline) in self._search_cache.items() if deadline < now]:
+        for key in [k for k, (_, deadline, _) in self._search_cache.items() if deadline < now]:
             self._search_cache.pop(key, None)
         if len(self._search_cache) > 200:  # 兜底，避免无限增长
             oldest = sorted(self._search_cache, key=lambda k: self._search_cache[k][1])[: len(self._search_cache) - 200]
             for key in oldest:
                 self._search_cache.pop(key, None)
 
+    def _tune_fetch_size(self, client: Any, need: int) -> None:
+        """按这次要多少条调整 musicdl 的抓取量。
+
+        请求数保持在 search_threads 附近：要 30 条、10 个线程 → 每页 3 条、10 个请求。
+        配置里的 search_size_per_page 是下限（默认 1，即「10 条分 10 个请求」）。
+        """
+        per_page = max(SETTINGS.search_size_per_page, -(-max(need, 1) // max(SETTINGS.search_threads, 1)))  # 向上取整
+        try:
+            client.search_size_per_source = max(need, 1)
+            client.search_size_per_page = per_page
+        except Exception:
+            pass
+
     def _search_sources(self, keyword: str, wanted: set[str], limit: int | None) -> list[dict[str, Any]]:
         self._prune_search_dirs()
-        results = self._search_selected(keyword, wanted)
+        results = self._search_selected(keyword, wanted, limit)
         items: list[dict[str, Any]] = []
         seen: set[str] = set()
         for source_name, songs in results.items():
@@ -194,11 +241,47 @@ class MusicService:
         self.storage.record_search(keyword, sorted(wanted), [item["id"] for item in items])
         return items
 
-    def _search_selected(self, keyword: str, wanted: set[str]) -> dict[str, list[Any]]:
+    # ------------------------------------------------------------------ 封面
+    def covers(self, item_ids: list[str]) -> dict[str, str]:
+        """按需补封面：只返回「有 QQ 封面」的那些 id。
+
+        搜索接口不等这个，客户端拿到列表之后再单独来问，查到就换图。
+        查过的结果落库（'' = 查过没有），所以同一首歌只真的查一次。
+        """
+        if not item_ids or not SETTINGS.qq_cover:
+            return {}
+        found: dict[str, str] = {}
+        pending: list[tuple[str, str, str]] = []
+        for item_id in item_ids[:200]:
+            cached = self.storage.qq_cover_of(item_id)
+            if cached is None:
+                meta = self.storage.song_meta(item_id) or {}
+                name = str(meta.get("name") or "")
+                if name:
+                    pending.append((item_id, name, str(meta.get("singers") or "")))
+            elif cached:
+                found[item_id] = cached
+
+        if pending:
+            def lookup(entry: tuple[str, str, str]) -> tuple[str, str | None]:
+                return entry[0], qq_cover(entry[1], entry[2])
+
+            with ThreadPoolExecutor(max_workers=max(SETTINGS.qq_cover_threads, 1)) as pool:
+                for item_id, url in pool.map(lookup, pending):
+                    try:
+                        self.storage.set_qq_cover(item_id, url)
+                    except Exception:
+                        pass
+                    if url:
+                        found[item_id] = url
+        return found
+
+    def _search_selected(self, keyword: str, wanted: set[str], need: int | None = None) -> dict[str, list[Any]]:
         """只请求被选中的音源。
 
         musicdl 的 ``MusicClient.search()`` 会把配置里所有音源都打一遍，
         所以这里直接调用对应音源 client 的 ``search()``。
+        ``need`` 是这次想要多少条（分页时会变大），用来调整抓取量。
         """
         client = self.client
         clients = getattr(client, "music_clients", None)
@@ -213,10 +296,13 @@ class MusicService:
         threadings = getattr(client, "clients_threadings", None) or {}
         overrides = getattr(client, "requests_overrides", None) or {}
         rules = getattr(client, "search_rules", None) or {}
+        per_source = max(need or SETTINGS.search_size, SETTINGS.search_size)
 
         def run(name: str) -> list[Any]:
+            source_client = clients[name]
+            self._tune_fetch_size(source_client, per_source)
             return (
-                clients[name].search(
+                source_client.search(
                     keyword=keyword,
                     num_threadings=threadings.get(name, 5),
                     request_overrides=overrides.get(name, {}),
@@ -311,6 +397,28 @@ class MusicService:
 
     def history(self, limit: int = 20) -> list[dict[str, Any]]:
         return self.storage.recent_searches(limit)
+
+    # ---------------------------------------------------------------- 歌手页
+    def artist(self, name: str, sources: list[str] | None = None, limit: int = 50) -> dict[str, Any]:
+        """搜歌手名，只留下歌手字段里真的包含这个名字的。
+
+        音源只有关键词搜索、没有"歌手全部作品"这种接口，所以这是能做到的最好结果：
+        同一个人名多抓一些（默认按 2 倍 + 至少 60 条）再过滤。
+        过滤后一首都没有（比如搜出来全是翻唱）时，退回不过滤的结果。
+        """
+        name = (name or "").strip()
+        if not name:
+            return {"name": name, "total": 0, "items": [], "filtered": False}
+        items = self.search(name, sources=sources, limit=max(limit * 2, 60))
+        tokens = _split_artists(name)
+        matched = [
+            item
+            for item in items
+            if any(token in str(item.get("singers") or "").lower() for token in tokens)
+        ]
+        filtered = bool(matched)
+        result = matched if filtered else items
+        return {"name": name, "total": len(result[:limit]), "items": result[:limit], "filtered": filtered}
 
     def lyric(self, item_id: str) -> str:
         song = self.get_song(item_id)

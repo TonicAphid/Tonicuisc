@@ -45,6 +45,9 @@ class Song {
 
   String get subtitle => [singers, album, duration].where((e) => e.isNotEmpty).join(' · ');
 
+  /// 歌手后面的部分（专辑 · 时长），配合可点击的歌手名用。
+  String get subtitleTail => [album, duration].where((e) => e.isNotEmpty).join(' · ');
+
   /// 下载时使用的文件名（去掉文件系统非法字符）。
   String get fileBaseName =>
       '$name - $singers'.replaceAll(RegExp(r'[\\/:*?"<>|\x00-\x1f]'), '_').trim();

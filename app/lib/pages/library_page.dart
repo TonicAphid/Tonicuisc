@@ -1,8 +1,11 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../api/api_client.dart';
 import '../models/song.dart';
 import '../player/player_controller.dart';
+import '../state/cover_cache.dart';
 import '../state/library_state.dart';
 import '../widgets/play_mode_icons.dart';
 import '../widgets/song_avatar.dart';
@@ -145,6 +148,7 @@ class _LibraryListPageState extends State<LibraryListPage> {
       final songs = await widget.api.libraryList(widget.kind);
       if (!mounted) return;
       setState(() => _songs = songs);
+      unawaited(CoverCache.resolve(widget.api, songs));
     } catch (err) {
       if (!mounted) return;
       if (err is UnauthorizedException) {

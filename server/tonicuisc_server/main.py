@@ -360,6 +360,22 @@ async def library_clear(kind: str, request: Request) -> dict:
     return {"kind": kind, "removed": removed}
 
 
+@app.get("/api/artist")
+async def artist(
+    name: str = Query(..., min_length=1, description="歌手名"),
+    sources: str | None = Query(None, description="逗号分隔，如 migu,kuwo"),
+    limit: int = Query(50, ge=1, le=200),
+) -> dict:
+    """歌手主页：这个歌手在音源上能搜到的歌。"""
+    source_list = [s for s in (sources or "").replace(" ", ",").split(",") if s] if sources else None
+    try:
+        return await asyncio.to_thread(get_service().artist, name, source_list, limit)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"搜索失败: {exc}")
+
+
 @app.get("/api/history")
 async def history(limit: int = Query(20, ge=1, le=200)) -> dict:
     """搜索历史（按关键词聚合，最近的在前）。"""
@@ -382,24 +398,41 @@ async def sources() -> dict:
 async def search(
     keyword: str = Query(..., min_length=1, description="搜索关键词"),
     sources: str | None = Query(None, description="逗号分隔，如 migu,kuwo"),
-    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0, description="从第几条开始（滑到底要下一页时传）"),
+    limit: int | None = Query(None, ge=1, le=100, description="这一页要多少条"),
     refresh: bool = Query(False, description="true = 跳过服务端搜索缓存，强制重新联网搜索"),
 ) -> dict:
     source_list = [s for s in (sources or "").replace(" ", ",").split(",") if s] if sources else None
     started = time.perf_counter()
     try:
-        items = await asyncio.to_thread(get_service().search, keyword, source_list, limit, refresh)
+        service = get_service()
+        if refresh:
+            await asyncio.to_thread(service.search, keyword, source_list, None, True)
+        page = await asyncio.to_thread(service.search_page, keyword, source_list, offset, limit)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:  # musicdl network failures
         raise HTTPException(status_code=502, detail=f"搜索失败: {exc}")
     return {
         "keyword": keyword,
-        "total": len(items),
+        "total": page["total"],
+        "offset": page["offset"],
+        "has_more": page["has_more"],
         # 搜索耗时（秒），客户端用它显示「用时 x.x 秒」
         "elapsed": round(time.perf_counter() - started, 2),
-        "items": items,
+        "items": page["items"],
     }
+
+
+class CoversRequest(BaseModel):
+    ids: list[str] = Field(default_factory=list, max_length=200, description="歌曲 id 列表")
+
+
+@app.post("/api/covers")
+async def covers(payload: CoversRequest) -> dict:
+    """按需补封面：只返回查到 QQ 封面的那些 id，查不到的不返回（客户端保持原图）。"""
+    found = await asyncio.to_thread(get_service().covers, payload.ids)
+    return {"covers": found}
 
 
 @app.get("/api/url/{item_id:path}")

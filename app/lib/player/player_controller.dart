@@ -7,6 +7,7 @@ import 'package:just_audio_background/just_audio_background.dart';
 
 import '../api/api_client.dart';
 import '../models/song.dart';
+import '../state/cover_cache.dart';
 
 /// 播放模式（图标在 widgets/play_mode_icons.dart 里映射）。
 enum PlayMode {
@@ -84,6 +85,7 @@ class PlayerController extends ChangeNotifier {
     _queue = List<Song>.of(songs);
     if (_queue.isEmpty) return;
     _index = startIndex.clamp(0, _queue.length - 1);
+    unawaited(CoverCache.resolve(api, _queue)); // 顺带把这批歌的封面问一下
     await _playCurrent();
   }
 

@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
 
 import '../models/song.dart';
+import '../state/cover_cache.dart';
 
-/// 歌曲封面：优先显示搜到的 cover，没有封面或加载失败才退回音源首字（咪/酷）。
+/// 歌曲封面：优先用 QQ 补的封面（[CoverCache]），没有就用音源给的，
+/// 再没有或加载失败才退回音源首字（咪 / 酷）。
 class SongAvatar extends StatelessWidget {
   const SongAvatar({
     super.key,
@@ -21,6 +23,13 @@ class SongAvatar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    return ValueListenableBuilder<int>(
+      valueListenable: CoverCache.revision,
+      builder: (context, _, __) => _build(context, CoverCache.of(song.id) ?? song.coverUrl),
+    );
+  }
+
+  Widget _build(BuildContext context, String coverUrl) {
     final scheme = Theme.of(context).colorScheme;
     final fallback = Container(
       width: size,
@@ -33,10 +42,10 @@ class SongAvatar extends StatelessWidget {
       ),
     );
 
-    final image = song.coverUrl.isEmpty
+    final image = coverUrl.isEmpty
         ? fallback
         : Image.network(
-            song.coverUrl,
+            coverUrl,
             width: size,
             height: size,
             fit: BoxFit.cover,

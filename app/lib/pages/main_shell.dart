@@ -6,6 +6,7 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 import '../api/api_client.dart';
 import '../api/credentials.dart';
 import '../player/player_controller.dart';
+import '../state/cover_cache.dart';
 import '../state/library_state.dart';
 import '../widgets/player_bar.dart';
 import 'library_page.dart';
@@ -107,6 +108,7 @@ class _MainShellState extends State<MainShell> with WidgetsBindingObserver {
 
   Future<void> _handleUnauthorized(String message) async {
     await Credentials.clear();
+    CoverCache.clear();
     if (!mounted) return;
     setState(() {
       _apiKey = null;
@@ -118,6 +120,7 @@ class _MainShellState extends State<MainShell> with WidgetsBindingObserver {
 
   Future<void> _logout() async {
     await Credentials.clear();
+    CoverCache.clear();
     if (!mounted) return;
     setState(() {
       _apiKey = null;
