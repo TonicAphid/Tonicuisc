@@ -220,7 +220,7 @@ flutter run -d windows     # 或 linux / macos
 flutter build windows --release
 ```
 
-本机运行后端时，桌面端默认地址是 `http://127.0.0.1:8000`；iOS 真机要在右上角设置里改成局域网地址（如 `http://192.168.1.10:8000`）。
+App 的默认服务器地址是 **`http://192.168.5.37:8000`**，定义在 `app/lib/api/api_client.dart` 的 `kDefaultServerUrl`——要换服务器改这一行就行。用户改过之后会存在本机（「我的 → 服务器地址」），不会再回到默认值。
 
 播放后端：iOS / macOS 用 just_audio 原生实现，Windows / Linux 通过 `just_audio_media_kit`（media_kit）播放。
 

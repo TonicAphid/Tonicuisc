@@ -9,13 +9,11 @@ import '../models/song.dart';
 
 const String _prefsKey = 'server_base_url';
 
-/// 桌面端默认连本机，移动端需要填局域网地址（在设置里改）。
-String defaultBaseUrl() {
-  if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
-    return 'http://127.0.0.1:8000';
-  }
-  return 'http://192.168.1.100:8000';
-}
+/// 默认服务器地址。要换服务器就改这一行（首次启动用，之后存在本地设置里）。
+const String kDefaultServerUrl = 'http://192.168.5.37:8000';
+
+/// 所有平台的默认地址；用户在「我的 → 服务器地址」里改过就优先用改过的。
+String defaultBaseUrl() => kDefaultServerUrl;
 
 class ApiException implements Exception {
   ApiException(this.message);

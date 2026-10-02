@@ -118,7 +118,7 @@ class _MainShellState extends State<MainShell> {
           controller: controller,
           autofocus: true,
           keyboardType: TextInputType.url,
-          decoration: const InputDecoration(hintText: 'https://106-35-196-104.nip.io'),
+          decoration: const InputDecoration(hintText: kDefaultServerUrl),
         ),
         actions: [
           TextButton(onPressed: () => Navigator.pop(context), child: const Text('取消')),
