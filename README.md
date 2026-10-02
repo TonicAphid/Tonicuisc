@@ -50,6 +50,8 @@ python -m tonicuisc_server          # 默认 0.0.0.0:8000
 | `TONICUISC_SEARCH_SIZE` | `10` | 每个音源返回数量 |
 | `TONICUISC_SEARCH_SIZE_PER_PAGE` | `1` | 每个请求取几条；`1` = 10 条拆成 10 个请求并行拿 |
 | `TONICUISC_SEARCH_THREADS` | `10` | 每个音源的并发请求数 |
+| `TONICUISC_AUTH` | `1` | 设备 API Key 校验（`0` 关闭） |
+| `TONICUISC_PAIRING_TTL` | `300` | 配对码有效期（秒） |
 | `TONICUISC_CACHE_DIR` | `server/.cache` | 下载缓存目录 |
 | `TONICUISC_DB` | `<CACHE_DIR>/tonicuisc.db` | SQLite 数据库文件 |
 
@@ -57,7 +59,10 @@ python -m tonicuisc_server          # 默认 0.0.0.0:8000
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/api/health` | 服务状态 |
+| GET | `/api/health` | 服务状态（**免鉴权**） |
+| POST | `/api/pair` | 用一次性配对码换设备 API Key（**免鉴权**） |
+| GET | `/api/devices` | 已配对设备列表 |
+| DELETE | `/api/devices/{device_id}` | 吊销设备 |
 | GET | `/api/sources` | 可用音源 |
 | GET | `/api/search?keyword=&sources=migu,kuwo&limit=50&refresh=false` | 搜索（`refresh=true` 跳过搜索缓存） |
 | GET | `/api/history?limit=20` | 搜索历史（按关键词聚合） |
@@ -66,7 +71,54 @@ python -m tonicuisc_server          # 默认 0.0.0.0:8000
 | GET | `/api/stream/{id}` | 音频流，支持 HTTP Range |
 | GET | `/api/download/{id}` | 附件下载 |
 
+除 `/api/health`、`/api/pair` 外，所有接口都必须带请求头 `X-API-Key`。
+
 `{id}` 形如 `migu:123456`（实际是 `MiguMusicClient:600929000000096577`），由 `/api/search` 返回；服务端缓存 3 小时，过期需重新搜索。
+
+### 设备鉴权
+
+每台设备一把随机 key（256 bit，`secrets.token_urlsafe(32)`），**服务端只存 `sha256(key)`**——数据库泄露也还原不出明文，明文只在配对响应里出现一次。
+
+1. 服务端启动时控制台打印 6 位配对码（默认 5 分钟、用过即废）：
+
+   ```
+   ====================================================
+     Tonicuisc 设备配对
+     配对码: 472 913      有效期 5 分钟
+     在 App 里「配对设备」输入此码（一次性，用完即废）
+   ====================================================
+   ```
+
+2. App 里填服务器地址 + 配对码 → `POST /api/pair` → 拿到 `api_key`，存进系统安全存储（iOS Keychain 不进备份 / Android Keystore / Windows DPAPI / Linux libsecret），之后每个请求带 `X-API-Key`。
+3. 设备丢了就在服务器本机吊销，不用知道它的 key：
+
+   ```bash
+   python -m tonicuisc_server devices            # 列出设备（含最后使用时间）
+   python -m tonicuisc_server revoke <device_id> # 吊销
+   ```
+
+4. App 收到 401 会自动清掉本地凭据并提示重新配对。
+
+关闭鉴权：`TONICUISC_AUTH=0`（任何人可调，仅限完全可信环境）。
+
+**这套东西的边界**（很重要）：
+
+- 它解决的是「谁能调接口」+「按设备吊销」。**HTTP 明文下，链路上抓包的人可以直接拿走 key**——要真安全必须上 HTTPS。
+- 设备被物理接触（越狱/root/调试器）就能读出 key，这是所有客户端凭据的共性。
+
+### HTTPS（nip.io）
+
+`deploy/Caddyfile` 里已经写好模板：
+
+```bash
+caddy run --config deploy/Caddyfile
+```
+
+把 IP 里的点换成横杠（`203.0.113.7` → `203-0-113-7.nip.io`），Caddy 自动申请并续期 Let's Encrypt 证书。**前提是 80/443 能从公网回连**（有公网 IP 或做过端口映射）——nip.io 只是把域名解析到那个 IP，Let's Encrypt 校验时是从公网反连你的机器，所以纯内网 IP（`192.168.x.x`）签不下来。
+
+内网自签就用 mkcert：`mkcert 192.168.1.10`，把根证书装到手机上（iOS 要在「关于本机 → 证书信任设置」里手动打开），Caddyfile 里注释掉的部分有示例。
+
+App 里服务器地址填 `https://xxx.nip.io` 即可，不需要额外配置。
 
 ### 数据库（SQLite）
 

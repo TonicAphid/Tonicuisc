@@ -1,0 +1,32 @@
+# 用 nip.io 给局域网/自有 IP 拿一张真证书（Let's Encrypt 自动签发、自动续期）。
+#
+# 用法：
+#   1. 把下面域名里的 IP 换成你的公网 IP，点换成横杠：
+#        203.0.113.7  ->  203-0-113-7.nip.io
+#   2. 确认 80 和 443 能从公网访问（有公网 IP，或在路由器做了端口映射）
+#   3. 启动：caddy run --config deploy/Caddyfile
+#
+# 注意：nip.io 只是把域名解析到那个 IP。Let's Encrypt 校验时是从公网回连你的
+# 服务器的，所以**纯内网 IP（192.168.x.x / 10.x.x.x）签不下来**。
+# 那种情况用 mkcert 自签：
+#   mkcert -install && mkcert 192.168.1.10
+# 然后把 mkcert 的根证书装到手机上（iOS：设置 → 通用 → VPN与设备管理 →
+# 安装描述文件 → 关于本机 → 证书信任设置里打开），Caddy 用 tls 指定证书即可。
+
+https://203-0-113-7.nip.io {
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:8000 {
+		# 音频流可能比较大，别让反代提前断开
+		flush_interval -1
+	}
+	log {
+		output file /var/log/caddy/tonicuisc.log
+		format console
+	}
+}
+
+# 内网自签方案（配合 mkcert 生成的证书）：
+# https://192.168.1.10 {
+# 	tls /path/to/192.168.1.10.pem /path/to/192.168.1.10-key.pem
+# 	reverse_proxy 127.0.0.1:8000
+# }

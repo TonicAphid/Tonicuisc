@@ -18,6 +18,8 @@ dependencies:
   media_kit_libs_audio: ^1.0.5
   path_provider: ^2.1.3
   shared_preferences: ^2.2.3
+  # 设备 API Key 只存系统安全存储（Keychain / Keystore / DPAPI / libsecret）
+  flutter_secure_storage: ^9.2.2
 
 dev_dependencies:
   flutter_test:

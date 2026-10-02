@@ -10,6 +10,7 @@ import json
 import sqlite3
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -43,6 +44,15 @@ CREATE TABLE IF NOT EXISTS songs (
 );
 
 CREATE INDEX IF NOT EXISTS idx_songs_last_seen ON songs(last_seen DESC);
+
+CREATE TABLE IF NOT EXISTS devices (
+    id         TEXT PRIMARY KEY,
+    name       TEXT,
+    key_hash   TEXT NOT NULL UNIQUE,
+    created_at REAL NOT NULL,
+    last_seen  REAL,
+    revoked    INTEGER NOT NULL DEFAULT 0
+);
 
 CREATE TABLE IF NOT EXISTS searches (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -232,3 +242,37 @@ class Storage:
                 (limit,),
             ).fetchall()
         return [row["song_id"] for row in rows]
+
+    # ---------------------------------------------------------------- devices
+    def create_device(self, name: str, key_hash: str, device_id: str | None = None) -> dict[str, Any]:
+        """只存 key 的哈希，明文 key 永远不落库。"""
+        device_id = device_id or uuid.uuid4().hex
+        now = time.time()
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO devices (id, name, key_hash, created_at, last_seen, revoked) VALUES (?, ?, ?, ?, ?, 0)",
+                (device_id, name, key_hash, now, now),
+            )
+            self._conn.commit()
+        return {"id": device_id, "name": name, "created_at": now, "last_seen": now, "revoked": 0}
+
+    def find_device_by_hash(self, key_hash: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM devices WHERE key_hash = ?", (key_hash,)).fetchone()
+        return dict(row) if row is not None else None
+
+    def touch_device(self, device_id: str) -> None:
+        with self._lock:
+            self._conn.execute("UPDATE devices SET last_seen = ? WHERE id = ?", (time.time(), device_id))
+            self._conn.commit()
+
+    def list_devices(self) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute("SELECT * FROM devices ORDER BY created_at").fetchall()
+        return [{k: v for k, v in dict(row).items() if k != "key_hash"} for row in rows]
+
+    def revoke_device(self, device_id: str) -> bool:
+        with self._lock:
+            cursor = self._conn.execute("UPDATE devices SET revoked = 1 WHERE id = ?", (device_id,))
+            self._conn.commit()
+            return cursor.rowcount > 0

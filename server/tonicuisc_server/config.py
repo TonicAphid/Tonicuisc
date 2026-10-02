@@ -72,6 +72,10 @@ class Settings:
     search_size_per_page: int = int(os.getenv("TONICUISC_SEARCH_SIZE_PER_PAGE", "1"))
     #: 每个音源同时并发多少个请求
     search_threads: int = int(os.getenv("TONICUISC_SEARCH_THREADS", "10"))
+    #: 设备级 API Key 校验（关闭后任何人都能调用接口）
+    auth_enabled: bool = os.getenv("TONICUISC_AUTH", "1").lower() not in {"0", "false", "no", "off"}
+    #: 配对码有效期（秒）
+    pairing_ttl: int = int(os.getenv("TONICUISC_PAIRING_TTL", "300"))
     cache_dir: Path = field(
         default_factory=lambda: Path(os.getenv("TONICUISC_CACHE_DIR", SERVER_DIR / ".cache")).resolve()
     )

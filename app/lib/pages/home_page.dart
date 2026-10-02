@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
 
 import '../api/api_client.dart';
+import '../api/credentials.dart';
 import '../models/song.dart';
 import '../player/player_controller.dart';
 import '../widgets/player_bar.dart';
+import 'pairing_page.dart';
 
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
@@ -24,6 +26,10 @@ class _HomePageState extends State<HomePage> {
   double? _elapsed;
   double? _serverElapsed;
   String _baseUrl = defaultBaseUrl();
+  String? _apiKey;
+  String? _deviceName;
+
+  bool get _paired => _apiKey != null && _apiKey!.isNotEmpty;
 
   @override
   void initState() {
@@ -33,10 +39,36 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> _bootstrap() async {
     final url = await ApiClient.loadBaseUrl();
+    final key = await Credentials.apiKey();
+    final name = await Credentials.deviceName();
     if (!mounted) return;
     setState(() {
       _baseUrl = url;
-      _api = ApiClient(url);
+      _apiKey = key;
+      _deviceName = name;
+      _api = ApiClient(url, apiKey: key);
+    });
+  }
+
+  Future<void> _openPairing() async {
+    final paired = await Navigator.of(context).push<bool>(
+      MaterialPageRoute(builder: (_) => PairingPage(initialBaseUrl: _baseUrl)),
+    );
+    if (paired == true) {
+      await _bootstrap();
+    }
+  }
+
+  /// key 失效 / 设备被吊销：清掉本地凭据，回到未配对状态。
+  Future<void> _handleUnauthorized(String message) async {
+    await Credentials.clear();
+    if (!mounted) return;
+    setState(() {
+      _apiKey = null;
+      _deviceName = null;
+      _api = ApiClient(_baseUrl);
+      _results = const [];
+      _error = message;
     });
   }
 
@@ -70,6 +102,10 @@ class _HomePageState extends State<HomePage> {
     } catch (err) {
       stopwatch.stop();
       if (!mounted) return;
+      if (err is UnauthorizedException) {
+        await _handleUnauthorized('$err');
+        return;
+      }
       setState(() {
         _results = const [];
         _error = '$err';
@@ -87,6 +123,10 @@ class _HomePageState extends State<HomePage> {
       final path = await _api.downloadTo(song, dir);
       messenger.showSnackBar(SnackBar(content: Text('已保存到 $path')));
     } catch (err) {
+      if (err is UnauthorizedException) {
+        await _handleUnauthorized('$err');
+        return;
+      }
       messenger.showSnackBar(SnackBar(content: Text('下载失败：$err')));
     }
   }
@@ -119,16 +159,54 @@ class _HomePageState extends State<HomePage> {
     });
   }
 
+  Widget _unpairedBody(BuildContext context) {
+    final theme = Theme.of(context);
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(28),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.phonelink_lock, size: 56, color: theme.colorScheme.primary),
+            const SizedBox(height: 16),
+            Text('这台设备还没有配对', style: theme.textTheme.titleMedium),
+            const SizedBox(height: 8),
+            Text(
+              '在服务器控制台看 6 位配对码，输入后这台设备会拿到一把专属密钥。',
+              textAlign: TextAlign.center,
+              style: theme.textTheme.bodySmall,
+            ),
+            const SizedBox(height: 8),
+            Text(_baseUrl, style: theme.textTheme.labelSmall),
+            const SizedBox(height: 20),
+            FilledButton.icon(
+              onPressed: _openPairing,
+              icon: const Icon(Icons.link),
+              label: const Text('配对设备'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Tonicuisc'),
+        title: Text(_paired && _deviceName != null ? 'Tonicuisc · $_deviceName' : 'Tonicuisc'),
         actions: [
           IconButton(tooltip: '后端地址', onPressed: _editServerUrl, icon: const Icon(Icons.dns_outlined)),
+          IconButton(tooltip: '配对 / 重新配对', onPressed: _openPairing, icon: const Icon(Icons.key_outlined)),
         ],
       ),
-      body: Column(
+      body: _paired ? _searchBody(context) : _unpairedBody(context),
+      bottomNavigationBar: PlayerBar(controller: _player, api: _api),
+    );
+  }
+
+  Widget _searchBody(BuildContext context) {
+    return Column(
         children: [
           Padding(
             padding: const EdgeInsets.fromLTRB(12, 12, 12, 4),
@@ -236,8 +314,6 @@ class _HomePageState extends State<HomePage> {
                   ),
           ),
         ],
-      ),
-      bottomNavigationBar: PlayerBar(controller: _player, api: _api),
-    );
+      );
   }
 }

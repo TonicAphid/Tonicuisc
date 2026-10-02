@@ -16,13 +16,16 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Iterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
+from pydantic import BaseModel, Field
 
+from .auth import API_KEY_HEADER, PUBLIC_PATHS, AuthManager, code_banner
 from .config import SETTINGS, SOURCE_ALIASES, resolve_sources, source_label
 from .service import DownloadFailed, MusicService, SongNotFound, song_to_item
 
@@ -37,7 +40,17 @@ MIME_TYPES = {
     "wma": "audio/x-ms-wma",
 }
 
-app = FastAPI(title="Tonicuisc API", version="1.0.0", description="咪咕 / 酷我 音源代理")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """启动时打印一次性配对码。"""
+    auth = get_auth()
+    code, _ = auth.current_code()
+    print(code_banner(code, auth.ttl, enabled=auth.enabled), flush=True)
+    yield
+
+
+app = FastAPI(title="Tonicuisc API", version="1.0.0", description="咪咕 / 酷我 音源代理", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -46,6 +59,19 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["Content-Range", "Accept-Ranges", "Content-Length", "Content-Disposition"],
 )
+
+
+@app.middleware("http")
+async def auth_guard(request: Request, call_next):
+    """除 PUBLIC_PATHS 外，所有 /api 请求都要带设备 key。"""
+    auth = get_auth()
+    path = request.url.path
+    if auth.enabled and path.startswith("/api") and path not in PUBLIC_PATHS:
+        device = await asyncio.to_thread(auth.verify, request.headers.get(API_KEY_HEADER))
+        if device is None:
+            return JSONResponse({"detail": "未授权：请先在 App 里配对设备"}, status_code=401)
+        request.state.device = device
+    return await call_next(request)
 
 @app.middleware("http")
 async def access_log(request: Request, call_next):
@@ -59,6 +85,7 @@ async def access_log(request: Request, call_next):
 
 
 _service: MusicService | None = None
+_auth: AuthManager | None = None
 
 
 def get_service() -> MusicService:
@@ -66,6 +93,13 @@ def get_service() -> MusicService:
     if _service is None:
         _service = MusicService()
     return _service
+
+
+def get_auth() -> AuthManager:
+    global _auth
+    if _auth is None:
+        _auth = AuthManager(get_service().storage)
+    return _auth
 
 
 def _parse_range(header: str | None, size: int) -> tuple[int, int] | None:
@@ -109,12 +143,47 @@ async def _prepare(item_id: str) -> Path:
 
 @app.get("/api/health")
 async def health() -> dict:
+    auth = get_auth()
     return {
         "status": "ok",
         "sources": resolve_sources(SETTINGS.sources),
         "work_dir": str(SETTINGS.work_dir),
         "database": str(SETTINGS.db_path),
+        "auth": "enabled" if auth.enabled else "disabled",
     }
+
+
+class PairRequest(BaseModel):
+    code: str = Field(..., min_length=1, max_length=12, description="控制台打印的一次性配对码")
+    name: str = Field("", max_length=60, description="设备名，方便以后辨认")
+
+
+@app.post("/api/pair")
+async def pair(payload: PairRequest) -> dict:
+    """用一次性配对码换一把本设备专属的 API Key（明文只在这里出现一次）。"""
+    result = await asyncio.to_thread(get_auth().pair, payload.code, payload.name)
+    if result is None:
+        raise HTTPException(status_code=401, detail="配对码错误或已过期，请在服务端控制台重新获取")
+    print(f"[pair] 新设备已配对: {result['name']} ({result['device_id'][:8]}…)", flush=True)
+    return result
+
+
+@app.get("/api/devices")
+async def devices(request: Request) -> dict:
+    items = await asyncio.to_thread(get_service().storage.list_devices)
+    current = getattr(request.state, "device", {}) or {}
+    for item in items:
+        item["current"] = item["id"] == current.get("id")
+    return {"total": len(items), "items": items}
+
+
+@app.delete("/api/devices/{device_id}")
+async def revoke_device(device_id: str) -> dict:
+    """吊销某台设备（不需要知道它的 key）。"""
+    ok = await asyncio.to_thread(get_service().storage.revoke_device, device_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="设备不存在")
+    return {"device_id": device_id, "revoked": True}
 
 
 @app.get("/api/history")
