@@ -34,10 +34,12 @@ def app_env():
     auth = AuthManager(store, ttl=300)
     main_module._service = service
     main_module._auth = auth
+    main_module.reset_limiters()  # 每个用例都从干净的限速计数开始
     try:
         yield {"service": service, "auth": auth, "store": store, "root": root}
     finally:
         main_module._service = None
         main_module._auth = None
+        main_module.reset_limiters()
         store.close()
         shutil.rmtree(root, ignore_errors=True)

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../api/api_client.dart';
+import '../api/credentials.dart';
 
 /// 「我的」页面：账户、本机设备、服务端地址、设备管理与退出登录。
 class ProfilePage extends StatefulWidget {
@@ -87,8 +88,17 @@ class _ProfilePageState extends State<ProfilePage> {
       ),
     );
     if (confirmed != true) return;
+    final wasCurrent = device['current'] == true;
     try {
       await widget.api.revokeDevice('${device['id']}');
+      if (wasCurrent) {
+        // 把自己吊销了：立刻退出，别再拿着已经失效的 key
+        await widget.onUnauthorized('本机设备已被吊销，请重新登录');
+        return;
+      }
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('已吊销 ${device['name'] ?? '该设备'}')));
       await _load();
     } catch (err) {
       if (err is UnauthorizedException) {
@@ -146,6 +156,25 @@ class _ProfilePageState extends State<ProfilePage> {
           ),
         ),
         const SizedBox(height: 8),
+        if (Credentials.usingFallback)
+          Card(
+            color: Theme.of(context).colorScheme.errorContainer,
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Row(
+                children: [
+                  const Icon(Icons.warning_amber_outlined),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      '本机没能用上系统安全存储，密钥退回了普通存储保存（照常使用，安全性略低）。',
+                      style: theme.textTheme.bodySmall,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
         ListTile(
           leading: const Icon(Icons.dns_outlined),
           title: const Text('服务器地址'),
@@ -185,11 +214,14 @@ class _ProfilePageState extends State<ProfilePage> {
         for (final device in _devices)
           ListTile(
             dense: true,
-            leading: Icon(device['current'] == true ? Icons.smartphone : Icons.devices_other),
+            leading: Icon(
+              device['current'] == true ? Icons.smartphone : Icons.devices_other,
+              color: device['revoked'] == true ? theme.disabledColor : null,
+            ),
             title: Text('${device['name'] ?? '未命名设备'}${device['current'] == true ? '（本机）' : ''}'),
-            subtitle: Text('${device['username'] ?? '未知账户'} · 最后使用 ${_formatTime(device['last_seen'])}'),
+            subtitle: Text('${device['username'] ?? '无账户（旧版残留）'} · 最后使用 ${_formatTime(device['last_seen'])}'),
             trailing: device['revoked'] == true
-                ? const Text('已吊销')
+                ? Text('已吊销', style: TextStyle(color: theme.disabledColor))
                 : IconButton(
                     tooltip: '吊销',
                     icon: const Icon(Icons.block),

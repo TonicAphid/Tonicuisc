@@ -78,6 +78,8 @@ class Settings:
     auth_enabled: bool = os.getenv("TONICUISC_AUTH", "1").lower() not in {"0", "false", "no", "off"}
     #: 设备码（登录请求）有效期（秒）
     device_code_ttl: int = int(os.getenv("TONICUISC_DEVICE_CODE_TTL", "600"))
+    #: 是否信任反向代理写的 X-Forwarded-For（限速按真实来源 IP 算）
+    trust_proxy: bool = os.getenv("TONICUISC_TRUST_PROXY", "1").lower() not in {"0", "false", "no", "off"}
     cache_dir: Path = field(
         default_factory=lambda: Path(os.getenv("TONICUISC_CACHE_DIR", SERVER_DIR / ".cache")).resolve()
     )

@@ -425,3 +425,28 @@ class Storage:
                 (time.time(), user_code),
             )
             self._conn.commit()
+
+    def delete_devices(self, *, without_user: bool = False, revoked: bool = False) -> int:
+        """清理设备记录（默认什么都不删）。
+
+        - ``without_user``：删掉没有关联账户的（旧版配对流程、测试残留）
+        - ``revoked``：删掉已吊销的
+        """
+        clauses = []
+        if without_user:
+            # 既包括旧版配对流程留下的 NULL，也包括账户已经被删掉、user_id 悬空的
+            clauses.append("(user_id IS NULL OR user_id NOT IN (SELECT id FROM users))")
+        if revoked:
+            clauses.append("revoked = 1")
+        if not clauses:
+            return 0
+        with self._lock:
+            cursor = self._conn.execute("DELETE FROM devices WHERE " + " OR ".join(clauses))
+            self._conn.commit()
+            return cursor.rowcount
+
+    def drop_expired_device_requests(self) -> int:
+        with self._lock:
+            cursor = self._conn.execute("DELETE FROM device_requests WHERE expires_at < ?", (time.time(),))
+            self._conn.commit()
+            return cursor.rowcount

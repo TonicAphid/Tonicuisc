@@ -10,6 +10,7 @@ import html
 from typing import Any
 
 from .auth import AuthManager, normalize_user_code
+from .ratelimit import FailedLoginGuard
 
 STYLE = """
 :root { color-scheme: light dark; }
@@ -80,46 +81,28 @@ def code_step(user_code: str = "", message: str = "") -> str:
     )
 
 
-def account_step(user_code: str, users: list[dict[str, Any]], message: str = "") -> str:
-    accounts = ""
-    if users:
-        rows = "".join(
-            f'<label class="account"><input type="radio" name="username" value="{html.escape(str(u["username"]))}"'
-            f'{" checked" if index == 0 else ""}> {html.escape(str(u["username"]))}</label>'
-            for index, u in enumerate(users)
-        )
-        accounts = f"""
-<h1>选择账户</h1>
-<p class="sub">用已有账户登录，批准这台设备。</p>
-<div class="code">{html.escape(user_code)}</div>
-{_error(message)}
-<form method="post" action="/login">
-  <input type="hidden" name="action" value="approve_existing">
-  <input type="hidden" name="user_code" value="{html.escape(user_code)}">
-  <label>账户</label>
-  {rows}
-  <label for="pw">密码</label>
-  <input id="pw" name="password" type="password" autocomplete="current-password" required>
-  <button type="submit">批准这台设备</button>
-</form>
-<hr>
-"""
-    else:
-        accounts = f"""
-<h1>注册账户</h1>
-<p class="sub">这台服务器还没有账户，先注册一个。设备码：</p>
-<div class="code">{html.escape(user_code)}</div>
-{_error(message)}
-"""
-
-    title = "注册账户" if not users else "注册新账户"
-    sub = "" if not users else '<p class="sub">或者注册一个新账户。</p>'
+def account_step(user_code: str, message: str = "") -> str:
+    """登录页：用户名自己填，不列出服务器上有哪些账户（避免泄露账户名单）。"""
     return _page(
         "登录 Tonicuisc",
         f"""
-{accounts}
-<h1>{title}</h1>
-{sub}
+<h1>登录账户</h1>
+<p class="sub">输入你的用户名和密码，批准这台设备。</p>
+<div class="code">{html.escape(user_code)}</div>
+{_error(message)}
+<form method="post" action="/login">
+  <input type="hidden" name="action" value="login_existing">
+  <input type="hidden" name="user_code" value="{html.escape(user_code)}">
+  <label for="user">用户名</label>
+  <input id="user" name="username" type="text" autocapitalize="none" autocomplete="username"
+         spellcheck="false" required>
+  <label for="pw">密码</label>
+  <input id="pw" name="password" type="password" autocomplete="current-password" required>
+  <button type="submit">登录并批准设备</button>
+</form>
+<hr>
+<h1>注册新账户</h1>
+<p class="sub">还没有账户就在这里注册一个，注册完自动批准这台设备。</p>
 <form method="post" action="/login">
   <input type="hidden" name="action" value="register">
   <input type="hidden" name="user_code" value="{html.escape(user_code)}">
@@ -128,7 +111,7 @@ def account_step(user_code: str, users: list[dict[str, Any]], message: str = "")
          pattern="[A-Za-z0-9_.@\\-]{{2,32}}" required>
   <label for="newpw">密码（至少 6 位）</label>
   <input id="newpw" name="password" type="password" autocomplete="new-password" minlength="6" required>
-  <button type="submit">注册并批准设备</button>
+  <button type="submit" class="secondary">注册并批准设备</button>
 </form>
 """,
     )
@@ -147,7 +130,22 @@ def success_step(username: str, device_name: str) -> str:
     )
 
 
-def render(request: dict[str, Any], auth: AuthManager) -> str:
+def rate_limited_step(retry_after: int) -> str:
+    return _page(
+        "请求太频繁",
+        f"""
+<h1>请求太频繁</h1>
+<div class="error">密码错误次数过多，请在 {retry_after} 秒后再试。</div>
+""",
+    )
+
+
+def render(
+    request: dict[str, Any],
+    auth: AuthManager,
+    client_key: str = "",
+    guard: "FailedLoginGuard | None" = None,
+) -> str:
     """根据表单内容返回页面。request 里是 action / user_code / username / password。"""
     action = str(request.get("action") or "lookup")
     raw_code = str(request.get("user_code") or "")
@@ -161,9 +159,9 @@ def render(request: dict[str, Any], auth: AuthManager) -> str:
             return code_step(raw_code, "这个设备码不存在或已过期，请在 App 里重新生成。")
         if pending["status"] != "pending":
             return _page("登录 Tonicuisc", '<div class="ok">这台设备已经处理过了。</div>')
-        return account_step(user_code, auth.users())
+        return account_step(user_code)
 
-    if action in {"approve_existing", "register"}:
+    if action in {"login_existing", "register"}:
         if not user_code:
             return code_step(raw_code, "缺少设备码。")
         pending = auth.pending_request(user_code)
@@ -173,16 +171,24 @@ def render(request: dict[str, Any], auth: AuthManager) -> str:
         username = str(request.get("username") or "").strip()
         password = str(request.get("password") or "")
 
-        if action == "approve_existing":
+        if action == "login_existing":
+            if guard is not None:
+                retry_after = guard.blocked_for(client_key, username)
+                if retry_after:
+                    return rate_limited_step(retry_after)
             user = auth.authenticate(username, password)
             if user is None:
-                return account_step(user_code, auth.users(), "用户名或密码不对。")
+                if guard is not None:
+                    guard.record_failure(client_key, username)
+                return account_step(user_code, "用户名或密码不对。")
+            if guard is not None:
+                guard.clear(client_key, username)
         else:
             if len(password) < 6:
-                return account_step(user_code, auth.users(), "密码至少 6 位。")
+                return account_step(user_code, "密码至少 6 位。")
             user = auth.register(username, password)
             if user is None:
-                return account_step(user_code, auth.users(), "用户名已被占用或格式不对（2-32 位字母数字._@-）。")
+                return account_step(user_code, "用户名已被占用或格式不对（2-32 位字母数字._@-）。")
 
         if not auth.approve(user_code, user["id"]):
             return code_step(raw_code, "批准失败，设备码可能已经过期。")

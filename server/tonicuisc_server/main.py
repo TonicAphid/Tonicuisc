@@ -28,6 +28,7 @@ from pydantic import BaseModel, Field
 from . import weblogin
 from .auth import API_KEY_HEADER, PUBLIC_PATHS, AuthManager
 from .config import SETTINGS, SOURCE_ALIASES, resolve_sources, source_label
+from .ratelimit import FailedLoginGuard, SlidingWindowLimiter
 from .service import DownloadFailed, MusicService, SongNotFound, song_to_item
 
 MIME_TYPES = {
@@ -103,6 +104,32 @@ async def access_log(request: Request, call_next):
 
 _service: MusicService | None = None
 _auth: AuthManager | None = None
+
+#: 限速器：防密码爆破 / 防刷接口
+login_limiter = SlidingWindowLimiter(limit=30, window=60)  # 每个来源每分钟最多提交 30 次 /login
+device_start_limiter = SlidingWindowLimiter(limit=30, window=60)  # 每 IP 每分钟最多发起 30 次设备码
+failed_login_guard = FailedLoginGuard(limit=5, window=300)  # 同一 IP + 用户名 5 分钟内错 5 次就锁
+
+
+def reset_limiters() -> None:
+    """测试用：清空所有限速计数。"""
+    login_limiter.reset()
+    device_start_limiter.reset()
+    failed_login_guard.limiter.reset()
+
+
+def client_key(request: Request) -> str:
+    """限速用的来源标识。
+
+    默认信任反向代理（Caddy）写的 ``X-Forwarded-For``；
+    如果把端口直接暴露到公网，记得设 ``TONICUISC_TRUST_PROXY=0``，
+    否则攻击者可以伪造这个头绕过限速。
+    """
+    if SETTINGS.trust_proxy:
+        forwarded = request.headers.get("x-forwarded-for")
+        if forwarded:
+            return forwarded.split(",")[0].strip()[:64]
+    return (request.client.host if request.client else "unknown")[:64]
 
 
 def get_service() -> MusicService:
@@ -181,8 +208,15 @@ class DeviceStatus(BaseModel):
 
 
 @app.post("/api/device/start")
-async def device_start(payload: DeviceStartRequest) -> dict:
+async def device_start(payload: DeviceStartRequest, request: Request) -> dict:
     """App 发起登录：登记设备码，等待用户在 /login 批准。"""
+    allowed, retry_after = device_start_limiter.check(client_key(request))
+    if not allowed:
+        raise HTTPException(
+            status_code=429,
+            detail=f"请求太频繁，请 {retry_after} 秒后再试",
+            headers={"Retry-After": str(retry_after)},
+        )
     result = await asyncio.to_thread(
         get_auth().start_device_request, payload.user_code, payload.poll_secret, payload.name
     )
@@ -226,9 +260,13 @@ async def login_page() -> HTMLResponse:
 
 @app.post("/login", response_class=HTMLResponse)
 async def login_submit(request: Request) -> HTMLResponse:
+    source = client_key(request)
+    allowed, retry_after = login_limiter.check(source)
+    if not allowed:
+        return HTMLResponse(weblogin.rate_limited_step(retry_after), status_code=429, headers={"Cache-Control": "no-store"})
     raw = (await request.body()).decode("utf-8", "ignore")
     form = {key: values[0] for key, values in parse_qs(raw).items() if values}
-    page = await asyncio.to_thread(weblogin.render, form, get_auth())
+    page = await asyncio.to_thread(weblogin.render, form, get_auth(), source, failed_login_guard)
     return HTMLResponse(page, headers={"Cache-Control": "no-store"})
 
 
@@ -237,7 +275,10 @@ async def devices(request: Request) -> dict:
     items = await asyncio.to_thread(get_service().storage.list_devices)
     current = getattr(request.state, "device", {}) or {}
     for item in items:
+        # SQLite 里是 0/1，客户端按布尔判断，统一成 bool
+        item["revoked"] = bool(item.get("revoked"))
         item["current"] = item["id"] == current.get("id")
+        item["blocked"] = bool(item.get("revoked")) or not item.get("user_id")
     return {"total": len(items), "items": items}
 
 

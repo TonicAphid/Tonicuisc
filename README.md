@@ -109,7 +109,26 @@ App                         浏览器(/login)                 服务端
 ```bash
 python -m tonicuisc_server devices            # 设备 + 账户列表
 python -m tonicuisc_server revoke <device_id> # 吊销某台设备
+python -m tonicuisc_server cleanup            # 清理无账户 / 已吊销的设备记录
 ```
+
+`cleanup` 会删掉两类记录：**没有关联账户的**（旧版配对流程留下的、账户已删除导致 `user_id` 悬空的）和**已吊销的**，另外顺手清过期登录请求。正常设备不动。
+
+### 限速（防爆破）
+
+`/login` 和 `/api/device/start` 都有限速，单进程内存滑动窗口：
+
+| 限制 | 默认 | 作用 |
+| --- | --- | --- |
+| `/login` 提交 | 30 次/分钟/来源 IP | 防刷页面、防脚本 |
+| `/api/device/start` | 30 次/分钟/来源 IP | 防刷设备码 |
+| 密码错误 | 5 次/5 分钟/(IP + 用户名) | **防爆破**，锁定期内即使密码正确也拒绝 |
+
+超限返回 429 并带 `Retry-After`，网页上显示「密码错误次数过多，请在 N 秒后再试」。
+
+来源 IP 默认取反向代理写的 `X-Forwarded-For`（`TONICUISC_TRUST_PROXY=1`）。**如果直接把端口暴露到公网、前面没有反代，要设成 `0`**，否则攻击者可以伪造这个头绕过限速。
+
+登录页**不会列出服务器上有哪些账户**，用户名靠手填——避免把账户名单泄露给任何能访问公网的人。
 
 关闭鉴权：`TONICUISC_AUTH=0`（任何人可调，仅限完全可信环境）。
 

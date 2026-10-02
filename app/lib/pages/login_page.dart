@@ -19,9 +19,8 @@ String defaultDeviceName() {
 
 /// 设备码登录页。
 ///
-/// App 自己生成设备码（`A1B1-C1D1`）和一个只有它知道的轮询密钥，
-/// 用户拿手机浏览器打开 `服务器地址/login`，输入设备码，选账户或注册，
-/// 批准之后 App 轮询到 key 就完成登录。
+/// 进页面就自动登记设备码并开始轮询；点「打开登录页并复制设备码」会
+/// 直接弹出系统浏览器并把设备码放进剪贴板，用户粘一下就能登录。
 class LoginPage extends StatefulWidget {
   const LoginPage({
     super.key,
@@ -49,23 +48,17 @@ class _LoginPageState extends State<LoginPage> {
   late String _userCode = _newUserCode();
   late String _pollSecret = _newSecret();
 
-  bool _registering = false;
-  bool _waiting = false;
+  bool _registered = false;
+  bool _starting = false;
   String? _error;
-  String _hint = '';
+  int _expiresIn = 0;
+  DateTime? _startedAt;
 
-  String _randomString(int length) =>
-      List.generate(length, (_) => _alphabet[_random.nextInt(_alphabet.length)]).join();
-
-  String _newUserCode() {
-    final raw = _randomString(8);
-    return '${raw.substring(0, 4)}-${raw.substring(4)}';
+  @override
+  void initState() {
+    super.initState();
+    _begin(); // 进页面就登记，用户只需要去浏览器点一下
   }
-
-  String _newSecret() =>
-      List.generate(32, (_) => 'abcdefghijklmnopqrstuvwxyz0123456789'[_random.nextInt(36)]).join();
-
-  String get _loginUrl => '${ApiClient.normalizeBaseUrl(widget.baseUrl)}/login';
 
   @override
   void dispose() {
@@ -74,14 +67,26 @@ class _LoginPageState extends State<LoginPage> {
     super.dispose();
   }
 
+  String _randomString(int length, String alphabet) =>
+      List.generate(length, (_) => alphabet[_random.nextInt(alphabet.length)]).join();
+
+  String _newUserCode() {
+    final raw = _randomString(8, _alphabet);
+    return '${raw.substring(0, 4)}-${raw.substring(4)}';
+  }
+
+  String _newSecret() => _randomString(32, 'abcdefghijklmnopqrstuvwxyz0123456789');
+
+  String get _loginUrl => '${ApiClient.normalizeBaseUrl(widget.baseUrl)}/login';
+
   Future<void> _begin() async {
+    if (_starting) return;
     setState(() {
-      _registering = true;
+      _starting = true;
       _error = null;
-      _hint = '';
     });
     try {
-      await ApiClient.startDeviceLogin(
+      final started = await ApiClient.startDeviceLogin(
         baseUrl: widget.baseUrl,
         userCode: _userCode,
         pollSecret: _pollSecret,
@@ -89,21 +94,35 @@ class _LoginPageState extends State<LoginPage> {
       );
       if (!mounted) return;
       setState(() {
-        _waiting = true;
-        _hint = '等待批准…先在浏览器里完成登录';
+        _registered = true;
+        _expiresIn = started.expiresIn;
+        _startedAt = DateTime.now();
       });
       _startPolling();
     } catch (err) {
       if (!mounted) return;
-      // 码被占用之类的：换一个再试
+      // 设备码撞车之类：换一个再试
       setState(() {
         _error = '$err';
+        _registered = false;
         _userCode = _newUserCode();
         _pollSecret = _newSecret();
       });
     } finally {
-      if (mounted) setState(() => _registering = false);
+      if (mounted) setState(() => _starting = false);
     }
+  }
+
+  void _reset() {
+    _poller?.cancel();
+    setState(() {
+      _userCode = _newUserCode();
+      _pollSecret = _newSecret();
+      _registered = false;
+      _error = null;
+      _startedAt = null;
+    });
+    _begin();
   }
 
   void _startPolling() {
@@ -133,15 +152,12 @@ class _LoginPageState extends State<LoginPage> {
           return;
         case 'denied':
           _poller?.cancel();
-          setState(() {
-            _waiting = false;
-            _error = '这次登录被拒绝了';
-          });
+          setState(() => _error = '这次登录被拒绝了');
           return;
         case 'expired':
           _poller?.cancel();
           setState(() {
-            _waiting = false;
+            _registered = false;
             _error = '设备码已过期，请重新生成';
           });
           return;
@@ -153,60 +169,59 @@ class _LoginPageState extends State<LoginPage> {
     }
   }
 
-  Future<void> _openBrowser() async {
+  /// 主操作：复制设备码 + 弹出系统浏览器。
+  Future<void> _openLoginAndCopy() async {
     final messenger = ScaffoldMessenger.of(context);
-    try {
-      final ok = await launchUrl(Uri.parse(_loginUrl), mode: LaunchMode.externalApplication);
-      if (!ok) {
-        messenger.showSnackBar(const SnackBar(content: Text('打不开浏览器，请手动复制上面的地址')));
-      }
-    } catch (err) {
-      messenger.showSnackBar(SnackBar(content: Text('打不开浏览器：$err')));
+    if (!_registered) {
+      await _begin();
+      if (!mounted) return;
     }
+    await Clipboard.setData(ClipboardData(text: _userCode));
+    var opened = false;
+    try {
+      opened = await launchUrl(Uri.parse(_loginUrl), mode: LaunchMode.externalApplication);
+    } catch (_) {
+      opened = false;
+    }
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text(opened ? '已复制设备码 $_userCode，在浏览器里粘一下就能登录' : '已复制设备码 $_userCode，请手动打开 $_loginUrl'),
+        duration: const Duration(seconds: 4),
+      ),
+    );
   }
 
-  Future<void> _copy(String value, String label) async {
-    await Clipboard.setData(ClipboardData(text: value));
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$label 已复制')));
+  String get _statusText {
+    if (_starting) return '正在登记设备码…';
+    if (_error != null) return _error!;
+    if (!_registered) return '点下面的按钮开始';
+    return '等待浏览器里批准…';
   }
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final remaining = _startedAt == null || _expiresIn == 0
+        ? null
+        : _expiresIn - DateTime.now().difference(_startedAt!).inSeconds;
     return Scaffold(
       appBar: AppBar(title: const Text('登录 Tonicuisc')),
       body: ListView(
         padding: const EdgeInsets.all(20),
         children: [
-          Text('1. 用手机浏览器打开登录页', style: theme.textTheme.titleSmall),
-          const SizedBox(height: 8),
-          InkWell(
-            onTap: () => _copy(_loginUrl, '登录地址'),
-            child: Container(
-              width: double.infinity,
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: theme.colorScheme.surfaceContainerHighest,
-                borderRadius: BorderRadius.circular(10),
-              ),
-              child: Text(_loginUrl, style: theme.textTheme.bodyMedium),
-            ),
-          ),
-          const SizedBox(height: 8),
-          OutlinedButton.icon(
-            onPressed: _openBrowser,
-            icon: const Icon(Icons.open_in_browser),
-            label: const Text('打开登录页'),
-          ),
+          Text('把这台设备连到你的账户', style: theme.textTheme.titleMedium),
+          const SizedBox(height: 6),
+          Text('点下面的按钮会打开登录页并复制设备码，在浏览器里粘贴即可。', style: theme.textTheme.bodySmall),
           const SizedBox(height: 20),
-          Text('2. 把这个设备码填进去', style: theme.textTheme.titleSmall),
-          const SizedBox(height: 8),
           InkWell(
-            onTap: () => _copy(_userCode, '设备码'),
+            onTap: () async {
+              await Clipboard.setData(ClipboardData(text: _userCode));
+              if (!mounted) return;
+              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('设备码已复制')));
+            },
             child: Container(
               width: double.infinity,
-              padding: const EdgeInsets.symmetric(vertical: 18),
+              padding: const EdgeInsets.symmetric(vertical: 20),
               decoration: BoxDecoration(
                 color: theme.colorScheme.primaryContainer,
                 borderRadius: BorderRadius.circular(12),
@@ -223,8 +238,40 @@ class _LoginPageState extends State<LoginPage> {
               ),
             ),
           ),
-          const SizedBox(height: 4),
-          Text('点一下可以复制', style: theme.textTheme.labelSmall),
+          const SizedBox(height: 16),
+          FilledButton.icon(
+            onPressed: _starting ? null : _openLoginAndCopy,
+            icon: const Icon(Icons.open_in_new),
+            label: const Text('打开登录页并复制设备码'),
+          ),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              if (_starting)
+                const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+              else
+                Icon(
+                  _error != null ? Icons.error_outline : (_registered ? Icons.hourglass_empty : Icons.info_outline),
+                  size: 18,
+                  color: _error != null ? theme.colorScheme.error : theme.colorScheme.onSurfaceVariant,
+                ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  _statusText,
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: _error != null ? theme.colorScheme.error : null,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          if (remaining != null && remaining > 0)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Text('设备码还有约 ${(remaining / 60).ceil()} 分钟有效',
+                  style: theme.textTheme.labelSmall),
+            ),
           const SizedBox(height: 20),
           TextField(
             controller: _name,
@@ -233,45 +280,16 @@ class _LoginPageState extends State<LoginPage> {
               hintText: '方便以后在「我的」里辨认',
               border: OutlineInputBorder(),
             ),
+            onSubmitted: (_) => _reset(),
           ),
-          const SizedBox(height: 16),
-          if (_error != null)
-            Padding(
-              padding: const EdgeInsets.only(bottom: 12),
-              child: Text(_error!, style: TextStyle(color: theme.colorScheme.error)),
-            ),
-          if (_hint.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.only(bottom: 12),
-              child: Row(
-                children: [
-                  const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
-                  const SizedBox(width: 10),
-                  Expanded(child: Text(_hint, style: theme.textTheme.bodySmall)),
-                ],
-              ),
-            ),
-          FilledButton.icon(
-            onPressed: _registering ? null : _begin,
-            icon: const Icon(Icons.login),
-            label: Text(_waiting ? '重新开始' : '我已在浏览器里登录'),
+          TextButton.icon(
+            onPressed: _starting ? null : _reset,
+            icon: const Icon(Icons.refresh),
+            label: const Text('换一个设备码'),
           ),
           const SizedBox(height: 8),
-          TextButton(
-            onPressed: _registering
-                ? null
-                : () => setState(() {
-                      _userCode = _newUserCode();
-                      _pollSecret = _newSecret();
-                      _error = null;
-                      _hint = '';
-                      _waiting = false;
-                      _poller?.cancel();
-                    }),
-            child: const Text('换一个设备码'),
-          ),
-          const SizedBox(height: 12),
           Text(
+            '登录地址：$_loginUrl\n'
             '设备码 10 分钟内有效。批准后这台设备会拿到一把专属密钥，'
             '只存在系统安全存储里，界面上看不到，服务端也只保存它的哈希。',
             style: theme.textTheme.bodySmall,
