@@ -63,20 +63,41 @@ class LyricSheet {
   static String _norm(String value) =>
       value.toLowerCase().replaceAll(RegExp(r'[\s\-_–—·:：()（）\[\]【】]+'), '');
 
-  /// 去掉开头那几行「歌名 / 歌手 / 歌名 - 歌手」——酷我的 LRC 头部会写这些。
+  /// 去掉开头那几行「歌名 / 歌手」——酷我的 LRC 头部会写这些。
+  ///
+  /// 头部那几行不一定和真实歌名完全一样（见过 `琵琶曲` vs 歌名 `琵琶行`），
+  /// 所以规则是：开头的短行里，**歌手行**（或紧跟在歌名行后面的歌手行）以及它上面的
+  /// 歌名行都算头部；只要有一行既不是歌名也不是歌手，就认为头部结束。
   static List<LyricLine> _stripHeader(List<LyricLine> lines, String? title, String? artist) {
-    final wanted = <String>{
-      if (title != null) _norm(title),
-      if (artist != null) _norm(artist),
-      if (title != null && artist != null) _norm('$title$artist'),
-      if (title != null && artist != null) _norm('$title-$artist'),
-    }..remove('');
+    final wantTitle = title == null ? '' : _norm(title);
+    final wantArtist = artist == null ? '' : _norm(artist);
+    if (wantTitle.isEmpty && wantArtist.isEmpty) return lines;
 
-    var index = 0;
-    while (index < lines.length && lines[index].time == Duration.zero && wanted.contains(_norm(lines[index].text))) {
-      index++;
+    // 只认短名字，免得把「郑浩唱得好」这种歌词行当成人名
+    bool isArtist(String text) =>
+        wantArtist.isNotEmpty &&
+        (text == wantArtist || (text.length <= 12 && text.contains(wantArtist)));
+
+    final limit = lines.length < 3 ? lines.length : 3;
+    var cut = 0;
+    for (var i = 0; i < limit; i++) {
+      final text = _norm(lines[i].text);
+      if (text.isEmpty || lines[i].text.length > 15) break; // 头部行都很短
+      if (wantTitle.isNotEmpty && text == wantTitle) {
+        cut = i + 1;
+        continue;
+      }
+      if (isArtist(text)) {
+        cut = i + 1;
+        break;
+      }
+      // 这一行不是歌手，但下一行是 → 那它是歌名那一行，一起掐掉
+      if (i + 1 < limit && isArtist(_norm(lines[i + 1].text))) {
+        cut = i + 2;
+      }
+      break;
     }
-    return index == 0 ? lines : lines.sublist(index);
+    return cut == 0 ? lines : lines.sublist(cut);
   }
 
   /// 当前播放位置对应的歌词行号，-1 表示还没有到第一句。

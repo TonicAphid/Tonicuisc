@@ -60,14 +60,36 @@ void main() {
   });
 
   test('去掉开头的歌名/歌手行', () {
+    // 酷我头部写的歌名可能和真实歌名不一样（琵琶曲 vs 琵琶行）
     final sheet = LyricSheet.parse(
       '琵琶曲\n郑浩\n[00:12.00]第一句歌词\n[00:20.00]第二句歌词',
       title: '琵琶行',
       artist: '郑浩',
     );
 
-    expect(sheet.lines.length, 2);
+    expect(sheet.lines.length, 2, reason: '头部两行掐掉');
     expect(sheet.lines.first.text, '第一句歌词');
+  });
+
+  test('歌名对得上时也掐掉头部', () {
+    final sheet = LyricSheet.parse(
+      '[ti:琵琶行]\n琵琶行\n郑浩\n[00:12.00]第一句歌词',
+      title: '琵琶行',
+      artist: '郑浩',
+    );
+
+    expect(sheet.lines.length, 1);
+    expect(sheet.lines.first.text, '第一句歌词');
+  });
+
+  test('正常歌词不会被误删', () {
+    final sheet = LyricSheet.parse(
+      '[00:00.00]第一句就是歌词\n[00:05.00]第二句',
+      title: '琵琶行',
+      artist: '郑浩',
+    );
+
+    expect(sheet.lines.length, 2, reason: '和歌名/歌手没关系，别动');
   });
 
   test('歌词中间和歌名一样的句子不会被误删', () {
