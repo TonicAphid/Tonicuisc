@@ -4,19 +4,31 @@ import '../api/api_client.dart';
 import '../models/lyric.dart';
 import '../models/song.dart';
 import '../player/player_controller.dart';
+import '../state/library_state.dart';
 
 /// 全屏播放页：封面 + 歌词（跟随进度高亮、可点击跳转）+ 进度条 + 播放控制。
 class NowPlayingPage extends StatefulWidget {
-  const NowPlayingPage({super.key, required this.controller, required this.api});
+  const NowPlayingPage({
+    super.key,
+    required this.controller,
+    required this.api,
+    required this.library,
+  });
 
   final PlayerController controller;
   final ApiClient api;
+  final LibraryState library;
 
-  static Future<void> open(BuildContext context, PlayerController controller, ApiClient api) {
+  static Future<void> open(
+    BuildContext context,
+    PlayerController controller,
+    ApiClient api,
+    LibraryState library,
+  ) {
     return Navigator.of(context).push(
       MaterialPageRoute(
         fullscreenDialog: true,
-        builder: (_) => NowPlayingPage(controller: controller, api: api),
+        builder: (_) => NowPlayingPage(controller: controller, api: api, library: library),
       ),
     );
   }
@@ -141,23 +153,47 @@ class _NowPlayingPageState extends State<NowPlayingPage> {
   }
 
   Widget _header(BuildContext context, Song song) {
-    return Row(
-      children: [
-        IconButton(
-          tooltip: '收起',
-          icon: const Icon(Icons.keyboard_arrow_down),
-          onPressed: () => Navigator.of(context).maybePop(),
-        ),
-        Expanded(
-          child: Text(
-            song.sourceLabel,
-            textAlign: TextAlign.center,
-            style: Theme.of(context).textTheme.labelMedium,
+    return AnimatedBuilder(
+      animation: widget.library,
+      builder: (context, _) => Row(
+        children: [
+          IconButton(
+            tooltip: '收起',
+            icon: const Icon(Icons.keyboard_arrow_down),
+            onPressed: () => Navigator.of(context).maybePop(),
           ),
-        ),
-        const SizedBox(width: 48),
-      ],
+          Expanded(
+            child: Text(
+              song.sourceLabel,
+              textAlign: TextAlign.center,
+              style: Theme.of(context).textTheme.labelMedium,
+            ),
+          ),
+          IconButton(
+            tooltip: widget.library.liked(song.id) ? '取消喜欢' : '喜欢',
+            icon: Icon(
+              widget.library.liked(song.id) ? Icons.favorite : Icons.favorite_border,
+              color: widget.library.liked(song.id) ? Colors.redAccent : null,
+            ),
+            onPressed: () => _toggle('like', song),
+          ),
+          IconButton(
+            tooltip: widget.library.favorited(song.id) ? '取消收藏' : '收藏',
+            icon: Icon(widget.library.favorited(song.id) ? Icons.bookmark : Icons.bookmark_border),
+            onPressed: () => _toggle('favorite', song),
+          ),
+        ],
+      ),
     );
+  }
+
+  Future<void> _toggle(String kind, Song song) async {
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      await widget.library.toggle(kind, song.id);
+    } catch (err) {
+      messenger.showSnackBar(SnackBar(content: Text('操作失败：$err')));
+    }
   }
 
   Widget _cover(Song song, BoxConstraints constraints) {

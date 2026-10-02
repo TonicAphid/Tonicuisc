@@ -284,11 +284,80 @@ async def devices(request: Request) -> dict:
 
 @app.delete("/api/devices/{device_id}")
 async def revoke_device(device_id: str) -> dict:
-    """吊销某台设备（不需要知道它的 key）。"""
-    ok = await asyncio.to_thread(get_service().storage.revoke_device, device_id)
+    """吊销设备 = 直接从库里删掉，它的 key 立刻失效，列表里也不再出现。"""
+    ok = await asyncio.to_thread(get_service().storage.delete_device, device_id)
     if not ok:
         raise HTTPException(status_code=404, detail="设备不存在")
-    return {"device_id": device_id, "revoked": True}
+    print(f"[device] 已吊销设备 {device_id[:8]}…", flush=True)
+    return {"device_id": device_id, "deleted": True}
+
+
+LIBRARY_KINDS = {"like", "favorite", "history"}
+
+
+class LibraryAddRequest(BaseModel):
+    song_id: str = Field(..., min_length=3, max_length=200)
+
+
+def current_user(request: Request) -> str:
+    """从已校验的设备里取账户；设备没绑账户就没法用收藏类功能。"""
+    device = getattr(request.state, "device", {}) or {}
+    user_id = device.get("user_id")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="这台设备没有关联账户，请重新登录")
+    return str(user_id)
+
+
+def _kind_or_400(kind: str) -> str:
+    if kind not in LIBRARY_KINDS:
+        raise HTTPException(status_code=400, detail=f"未知列表类型：{kind}")
+    return kind
+
+
+@app.get("/api/library/summary")
+async def library_summary(request: Request) -> dict:
+    """「列表」页用：三个列表的数量 + 喜欢/收藏的 id（搜索页显示红心）。"""
+    user_id = current_user(request)
+    store = get_service().storage
+    counts = await asyncio.to_thread(store.library_counts, user_id)
+    likes = await asyncio.to_thread(store.library_ids, user_id, "like")
+    favorites = await asyncio.to_thread(store.library_ids, user_id, "favorite")
+    return {"counts": counts, "like_ids": likes, "favorite_ids": favorites}
+
+
+@app.get("/api/library/{kind}")
+async def library_list(kind: str, request: Request, limit: int = Query(200, ge=1, le=1000)) -> dict:
+    user_id = current_user(request)
+    items = await asyncio.to_thread(get_service().storage.library_items, user_id, _kind_or_400(kind), limit)
+    for item in items:
+        item["has_lyric"] = bool(item.get("has_lyric"))
+    return {"kind": kind, "total": len(items), "items": items}
+
+
+@app.post("/api/library/{kind}")
+async def library_add(kind: str, payload: LibraryAddRequest, request: Request) -> dict:
+    user_id = current_user(request)
+    store = get_service().storage
+    await asyncio.to_thread(store.add_to_library, user_id, _kind_or_400(kind), payload.song_id)
+    counts = await asyncio.to_thread(store.library_counts, user_id)
+    return {"kind": kind, "song_id": payload.song_id, "counts": counts}
+
+
+@app.delete("/api/library/{kind}/{item_id:path}")
+async def library_remove(kind: str, item_id: str, request: Request) -> dict:
+    user_id = current_user(request)
+    removed = await asyncio.to_thread(get_service().storage.remove_from_library, user_id, _kind_or_400(kind), item_id)
+    if not removed:
+        raise HTTPException(status_code=404, detail="这条记录不存在")
+    return {"kind": kind, "song_id": item_id, "removed": True}
+
+
+@app.delete("/api/library/{kind}")
+async def library_clear(kind: str, request: Request) -> dict:
+    """清空某个列表（历史播放用得上）。"""
+    user_id = current_user(request)
+    removed = await asyncio.to_thread(get_service().storage.clear_library, user_id, _kind_or_400(kind))
+    return {"kind": kind, "removed": removed}
 
 
 @app.get("/api/history")

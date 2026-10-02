@@ -89,6 +89,7 @@ class _ProfilePageState extends State<ProfilePage> {
     );
     if (confirmed != true) return;
     final wasCurrent = device['current'] == true;
+    final messenger = ScaffoldMessenger.of(context);
     try {
       await widget.api.revokeDevice('${device['id']}');
       if (wasCurrent) {
@@ -97,8 +98,11 @@ class _ProfilePageState extends State<ProfilePage> {
         return;
       }
       if (!mounted) return;
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text('已吊销 ${device['name'] ?? '该设备'}')));
+      // 先从列表里拿掉，再跟服务端对一次
+      setState(() {
+        _devices = _devices.where((item) => item['id'] != device['id']).toList();
+      });
+      messenger.showSnackBar(SnackBar(content: Text('已吊销 ${device['name'] ?? '该设备'}')));
       await _load();
     } catch (err) {
       if (err is UnauthorizedException) {
@@ -106,7 +110,7 @@ class _ProfilePageState extends State<ProfilePage> {
         return;
       }
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('吊销失败：$err')));
+        messenger.showSnackBar(SnackBar(content: Text('吊销失败：$err')));
       }
     }
   }
@@ -211,22 +215,26 @@ class _ProfilePageState extends State<ProfilePage> {
             padding: const EdgeInsets.symmetric(vertical: 8),
             child: Text(_error!, style: TextStyle(color: theme.colorScheme.error)),
           ),
-        for (final device in _devices)
+        for (final device in _devices.where((item) => item['revoked'] != true))
           ListTile(
             dense: true,
-            leading: Icon(
-              device['current'] == true ? Icons.smartphone : Icons.devices_other,
-              color: device['revoked'] == true ? theme.disabledColor : null,
-            ),
+            leading: Icon(device['current'] == true ? Icons.smartphone : Icons.devices_other),
             title: Text('${device['name'] ?? '未命名设备'}${device['current'] == true ? '（本机）' : ''}'),
             subtitle: Text('${device['username'] ?? '无账户（旧版残留）'} · 最后使用 ${_formatTime(device['last_seen'])}'),
-            trailing: device['revoked'] == true
-                ? Text('已吊销', style: TextStyle(color: theme.disabledColor))
-                : IconButton(
-                    tooltip: '吊销',
-                    icon: const Icon(Icons.block),
-                    onPressed: () => _revoke(device),
-                  ),
+            trailing: IconButton(
+              tooltip: '吊销',
+              icon: const Icon(Icons.block),
+              onPressed: () => _revoke(device),
+            ),
+          ),
+        if (_devices.any((item) => item['revoked'] == true))
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 8),
+            child: Text(
+              '另有 ${_devices.where((item) => item['revoked'] == true).length} 台已吊销设备未显示'
+              '（服务器上执行 python -m tonicuisc_server cleanup 可彻底删除）',
+              style: theme.textTheme.labelSmall,
+            ),
           ),
       ],
     );

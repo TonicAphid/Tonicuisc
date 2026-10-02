@@ -91,6 +91,19 @@ CREATE TABLE IF NOT EXISTS search_results (
     position  INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (search_id, song_id)
 );
+
+-- 喜欢 / 收藏 / 播放历史，按账户存
+CREATE TABLE IF NOT EXISTS library (
+    user_id    TEXT NOT NULL,
+    kind       TEXT NOT NULL,
+    song_id    TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    play_count INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (user_id, kind, song_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_library_user_kind ON library(user_id, kind, updated_at DESC);
 """
 
 
@@ -213,7 +226,9 @@ class Storage:
     def prune_songs(self, keep: int = 5000) -> int:
         with self._lock:
             cursor = self._conn.execute(
-                "DELETE FROM songs WHERE id NOT IN (SELECT id FROM songs ORDER BY last_seen DESC LIMIT ?)",
+                # 收藏/喜欢/历史里引用到的歌不能被裁掉
+                "DELETE FROM songs WHERE id NOT IN (SELECT id FROM songs ORDER BY last_seen DESC LIMIT ?)"
+                " AND id NOT IN (SELECT song_id FROM library)",
                 (keep,),
             )
             self._conn.commit()
@@ -324,6 +339,13 @@ class Storage:
     def revoke_device(self, device_id: str) -> bool:
         with self._lock:
             cursor = self._conn.execute("UPDATE devices SET revoked = 1 WHERE id = ?", (device_id,))
+            self._conn.commit()
+            return cursor.rowcount > 0
+
+    def delete_device(self, device_id: str) -> bool:
+        """直接从库里删掉这台设备，它的 key 立刻失效（查不到哈希了）。"""
+        with self._lock:
+            cursor = self._conn.execute("DELETE FROM devices WHERE id = ?", (device_id,))
             self._conn.commit()
             return cursor.rowcount > 0
 
@@ -450,3 +472,71 @@ class Storage:
             cursor = self._conn.execute("DELETE FROM device_requests WHERE expires_at < ?", (time.time(),))
             self._conn.commit()
             return cursor.rowcount
+
+    # ---------------------------------------------------------------- library
+    def add_to_library(self, user_id: str, kind: str, song_id: str) -> None:
+        """喜欢/收藏是幂等的；历史会累加播放次数并刷新时间。"""
+        now = time.time()
+        with self._lock:
+            if kind == "history":
+                self._conn.execute(
+                    "INSERT INTO library (user_id, kind, song_id, created_at, updated_at, play_count)"
+                    " VALUES (?, ?, ?, ?, ?, 1)"
+                    " ON CONFLICT(user_id, kind, song_id) DO UPDATE SET"
+                    "   updated_at = excluded.updated_at, play_count = library.play_count + 1",
+                    (user_id, kind, song_id, now, now),
+                )
+            else:
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO library (user_id, kind, song_id, created_at, updated_at, play_count)"
+                    " VALUES (?, ?, ?, ?, ?, 1)",
+                    (user_id, kind, song_id, now, now),
+                )
+            self._conn.commit()
+
+    def remove_from_library(self, user_id: str, kind: str, song_id: str) -> bool:
+        with self._lock:
+            cursor = self._conn.execute(
+                "DELETE FROM library WHERE user_id = ? AND kind = ? AND song_id = ?",
+                (user_id, kind, song_id),
+            )
+            self._conn.commit()
+            return cursor.rowcount > 0
+
+    def clear_library(self, user_id: str, kind: str) -> int:
+        with self._lock:
+            cursor = self._conn.execute("DELETE FROM library WHERE user_id = ? AND kind = ?", (user_id, kind))
+            self._conn.commit()
+            return cursor.rowcount
+
+    def library_items(self, user_id: str, kind: str, limit: int = 200) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT songs.id, songs.source, songs.source_label, songs.name, songs.singers, songs.album,
+                       songs.ext, songs.duration, songs.duration_s, songs.file_size, songs.cover_url,
+                       songs.has_lyric, library.created_at, library.updated_at, library.play_count
+                FROM library JOIN songs ON songs.id = library.song_id
+                WHERE library.user_id = ? AND library.kind = ?
+                ORDER BY library.updated_at DESC
+                LIMIT ?
+                """,
+                (user_id, kind, limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def library_ids(self, user_id: str, kind: str, limit: int = 500) -> list[str]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT song_id FROM library WHERE user_id = ? AND kind = ? ORDER BY updated_at DESC LIMIT ?",
+                (user_id, kind, limit),
+            ).fetchall()
+        return [row["song_id"] for row in rows]
+
+    def library_counts(self, user_id: str) -> dict[str, int]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT kind, COUNT(*) AS n FROM library WHERE user_id = ? GROUP BY kind", (user_id,)
+            ).fetchall()
+        counts = {row["kind"]: int(row["n"]) for row in rows}
+        return {kind: counts.get(kind, 0) for kind in ("like", "favorite", "history")}

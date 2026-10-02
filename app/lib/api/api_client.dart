@@ -52,6 +52,34 @@ class SearchResult {
   final double elapsed;
 }
 
+/// 喜欢 / 收藏 / 历史 的数量与 id 集合。
+class LibrarySummary {
+  const LibrarySummary({
+    required this.like,
+    required this.favorite,
+    required this.history,
+    required this.likeIds,
+    required this.favoriteIds,
+  });
+
+  final int like;
+  final int favorite;
+  final int history;
+  final Set<String> likeIds;
+  final Set<String> favoriteIds;
+
+  int countOf(String kind) {
+    switch (kind) {
+      case 'like':
+        return like;
+      case 'favorite':
+        return favorite;
+      default:
+        return history;
+    }
+  }
+}
+
 class ApiClient {
   ApiClient(this.baseUrl, {this.apiKey});
 
@@ -214,6 +242,53 @@ class ApiClient {
   /// 吊销某台设备（不需要知道它的 key）。
   Future<void> revokeDevice(String deviceId) async {
     final resp = await http.delete(_uri('/api/devices/$deviceId'), headers: _headers).timeout(const Duration(seconds: 20));
+    if (resp.statusCode != 200) throw _errorOf(resp);
+  }
+
+  /// 「列表」页用：三个列表的数量 + 喜欢/收藏的 id。
+  Future<LibrarySummary> librarySummary() async {
+    final resp = await http.get(_uri('/api/library/summary'), headers: _headers).timeout(const Duration(seconds: 20));
+    if (resp.statusCode != 200) throw _errorOf(resp);
+    final data = jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
+    final counts = (data['counts'] as Map?)?.cast<String, dynamic>() ?? const {};
+    return LibrarySummary(
+      like: (counts['like'] as num?)?.toInt() ?? 0,
+      favorite: (counts['favorite'] as num?)?.toInt() ?? 0,
+      history: (counts['history'] as num?)?.toInt() ?? 0,
+      likeIds: ((data['like_ids'] as List?) ?? const []).map((e) => '$e').toSet(),
+      favoriteIds: ((data['favorite_ids'] as List?) ?? const []).map((e) => '$e').toSet(),
+    );
+  }
+
+  /// 某个列表的歌曲（带元信息）。
+  Future<List<Song>> libraryList(String kind, {int limit = 200}) async {
+    final resp = await http
+        .get(_uri('/api/library/$kind', {'limit': '$limit'}), headers: _headers)
+        .timeout(const Duration(seconds: 30));
+    if (resp.statusCode != 200) throw _errorOf(resp);
+    final data = jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
+    return ((data['items'] as List?) ?? const [])
+        .map((e) => Song.fromJson((e as Map).cast<String, dynamic>()))
+        .toList();
+  }
+
+  Future<void> libraryAdd(String kind, String songId) async {
+    final resp = await http
+        .post(_uri('/api/library/$kind'), headers: {..._headers, 'Content-Type': 'application/json'},
+            body: jsonEncode({'song_id': songId}))
+        .timeout(const Duration(seconds: 20));
+    if (resp.statusCode != 200) throw _errorOf(resp);
+  }
+
+  Future<void> libraryRemove(String kind, String songId) async {
+    final resp = await http
+        .delete(_uri('/api/library/$kind/$songId'), headers: _headers)
+        .timeout(const Duration(seconds: 20));
+    if (resp.statusCode != 200 && resp.statusCode != 404) throw _errorOf(resp);
+  }
+
+  Future<void> libraryClear(String kind) async {
+    final resp = await http.delete(_uri('/api/library/$kind'), headers: _headers).timeout(const Duration(seconds: 20));
     if (resp.statusCode != 200) throw _errorOf(resp);
   }
 

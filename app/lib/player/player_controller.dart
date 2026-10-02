@@ -73,8 +73,17 @@ class PlayerController extends ChangeNotifier {
     }
     _loading = false;
     notifyListeners();
+    unawaited(_reportPlay(api, song.id)); // 播放历史，失败不影响播放
     // 注意：just_audio 的 play() 要到暂停/播放结束才完成，await 会把 loading 卡死。
     _resume();
+  }
+
+  Future<void> _reportPlay(ApiClient api, String songId) async {
+    try {
+      await api.libraryAdd('history', songId);
+    } catch (_) {
+      // 忽略：历史记录失败不该影响播放
+    }
   }
 
   /// 播放（不等待 Future 完成，否则会一直卡在 loading 状态）。

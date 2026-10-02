@@ -3,13 +3,15 @@ import 'package:flutter/material.dart';
 import '../api/api_client.dart';
 import '../pages/now_playing_page.dart';
 import '../player/player_controller.dart';
+import '../state/library_state.dart';
 
 /// 底部播放条：播放/暂停、进度、拖动跳转；点一下展开全屏播放页。
 class PlayerBar extends StatelessWidget {
-  const PlayerBar({super.key, required this.controller, required this.api});
+  const PlayerBar({super.key, required this.controller, required this.api, required this.library});
 
   final PlayerController controller;
   final ApiClient api;
+  final LibraryState library;
 
   @override
   Widget build(BuildContext context) {
@@ -39,7 +41,7 @@ class PlayerBar extends StatelessWidget {
                     children: [
                       Expanded(
                         child: InkWell(
-                          onTap: () => NowPlayingPage.open(context, controller, api),
+                          onTap: () => NowPlayingPage.open(context, controller, api, library),
                           child: Row(
                             children: [
                               if (song.coverUrl.isNotEmpty)

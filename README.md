@@ -67,7 +67,12 @@ python -m tonicuisc_server          # 默认 0.0.0.0:8000
 | POST | `/login` | 提交设备码 / 选择账户 / 注册（**免鉴权**） |
 | GET | `/api/me` | 当前账户 + 本设备信息 |
 | GET | `/api/devices` | 已登录设备列表 |
-| DELETE | `/api/devices/{device_id}` | 吊销设备 |
+| DELETE | `/api/devices/{device_id}` | 吊销设备（**直接删除记录**，它的 key 立刻失效） |
+| GET | `/api/library/summary` | 三个列表的数量 + 喜欢/收藏的 id |
+| GET | `/api/library/{kind}` | 列表内容（`kind` = `like` / `favorite` / `history`） |
+| POST | `/api/library/{kind}` | 加入列表（`{"song_id": "..."}`，喜欢/收藏幂等，历史累加播放次数） |
+| DELETE | `/api/library/{kind}/{song_id}` | 从列表移除 |
+| DELETE | `/api/library/{kind}` | 清空列表 |
 | GET | `/api/sources` | 可用音源 |
 | GET | `/api/search?keyword=&sources=migu,kuwo&limit=50&refresh=false` | 搜索（`refresh=true` 跳过搜索缓存） |
 | GET | `/api/history?limit=20` | 搜索历史（按关键词聚合） |
@@ -194,13 +199,14 @@ App 里服务器地址填 `https://106-35-196-104.nip.io` 即可。**注意公�
 
 Flutter 原生工程目录（`app/windows`、`app/linux`、`app/macos`、`app/ios`）不入库，用脚本生成；`flutter create` 不会覆盖已有的 `lib/` 代码。
 
-界面（底部两个 tab）：
+界面（底部三个 tab）：
 
-- **登录页**（未登录时的首屏，`lib/pages/login_page.dart`）：显示 App 生成的设备码 `A1B1-C1D1` + 登录地址，一键打开浏览器，同时后台每 2 秒轮询；用户在网页上选账户 / 注册并批准后自动完成登录。设备码点一下可复制，也可以「换一个设备码」。
-- **搜索 tab**（`lib/pages/search_page.dart`）：关键词搜索、音源勾选（咪咕 / 酷我）、显示「正在进行…」和用时、试听、下载。
-- **我的 tab**（`lib/pages/profile_page.dart`）：账户名、本机设备名与设备 ID、服务器地址、重新登录、退出登录，以及**已登录设备列表**（可逐台吊销）。
+- **登录页**（未登录时的首屏，`lib/pages/login_page.dart`）：显示 App 生成的设备码 `A1B1-C1D1`，主按钮「打开登录页并复制设备码」会直接弹出系统浏览器并把设备码放进剪贴板；后台每 2 秒轮询，用户在网页上批准后自动完成登录。
+- **搜索 tab**（`lib/pages/search_page.dart`）：关键词搜索、音源勾选（咪咕 / 酷我）、显示「正在进行…」和用时、试听、下载、点红心加进「我喜欢」。
+- **列表 tab**（`lib/pages/library_page.dart`）：**我喜欢 / 收藏 / 播放历史** 三个入口，各自显示数量，点进去是歌曲列表（可播放、单条移除、清空）。
+- **我的 tab**（`lib/pages/profile_page.dart`）：账户名、本机设备名与设备 ID、服务器地址、重新登录、退出登录，以及**已登录设备列表**（可逐台吊销，删完即从列表消失）。
 - **底部播放条**：封面缩略图、播放/暂停、进度拖动；**点一下展开全屏播放页**。
-- **全屏播放页**（`lib/pages/now_playing_page.dart`）：大封面 + 歌词随进度高亮自动滚动（点歌词行可跳转播放位置）+ 进度条 + 播放/暂停/前后 10 秒；向下滑动或点顶部箭头收起。无时间轴的纯文本歌词只展示、不跟随。
+- **全屏播放页**（`lib/pages/now_playing_page.dart`）：大封面 + 喜欢/收藏按钮 + 歌词随进度高亮自动滚动（点歌词行可跳转播放位置）+ 进度条 + 播放/暂停/前后 10 秒；向下滑动或点顶部箭头收起。
 - 手机端锁屏 / 控制中心控制见上方"播放链路"。
 
 ```bash

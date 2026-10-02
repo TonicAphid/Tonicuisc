@@ -181,27 +181,42 @@ def test_revoked_device_is_locked_out(app_env) -> None:
     assert client.get("/api/sources", headers=headers).status_code == 401
 
 
-def test_devices_returns_revoked_as_boolean(app_env) -> None:
-    """客户端按布尔判断，服务端不能返回 0/1。"""
-    _login_via_web()
-    headers = {"X-API-Key": _status()["api_key"]}
-    device_id = "E5F5-A5B5"
-    _start(code=device_id, secret=SECRET, name="备用机")
-    assert "已批准" in _web(
-        {"action": "login_existing", "user_code": device_id, "username": "aphid", "password": "hunter2x"}
-    )
-    client.get("/api/devices", headers=headers)  # 先确认能列出来
+def test_delete_device_removes_it_from_list(app_env) -> None:
+    """吊销 = 真删除：列表里不再出现，被吊销设备的 key 立刻失效。"""
+    _login_via_web()  # 设备 A（本机）
+    key_a = _status()["api_key"]
+    headers = {"X-API-Key": key_a}
+
+    second = "B2C2-D2E2"
+    _start(code=second, name="备用机")
+    _web({"action": "login_existing", "user_code": second, "username": "aphid", "password": "hunter2x"})
+    key_b = _status(second)["api_key"]
 
     items = client.get("/api/devices", headers=headers).json()["items"]
     assert len(items) == 2
+    target = next(item for item in items if not item["current"])
+
+    assert client.delete(f"/api/devices/{target['id']}", headers=headers).status_code == 200
+
+    remaining = client.get("/api/devices", headers=headers).json()["items"]
+    assert [item["id"] for item in remaining] == [items[0]["id"]]
+    assert all(item["revoked"] is False for item in remaining)
+
+    # 被删掉的设备：key 立刻失效
+    assert client.get("/api/sources", headers={"X-API-Key": key_b}).status_code == 401
+    # 删除不存在的设备
+    assert client.delete(f"/api/devices/{target['id']}", headers=headers).status_code == 404
+
+
+def test_devices_fields_are_booleans(app_env) -> None:
+    """客户端按布尔判断，服务端不能返回 0/1。"""
+    _login_via_web()
+    headers = {"X-API-Key": _status()["api_key"]}
+    items = client.get("/api/devices", headers=headers).json()["items"]
+    assert items
     for item in items:
         assert isinstance(item["revoked"], bool)
         assert isinstance(item["current"], bool)
-
-    target = next(item for item in items if not item["current"])
-    client.delete(f"/api/devices/{target['id']}", headers=headers)
-    after = {item["id"]: item for item in client.get("/api/devices", headers=headers).json()["items"]}
-    assert after[target["id"]]["revoked"] is True
 
 
 def test_cleanup_removes_orphan_devices(app_env) -> None:

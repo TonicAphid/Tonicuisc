@@ -3,18 +3,21 @@ import 'package:flutter/material.dart';
 import '../api/api_client.dart';
 import '../models/song.dart';
 import '../player/player_controller.dart';
+import '../state/library_state.dart';
 
-/// 搜索页（首页 tab）：搜索、试听、下载。
+/// 搜索页（首页 tab）：搜索、试听、下载、点红心。
 class SearchPage extends StatefulWidget {
   const SearchPage({
     super.key,
     required this.api,
     required this.player,
+    required this.library,
     required this.onUnauthorized,
   });
 
   final ApiClient api;
   final PlayerController player;
+  final LibraryState library;
   final Future<void> Function(String message) onUnauthorized;
 
   @override
@@ -88,9 +91,29 @@ class _SearchPageState extends State<SearchPage> {
     }
   }
 
+  Future<void> _toggleLike(Song song) async {
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      final wasLiked = widget.library.liked(song.id);
+      await widget.library.toggle('like', song.id);
+      messenger.showSnackBar(SnackBar(
+        content: Text(wasLiked ? '已取消喜欢 ${song.name}' : '已加入我喜欢 ${song.name}'),
+        duration: const Duration(seconds: 1),
+      ));
+    } catch (err) {
+      if (err is UnauthorizedException) {
+        await widget.onUnauthorized('$err');
+        return;
+      }
+      messenger.showSnackBar(SnackBar(content: Text('操作失败：$err')));
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
-    return Column(
+    return AnimatedBuilder(
+      animation: widget.library,
+      builder: (context, _) => Column(
       children: [
         Padding(
           padding: const EdgeInsets.fromLTRB(12, 12, 12, 4),
@@ -181,6 +204,14 @@ class _SearchPageState extends State<SearchPage> {
                         mainAxisSize: MainAxisSize.min,
                         children: [
                           Text(song.ext.toUpperCase(), style: Theme.of(context).textTheme.labelSmall),
+                          IconButton(
+                            tooltip: widget.library.liked(song.id) ? '取消喜欢' : '喜欢',
+                            icon: Icon(
+                              widget.library.liked(song.id) ? Icons.favorite : Icons.favorite_border,
+                              color: widget.library.liked(song.id) ? Colors.redAccent : null,
+                            ),
+                            onPressed: () => _toggleLike(song),
+                          ),
                           IconButton(
                             tooltip: '下载',
                             icon: const Icon(Icons.download_outlined),

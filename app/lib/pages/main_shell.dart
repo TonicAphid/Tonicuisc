@@ -1,14 +1,18 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../api/api_client.dart';
 import '../api/credentials.dart';
 import '../player/player_controller.dart';
+import '../state/library_state.dart';
 import '../widgets/player_bar.dart';
+import 'library_page.dart';
 import 'login_page.dart';
 import 'profile_page.dart';
 import 'search_page.dart';
 
-/// 应用外壳：底部两个 tab（搜索 / 我的），未登录时直接显示设备码登录页。
+/// 应用外壳：底部三个 tab（搜索 / 列表 / 我的），未登录时直接显示设备码登录页。
 class MainShell extends StatefulWidget {
   const MainShell({super.key});
 
@@ -20,6 +24,7 @@ class _MainShellState extends State<MainShell> {
   final PlayerController _player = PlayerController();
 
   ApiClient _api = ApiClient(defaultBaseUrl());
+  late LibraryState _library = LibraryState(_api);
   String _baseUrl = defaultBaseUrl();
   String? _apiKey;
   String? _deviceName;
@@ -54,8 +59,12 @@ class _MainShellState extends State<MainShell> {
       _deviceName = name;
       _username = username;
       _api = ApiClient(url, apiKey: key);
+      _library = LibraryState(_api);
       _booted = true;
     });
+    if (key != null && key.isNotEmpty) {
+      unawaited(_library.refresh());
+    }
   }
 
   Future<void> _handleLoggedIn(String apiKey, String deviceId, String username) async {
@@ -70,9 +79,11 @@ class _MainShellState extends State<MainShell> {
       _apiKey = apiKey;
       _username = username.isEmpty ? null : username;
       _api = ApiClient(_baseUrl, apiKey: apiKey);
+      _library = LibraryState(_api);
       _notice = null;
       _tab = 0;
     });
+    unawaited(_library.refresh());
   }
 
   Future<void> _handleUnauthorized(String message) async {
@@ -122,8 +133,11 @@ class _MainShellState extends State<MainShell> {
     setState(() {
       _baseUrl = normalized;
       _api = ApiClient(normalized, apiKey: _apiKey);
+      _library = LibraryState(_api);
     });
   }
+
+  static const List<String> _titles = ['Tonicuisc', '列表', '我的'];
 
   @override
   Widget build(BuildContext context) {
@@ -141,7 +155,7 @@ class _MainShellState extends State<MainShell> {
 
     return Scaffold(
       appBar: AppBar(
-        title: Text(_tab == 0 ? 'Tonicuisc' : '我的'),
+        title: Text(_titles[_tab]),
       ),
       body: Column(
         children: [
@@ -162,7 +176,18 @@ class _MainShellState extends State<MainShell> {
             child: IndexedStack(
               index: _tab,
               children: [
-                SearchPage(api: _api, player: _player, onUnauthorized: _handleUnauthorized),
+                SearchPage(
+                  api: _api,
+                  player: _player,
+                  library: _library,
+                  onUnauthorized: _handleUnauthorized,
+                ),
+                LibraryPage(
+                  api: _api,
+                  library: _library,
+                  player: _player,
+                  onUnauthorized: _handleUnauthorized,
+                ),
                 ProfilePage(
                   api: _api,
                   baseUrl: _baseUrl,
@@ -181,12 +206,16 @@ class _MainShellState extends State<MainShell> {
       bottomNavigationBar: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          PlayerBar(controller: _player, api: _api),
+          PlayerBar(controller: _player, api: _api, library: _library),
           NavigationBar(
             selectedIndex: _tab,
-            onDestinationSelected: (index) => setState(() => _tab = index),
+            onDestinationSelected: (index) {
+              setState(() => _tab = index);
+              if (index == 1) unawaited(_library.refresh()); // 切到列表就刷新一次数字
+            },
             destinations: const [
               NavigationDestination(icon: Icon(Icons.search), label: '搜索'),
+              NavigationDestination(icon: Icon(Icons.library_music_outlined), label: '列表'),
               NavigationDestination(icon: Icon(Icons.person_outline), label: '我的'),
             ],
           ),
