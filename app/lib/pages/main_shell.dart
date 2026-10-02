@@ -62,7 +62,7 @@ class _MainShellState extends State<MainShell> {
     await Credentials.save(
       apiKey: apiKey,
       deviceId: deviceId,
-      deviceName: _deviceName ?? LoginPage.defaultDeviceName(),
+      deviceName: _deviceName ?? defaultDeviceName(),
       username: username,
     );
     if (!mounted) return;

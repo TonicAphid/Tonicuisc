@@ -8,6 +8,15 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../api/api_client.dart';
 
+/// 默认设备名，用来在服务端辨认。
+String defaultDeviceName() {
+  if (Platform.isIOS) return 'iPhone';
+  if (Platform.isMacOS) return 'Mac';
+  if (Platform.isWindows) return 'Windows';
+  if (Platform.isLinux) return 'Linux';
+  return 'Device';
+}
+
 /// 设备码登录页。
 ///
 /// App 自己生成设备码（`A1B1-C1D1`）和一个只有它知道的轮询密钥，
@@ -44,14 +53,6 @@ class _LoginPageState extends State<LoginPage> {
   bool _waiting = false;
   String? _error;
   String _hint = '';
-
-  static String defaultDeviceName() {
-    if (Platform.isIOS) return 'iPhone';
-    if (Platform.isMacOS) return 'Mac';
-    if (Platform.isWindows) return 'Windows';
-    if (Platform.isLinux) return 'Linux';
-    return 'Device';
-  }
 
   String _randomString(int length) =>
       List.generate(length, (_) => _alphabet[_random.nextInt(_alphabet.length)]).join();

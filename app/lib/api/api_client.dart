@@ -26,15 +26,7 @@ class ApiException implements Exception {
 
 /// 401：key 失效 / 设备被吊销 / 还没配对。
 class UnauthorizedException extends ApiException {
-  UnauthorizedException([String message = '未授权：请重新配对设备']) : super(message);
-}
-
-/// 配对成功后拿到的设备凭据（`apiKey` 只会出现这一次）。
-class PairResult {
-  const PairResult({required this.apiKey, required this.deviceId, required this.deviceName});
-  final String apiKey;
-  final String deviceId;
-  final String deviceName;
+  UnauthorizedException([super.message = '未授权：请重新登录设备']);
 }
 
 /// 设备码登录：`POST /api/device/start` 的返回。
@@ -73,33 +65,6 @@ class ApiClient {
       };
 
   static String normalizeBaseUrl(String value) => value.trim().replaceAll(RegExp(r'/+$'), '');
-
-  /// 用一次性配对码换取本设备专属的 API Key。
-  static Future<PairResult> pair({
-    required String baseUrl,
-    required String code,
-    required String name,
-  }) async {
-    final resp = await http
-        .post(
-          Uri.parse('${normalizeBaseUrl(baseUrl)}/api/pair'),
-          headers: {'Content-Type': 'application/json'},
-          body: jsonEncode({'code': code.trim(), 'name': name.trim()}),
-        )
-        .timeout(const Duration(seconds: 20));
-    if (resp.statusCode == 401) {
-      throw UnauthorizedException(_detailOf(resp, '配对码错误或已过期'));
-    }
-    if (resp.statusCode != 200) {
-      throw ApiException(_detailOf(resp, 'HTTP ${resp.statusCode}'));
-    }
-    final data = jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
-    return PairResult(
-      apiKey: (data['api_key'] ?? '').toString(),
-      deviceId: (data['device_id'] ?? '').toString(),
-      deviceName: (data['name'] ?? '').toString(),
-    );
-  }
 
   /// 设备码登录第一步：把 App 生成的设备码登记到服务端。
   static Future<DeviceLoginStart> startDeviceLogin({
