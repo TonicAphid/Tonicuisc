@@ -4,6 +4,7 @@ import '../api/api_client.dart';
 import '../models/song.dart';
 import '../player/player_controller.dart';
 import '../state/library_state.dart';
+import '../widgets/song_avatar.dart';
 
 /// 搜索页（首页 tab）：搜索、试听、下载、点红心。
 class SearchPage extends StatefulWidget {
@@ -195,9 +196,7 @@ class _SearchPageState extends State<SearchPage> {
                     final song = _results[index];
                     final isCurrent = widget.player.current?.id == song.id;
                     return ListTile(
-                      leading: CircleAvatar(
-                        child: Text(song.sourceLabel.isEmpty ? '?' : song.sourceLabel.substring(0, 1)),
-                      ),
+                      leading: SongAvatar(song: song, highlight: isCurrent),
                       title: Text(song.name, maxLines: 1, overflow: TextOverflow.ellipsis),
                       subtitle: Text(song.subtitle, maxLines: 1, overflow: TextOverflow.ellipsis),
                       trailing: Row(

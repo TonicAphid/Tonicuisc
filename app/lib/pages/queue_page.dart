@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../player/player_controller.dart';
 import '../widgets/play_mode_icons.dart';
+import '../widgets/song_avatar.dart';
 
 /// 当前播放队列的列表，全屏播放页和「列表」tab 共用。
 class QueueList extends StatelessWidget {
@@ -36,9 +37,7 @@ class QueueList extends StatelessWidget {
             final isCurrent = index == controller.index;
             return ListTile(
               dense: true,
-              leading: isCurrent
-                  ? Icon(Icons.equalizer, color: Theme.of(context).colorScheme.primary)
-                  : Text('${index + 1}', style: Theme.of(context).textTheme.labelMedium),
+              leading: SongAvatar(song: song, size: 40, highlight: isCurrent),
               title: Text(
                 song.name,
                 maxLines: 1,

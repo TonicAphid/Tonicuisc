@@ -4,6 +4,7 @@ import '../api/api_client.dart';
 import '../pages/now_playing_page.dart';
 import '../player/player_controller.dart';
 import '../state/library_state.dart';
+import 'song_avatar.dart';
 
 /// 底部播放条：播放/暂停、进度、拖动跳转；点一下展开全屏播放页。
 class PlayerBar extends StatelessWidget {
@@ -44,17 +45,7 @@ class PlayerBar extends StatelessWidget {
                           onTap: () => NowPlayingPage.open(context, controller, api, library),
                           child: Row(
                             children: [
-                              if (song.coverUrl.isNotEmpty)
-                                ClipRRect(
-                                  borderRadius: BorderRadius.circular(6),
-                                  child: Image.network(
-                                    song.coverUrl,
-                                    width: 40,
-                                    height: 40,
-                                    fit: BoxFit.cover,
-                                    errorBuilder: (_, __, ___) => const SizedBox(width: 40, height: 40),
-                                  ),
-                                ),
+                              SongAvatar(song: song, size: 40, radius: 6),
                               const SizedBox(width: 10),
                               Expanded(
                                 child: Column(

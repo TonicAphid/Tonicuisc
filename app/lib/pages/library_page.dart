@@ -5,6 +5,7 @@ import '../models/song.dart';
 import '../player/player_controller.dart';
 import '../state/library_state.dart';
 import '../widgets/play_mode_icons.dart';
+import '../widgets/song_avatar.dart';
 import 'queue_page.dart';
 
 /// 「列表」tab：播放列表 + 喜欢 / 收藏 / 播放历史 三个入口。
@@ -231,9 +232,7 @@ class _LibraryListPageState extends State<LibraryListPage> {
                         final song = _songs[index];
                         final isCurrent = widget.player.current?.id == song.id;
                         return ListTile(
-                          leading: CircleAvatar(
-                            child: Text(song.sourceLabel.isEmpty ? '?' : song.sourceLabel.substring(0, 1)),
-                          ),
+                          leading: SongAvatar(song: song, highlight: isCurrent),
                           title: Text(song.name, maxLines: 1, overflow: TextOverflow.ellipsis),
                           subtitle: Text(song.subtitle, maxLines: 1, overflow: TextOverflow.ellipsis),
                           trailing: IconButton(

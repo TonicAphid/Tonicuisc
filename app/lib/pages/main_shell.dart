@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../api/api_client.dart';
 import '../api/credentials.dart';
@@ -20,7 +21,7 @@ class MainShell extends StatefulWidget {
   State<MainShell> createState() => _MainShellState();
 }
 
-class _MainShellState extends State<MainShell> {
+class _MainShellState extends State<MainShell> with WidgetsBindingObserver {
   final PlayerController _player = PlayerController();
 
   ApiClient _api = ApiClient(defaultBaseUrl());
@@ -38,13 +39,31 @@ class _MainShellState extends State<MainShell> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    unawaited(_keepScreenAwake(true));
     _bootstrap();
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    unawaited(_keepScreenAwake(false));
     _player.dispose();
     super.dispose();
+  }
+
+  /// 前台不让屏幕自动息屏；切到后台就放开，别在后台耗电。
+  Future<void> _keepScreenAwake(bool enabled) async {
+    try {
+      await (enabled ? WakelockPlus.enable() : WakelockPlus.disable());
+    } catch (_) {
+      // 平台不支持就算了，不影响使用
+    }
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    unawaited(_keepScreenAwake(state == AppLifecycleState.resumed));
   }
 
   Future<void> _bootstrap() async {

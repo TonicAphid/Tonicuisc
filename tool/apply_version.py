@@ -62,7 +62,8 @@ def main() -> int:
     pubspec = re.sub(r"^version:.*$", f"version: {semver}+{build}", pubspec, count=1, flags=re.M)
     PUBSPEC.write_text(pubspec, encoding="utf-8")
 
-    print(f"版本: v{label}  (pubspec {semver}+{build})")
+    # 输出保持纯 ASCII：Windows CI 的 Python 默认是 cp1252，打中文会 UnicodeEncodeError
+    print(f"app version: v{label}  (pubspec {semver}+{build})")
     return 0
 
 

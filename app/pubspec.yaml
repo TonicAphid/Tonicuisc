@@ -22,6 +22,8 @@ dependencies:
   flutter_secure_storage: ^9.2.2
   # 「打开登录页」按钮
   url_launcher: ^6.3.1
+  # 前台常亮（iOS 上避免看着看着黑屏）
+  wakelock_plus: ^1.2.8
 
 dev_dependencies:
   flutter_test:
