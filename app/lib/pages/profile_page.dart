@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../api/api_client.dart';
 import '../api/credentials.dart';
+import '../version.dart';
 
 /// 「我的」页面：账户、本机设备、服务端地址、设备管理与退出登录。
 class ProfilePage extends StatefulWidget {
@@ -200,6 +201,14 @@ class _ProfilePageState extends State<ProfilePage> {
           title: Text('退出登录', style: TextStyle(color: theme.colorScheme.error)),
           subtitle: const Text('清除本机保存的密钥'),
           onTap: widget.onLogout,
+        ),
+        const Divider(height: 32),
+        ListTile(
+          dense: true,
+          leading: const Icon(Icons.info_outline),
+          title: const Text('版本'),
+          subtitle: Text('$kAppVersion（build $kAppBuild）'),
+          onTap: _load,
         ),
         const Divider(height: 32),
         Row(

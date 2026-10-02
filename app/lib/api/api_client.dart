@@ -15,6 +15,30 @@ const String kDefaultServerUrl = 'http://192.168.5.37:8000';
 /// 所有平台的默认地址；用户在「我的 → 服务器地址」里改过就优先用改过的。
 String defaultBaseUrl() => kDefaultServerUrl;
 
+/// 把原始异常变成人话：网络连不上 / 服务端版本太旧 / 其他。
+String friendlyError(Object error, String baseUrl) {
+  final text = '$error';
+  if (error is UnauthorizedException) return text;
+  final looksOffline = text.contains('SocketException') ||
+      text.contains('Connection refused') ||
+      text.contains('Connection failed') ||
+      text.contains('No route to host') ||
+      text.contains('Failed host lookup') ||
+      text.contains('TimeoutException') ||
+      text.contains('timed out');
+  if (looksOffline) {
+    return '连不上服务器 $baseUrl\n'
+        '· 确认服务端已经启动（浏览器打开 $baseUrl/api/health 应该能看到 JSON）\n'
+        '· 确认地址填对、手机和服务器在同一个网络\n'
+        '· 换地址：我的 → 服务器地址';
+  }
+  if (text.contains('404') || text.toLowerCase().contains('not found')) {
+    return '服务端返回 404：接口不存在。\n'
+        '多半是服务端代码太旧，更新后重启一次（要看到 /api/library 这些新接口）。';
+  }
+  return text;
+}
+
 class ApiException implements Exception {
   ApiException(this.message);
   final String message;

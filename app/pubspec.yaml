@@ -1,7 +1,7 @@
 name: tonicuisc
 description: Tonicuisc - 咪咕/酷我 音乐播放器（Windows / Linux / macOS / iOS）
 publish_to: "none"
-version: 1.0.0+1
+version: 0.0.1+1
 
 environment:
   sdk: ">=3.4.0 <4.0.0"

@@ -112,6 +112,14 @@ jobs:
         if: runner.os != 'Windows'
         run: bash ./tool/apply_patches.sh
 
+      - name: 写入版本号
+        shell: bash
+        env:
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+        run: |
+          # 版本取推送的 tag（有的话）或提交信息里的 vX.Y.Z（可带 fix），写进 version.dart 和 pubspec
+          python tool/apply_version.py "${{ github.ref_name }}" --build=${{ github.run_number }}
+
       - name: 安装依赖
         working-directory: app
         run: flutter pub get
@@ -169,6 +177,12 @@ jobs:
       - name: 应用原生补丁
         run: bash ./tool/apply_patches.sh
 
+      - name: 写入版本号
+        shell: bash
+        env:
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+        run: python tool/apply_version.py "${{ github.ref_name }}" --build=${{ github.run_number }}
+
       - name: 安装依赖
         working-directory: app
         run: flutter pub get
@@ -215,8 +229,8 @@ jobs:
           # 提交标题的第一行，作为 Release 标题
           title=$(printf '%s' "$COMMIT_TITLE" | head -n 1 | tr -d '\r' | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')
 
-          # 提交标题里的 v0.0.x（必须带 v，避免把 "修了 2 个问题" 之类当成版本号）
-          tag=$(printf '%s' "$COMMIT_TITLE" | grep -oiE 'v[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n 1 | tr 'A-Z' 'a-z')
+          # 提交标题里的 v0.0.x（可带 fix 后缀，如 v0.0.7fix），必须带 v
+          tag=$(printf '%s' "$COMMIT_TITLE" | grep -oiE 'v[0-9]+\.[0-9]+(\.[0-9]+)?(fix)?' | head -n 1 | tr 'A-Z' 'a-z')
           if [ -n "$tag" ]; then
             source="提交标题"
           elif [ "$REF_TYPE" = "tag" ]; then

@@ -220,7 +220,7 @@ class _SearchPageState extends State<SearchPage> {
                         ],
                       ),
                       selected: isCurrent,
-                      onTap: () => widget.player.play(song, widget.api),
+                      onTap: () => widget.player.playQueue(_results, index, widget.api),
                     );
                   },
                 ),

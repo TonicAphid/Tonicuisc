@@ -203,10 +203,12 @@ Flutter 原生工程目录（`app/windows`、`app/linux`、`app/macos`、`app/io
 
 - **登录页**（未登录时的首屏，`lib/pages/login_page.dart`）：显示 App 生成的设备码 `A1B1-C1D1`，主按钮「打开登录页并复制设备码」会直接弹出系统浏览器并把设备码放进剪贴板；后台每 2 秒轮询，用户在网页上批准后自动完成登录。
 - **搜索 tab**（`lib/pages/search_page.dart`）：关键词搜索、音源勾选（咪咕 / 酷我）、显示「正在进行…」和用时、试听、下载、点红心加进「我喜欢」。
-- **列表 tab**（`lib/pages/library_page.dart`）：**我喜欢 / 收藏 / 播放历史** 三个入口，各自显示数量，点进去是歌曲列表（可播放、单条移除、清空）。
-- **我的 tab**（`lib/pages/profile_page.dart`）：账户名、本机设备名与设备 ID、服务器地址、重新登录、退出登录，以及**已登录设备列表**（可逐台吊销，删完即从列表消失）。
+- **列表 tab**（`lib/pages/library_page.dart`）：最上面是**播放列表**（当前队列，显示正在播放的歌、队列长度和播放模式），下面是 **我喜欢 / 收藏 / 播放历史** 三个入口，各自显示数量，点进去是歌曲列表（可播放、单条移除、清空）。
+- **播放队列**（`lib/pages/queue_page.dart`）：全屏播放页里点列表按钮弹出，或在「列表」tab 里整页打开；点任意一首跳播、垃圾桶图标从队列移除。
+- **播放模式**：顺序播放 / 列表循环 / 单曲循环 / 随机播放，在播放页和队列页都能切；播完自动按模式走下一首。
+- **我的 tab**（`lib/pages/profile_page.dart`）：账户名、本机设备名与设备 ID、服务器地址、重新登录、退出登录、**版本号**，以及**已登录设备列表**（可逐台吊销，删完即从列表消失）。
 - **底部播放条**：封面缩略图、播放/暂停、进度拖动；**点一下展开全屏播放页**。
-- **全屏播放页**（`lib/pages/now_playing_page.dart`）：大封面 + 喜欢/收藏按钮 + 歌词随进度高亮自动滚动（点歌词行可跳转播放位置）+ 进度条 + 播放/暂停/前后 10 秒；向下滑动或点顶部箭头收起。
+- **全屏播放页**（`lib/pages/now_playing_page.dart`）：大封面 + 喜欢/收藏按钮 + 歌词随进度高亮自动滚动（点歌词行可跳转）+ 进度条 + **上一首 / 播放暂停 / 下一首**（原来这里是 ±10 秒）；**拖进度条时音频继续播，滑块跟手指走，松手才跳到那个位置**。
 - 手机端锁屏 / 控制中心控制见上方"播放链路"。
 
 ```bash
@@ -231,8 +233,9 @@ App 的默认服务器地址是 **`http://192.168.5.37:8000`**，定义在 `app/
   - `静态检查` job 跑 `flutter analyze` + `flutter test`；
   - `Windows / Linux / macOS / iOS` 矩阵构建，Flutter 版本固定在 `env.FLUTTER_VERSION`（固定版本才能让 `flutter-action` 缓存命中，否则每次都要重新保存缓存）；
   - 全部成功后由 `发布 Release` job 汇总产物并上传到 GitHub Release；
+  - **App 版本号从 tag / 提交标题里取**（`tool/apply_version.py`）：`v0.0.7`、`v0.1.0`、`v1.0.0`，后面跟 `fix` 也认（`v0.0.7fix`）。它会写两处：`app/lib/version.dart`（界面显示的版本，带 fix）和 `app/pubspec.yaml`（只能是合法 semver，fix 体现在 build number 上）。
   - **Release 标题 = 提交标题**（commit message 的第一行），Actions 列表里那一行也是提交标题（`run-name`）。
-  - **Release 标签从提交标题里取 `v0.0.x`**：比如提交信息写 `v0.0.3 修复播放转圈`，tag 就是 `v0.0.3`、标题是整行。没写版本号时依次回退：推送的 tag → 手动输入 → `app/pubspec.yaml` 版本号。重复同一版本会更新标题并覆盖同名产物，不需要手动打 tag。
+  - **Release 标签也从提交标题里取 `v0.0.x`（可带 fix）**：比如提交信息写 `v0.0.3 修复播放转圈`，tag 就是 `v0.0.3`、标题是整行。没写版本号时依次回退：推送的 tag → 手动输入 → `app/pubspec.yaml` 版本号。重复同一版本会更新标题并覆盖同名产物，不需要手动打 tag。
 
 Release 产物：`tonicuisc-windows-x64.zip`、`tonicuisc-linux-x64.tar.gz`、`tonicuisc-macos.zip`、`tonicuisc-ios-unsigned.ipa`。
 

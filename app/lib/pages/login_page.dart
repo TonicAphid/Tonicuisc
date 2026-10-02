@@ -101,9 +101,9 @@ class _LoginPageState extends State<LoginPage> {
       _startPolling();
     } catch (err) {
       if (!mounted) return;
-      // 设备码撞车之类：换一个再试
+      // 设备码撞车 / 网络不通：给出人话，并换一个码
       setState(() {
-        _error = '$err';
+        _error = friendlyError(err, widget.baseUrl);
         _registered = false;
         _userCode = _newUserCode();
         _pollSecret = _newSecret();

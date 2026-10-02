@@ -4,8 +4,10 @@ import '../api/api_client.dart';
 import '../models/song.dart';
 import '../player/player_controller.dart';
 import '../state/library_state.dart';
+import '../widgets/play_mode_icons.dart';
+import 'queue_page.dart';
 
-/// 「列表」tab：喜欢 / 收藏 / 播放历史 三个入口。
+/// 「列表」tab：播放列表 + 喜欢 / 收藏 / 播放历史 三个入口。
 class LibraryPage extends StatelessWidget {
   const LibraryPage({
     super.key,
@@ -34,6 +36,31 @@ class LibraryPage extends StatelessWidget {
       builder: (context, _) => ListView(
         padding: const EdgeInsets.all(16),
         children: [
+          AnimatedBuilder(
+            animation: player,
+            builder: (context, _) => Card(
+              clipBehavior: Clip.antiAlias,
+              child: ListTile(
+                contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                leading: CircleAvatar(
+                  backgroundColor: theme.colorScheme.tertiaryContainer,
+                  child: Icon(playModeIcon(player.mode), color: theme.colorScheme.onTertiaryContainer),
+                ),
+                title: const Text('播放列表', style: TextStyle(fontWeight: FontWeight.w600)),
+                subtitle: Text(
+                  player.current == null
+                      ? '还没有在播的歌'
+                      : '正在播放：${player.current!.name} · 队列 ${player.queue.length} 首 · ${player.mode.label}',
+                  maxLines: 2,
+                ),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () => Navigator.of(context).push(
+                  MaterialPageRoute(builder: (_) => QueuePage(controller: player)),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 4),
           for (final entry in kinds.entries)
             Card(
               clipBehavior: Clip.antiAlias,
@@ -123,7 +150,7 @@ class _LibraryListPageState extends State<LibraryListPage> {
         await widget.onUnauthorized('$err');
         return;
       }
-      setState(() => _error = '$err');
+      setState(() => _error = friendlyError(err, widget.api.baseUrl));
     } finally {
       if (mounted) setState(() => _loading = false);
     }
@@ -178,7 +205,23 @@ class _LibraryListPageState extends State<LibraryListPage> {
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : _error != null
-              ? Center(child: Text(_error!))
+              ? Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(24),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(_error!, textAlign: TextAlign.center),
+                        const SizedBox(height: 16),
+                        FilledButton.icon(
+                          onPressed: _load,
+                          icon: const Icon(Icons.refresh),
+                          label: const Text('重试'),
+                        ),
+                      ],
+                    ),
+                  ),
+                )
               : _songs.isEmpty
                   ? Center(child: Text('这里还是空的', style: Theme.of(context).textTheme.bodyMedium))
                   : ListView.separated(
@@ -199,7 +242,7 @@ class _LibraryListPageState extends State<LibraryListPage> {
                             onPressed: () => _remove(song),
                           ),
                           selected: isCurrent,
-                          onTap: () => widget.player.play(song, widget.api),
+                          onTap: () => widget.player.playQueue(_songs, index, widget.api),
                         );
                       },
                     ),

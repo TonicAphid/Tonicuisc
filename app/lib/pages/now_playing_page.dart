@@ -5,6 +5,8 @@ import '../models/lyric.dart';
 import '../models/song.dart';
 import '../player/player_controller.dart';
 import '../state/library_state.dart';
+import '../widgets/play_mode_icons.dart';
+import 'queue_page.dart';
 
 /// 全屏播放页：封面 + 歌词（跟随进度高亮、可点击跳转）+ 进度条 + 播放控制。
 class NowPlayingPage extends StatefulWidget {
@@ -46,6 +48,9 @@ class _NowPlayingPageState extends State<NowPlayingPage> {
   int _active = -1;
   bool _loading = false;
   String? _error;
+
+  /// 手指拖进度条时的位置（毫秒）；不为 null 时进度条不跟播放进度。
+  double? _dragMilliseconds;
 
   @override
   void initState() {
@@ -289,9 +294,11 @@ class _NowPlayingPageState extends State<NowPlayingPage> {
   Widget _progress(BuildContext context) {
     final theme = Theme.of(context);
     final total = widget.controller.duration ?? Duration.zero;
-    final position = total > Duration.zero && widget.controller.position > total
-        ? total
-        : widget.controller.position;
+    // 拖动时进度条跟手指，不跟播放进度；音频继续放，松手才 seek
+    final dragging = _dragMilliseconds;
+    final shown = dragging != null
+        ? Duration(milliseconds: dragging.round())
+        : (total > Duration.zero && widget.controller.position > total ? total : widget.controller.position);
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16),
       child: Column(
@@ -299,18 +306,29 @@ class _NowPlayingPageState extends State<NowPlayingPage> {
           Slider(
             value: total.inMilliseconds == 0
                 ? 0
-                : position.inMilliseconds.clamp(0, total.inMilliseconds).toDouble(),
+                : (dragging ?? shown.inMilliseconds.toDouble()).clamp(0, total.inMilliseconds).toDouble(),
             max: total.inMilliseconds == 0 ? 1 : total.inMilliseconds.toDouble(),
             onChanged: total.inMilliseconds == 0
                 ? null
-                : (value) => widget.controller.seek(Duration(milliseconds: value.round())),
+                : (value) => setState(() => _dragMilliseconds = value),
+            onChangeEnd: total.inMilliseconds == 0
+                ? null
+                : (value) async {
+                    await widget.controller.seek(Duration(milliseconds: value.round()));
+                    if (mounted) setState(() => _dragMilliseconds = null);
+                  },
           ),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 8),
             child: Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                Text(formatDuration(position), style: theme.textTheme.labelSmall),
+                Text(
+                  formatDuration(shown),
+                  style: theme.textTheme.labelSmall?.copyWith(
+                    color: dragging != null ? theme.colorScheme.primary : null,
+                  ),
+                ),
                 Text(formatDuration(widget.controller.duration), style: theme.textTheme.labelSmall),
               ],
             ),
@@ -321,44 +339,48 @@ class _NowPlayingPageState extends State<NowPlayingPage> {
   }
 
   Widget _controls(BuildContext context) {
+    final controller = widget.controller;
     return Row(
       mainAxisAlignment: MainAxisAlignment.center,
       children: [
         IconButton(
           iconSize: 34,
-          tooltip: '后退 10 秒',
-          icon: const Icon(Icons.replay_10),
-          onPressed: () => widget.controller.seek(
-            _forwardOf(-10),
-          ),
+          tooltip: '播放模式：${controller.mode.label}',
+          icon: Icon(playModeIcon(controller.mode)),
+          onPressed: controller.cycleMode,
         ),
-        const SizedBox(width: 12),
-        if (widget.controller.loading)
-          const SizedBox(width: 56, height: 56, child: Center(child: CircularProgressIndicator()))
+        const SizedBox(width: 8),
+        IconButton(
+          iconSize: 40,
+          tooltip: '上一首',
+          icon: const Icon(Icons.skip_previous),
+          onPressed: controller.previous,
+        ),
+        const SizedBox(width: 4),
+        if (controller.loading)
+          const SizedBox(width: 64, height: 64, child: Center(child: CircularProgressIndicator()))
         else
           IconButton(
             iconSize: 64,
-            tooltip: widget.controller.playing ? '暂停' : '播放',
-            icon: Icon(widget.controller.playing ? Icons.pause_circle_filled : Icons.play_circle_fill),
-            onPressed: widget.controller.toggle,
+            tooltip: controller.playing ? '暂停' : '播放',
+            icon: Icon(controller.playing ? Icons.pause_circle_filled : Icons.play_circle_fill),
+            onPressed: controller.toggle,
           ),
-        const SizedBox(width: 12),
+        const SizedBox(width: 4),
+        IconButton(
+          iconSize: 40,
+          tooltip: '下一首',
+          icon: const Icon(Icons.skip_next),
+          onPressed: controller.next,
+        ),
+        const SizedBox(width: 8),
         IconButton(
           iconSize: 34,
-          tooltip: '前进 10 秒',
-          icon: const Icon(Icons.forward_10),
-          onPressed: () => widget.controller.seek(_forwardOf(10)),
+          tooltip: '播放列表',
+          icon: const Icon(Icons.queue_music),
+          onPressed: () => QueueSheet.show(context, controller),
         ),
       ],
     );
-  }
-
-  /// 相对当前进度前后跳 [seconds] 秒，并夹在 0 与总时长之间。
-  Duration _forwardOf(int seconds) {
-    final target = widget.controller.position + Duration(seconds: seconds);
-    if (target < Duration.zero) return Duration.zero;
-    final total = widget.controller.duration;
-    if (total != null && total > Duration.zero && target > total) return total;
-    return target;
   }
 }
