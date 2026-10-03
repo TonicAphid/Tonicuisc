@@ -3,6 +3,12 @@
 咪咕 / 酷我给的封面经常是小图或者糊的，QQ 音乐的专辑封面更"正统"。
 这里只查封面：用「歌名 + 歌手」搜一下 QQ 音乐，拿 albummid 拼出 500x500 的图。
 
+两层提速：
+
+* **LRU 记忆**：``(歌名, 歌手)`` → albummid。同一首歌、同一批歌重复查直接命中，不再联网；
+* **命中 albummid 就直接拼 URL**，一次搜索搞定，不用再发第二次请求。
+
+网络失败**不写缓存**（下次还会重试），只有「确实没有」才会被记住。
 查不到就返回 None，绝不抛异常影响正常搜索。
 """
 
@@ -10,9 +16,12 @@ from __future__ import annotations
 
 import json
 import re
+from functools import lru_cache
 from typing import Any
 
 import requests
+
+from .config import SETTINGS
 
 SEARCH_URL = "https://c.y.qq.com/soso/fcgi-bin/client_search_cp"
 COVER_TEMPLATE = "https://y.gtimg.cn/music/photo_new/T002R500x500M000{}.jpg"
@@ -32,6 +41,12 @@ _NORMALIZE_RE = re.compile(r"[^0-9a-z\u4e00-\u9fff]+")
 def _normalize(text: str) -> str:
     """只留字母数字和汉字，方便做「像不像同一首」的判断。"""
     return _NORMALIZE_RE.sub("", (text or "").lower())
+
+
+def cover_url_for_album(album_mid: str | None) -> str | None:
+    """有了 albummid 就直接拼封面地址，不需要再请求一次。"""
+    mid = str(album_mid or "").strip()
+    return COVER_TEMPLATE.format(mid) if mid else None
 
 
 def _parse_json(text: str) -> dict[str, Any]:
@@ -75,29 +90,46 @@ def _is_same_song(song: dict[str, Any], title: str, artists: str) -> bool:
     return want_singers in got_singers or got_singers in want_singers
 
 
-def search_cover(title: str, artists: str = "", timeout: float = 6.0) -> str | None:
-    """按歌名 + 歌手找 QQ 音乐的专辑封面，找不到或对不上返回 None。"""
-    title, artists = (title or "").strip(), (artists or "").strip()
+@lru_cache(maxsize=SETTINGS.qq_cover_cache_size)
+def _album_mid(title: str, artists: str, timeout: float = 6.0) -> str | None:
+    """查一次 QQ 拿 albummid。网络异常直接往外抛，让调用方决定不缓存。"""
     keyword = " ".join(part for part in (title, artists) if part)
-    if not keyword:
-        return None
-    try:
-        resp = requests.get(
-            SEARCH_URL,
-            params={"w": keyword, "format": "json", "n": 3, "p": 1, "cr": 1, "t": 0, "aggr": 1, "catZhida": 1},
-            headers=HEADERS,
-            timeout=timeout,
-        )
-        resp.raise_for_status()
-        payload = _parse_json(resp.text)
-    except Exception:
-        return None
+    resp = requests.get(
+        SEARCH_URL,
+        params={"w": keyword, "format": "json", "n": 3, "p": 1, "cr": 1, "t": 0, "aggr": 1, "catZhida": 1},
+        headers=HEADERS,
+        timeout=timeout,
+    )
+    resp.raise_for_status()
+    payload = _parse_json(resp.text)
 
     songs = (((payload.get("data") or {}).get("song") or {}).get("list")) or []
     for song in songs[:3]:
         if not isinstance(song, dict) or not _is_same_song(song, title, artists):
             continue
-        album_mid = str(song.get("albummid") or "").strip()
-        if album_mid:
-            return COVER_TEMPLATE.format(album_mid)
-    return None
+        mid = str(song.get("albummid") or "").strip()
+        if mid:
+            return mid
+    return None  # 确实没有 → 会被记住
+
+
+def search_cover(title: str, artists: str = "", timeout: float = 6.0) -> str | None:
+    """按歌名 + 歌手找 QQ 音乐的专辑封面，找不到或对不上返回 None。"""
+    title, artists = (title or "").strip(), (artists or "").strip()
+    if not title and not artists:
+        return None
+    try:
+        mid = _album_mid(title, artists, timeout)
+    except Exception:
+        return None  # 网络问题不写缓存，下次还试
+    return cover_url_for_album(mid)
+
+
+def cache_info() -> dict[str, int]:
+    """给测速 / 排查用：LRU 命中情况。"""
+    info = _album_mid.cache_info()
+    return {"hits": info.hits, "misses": info.misses, "size": info.currsize}
+
+
+def clear_cache() -> None:
+    _album_mid.cache_clear()

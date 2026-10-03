@@ -8,10 +8,10 @@
 
 **后端**
 
-- 搜索：只请求勾选的音源，**10 条拆成 10 个并行请求**，控制台不刷进度条，返回耗时
+- 搜索：只请求勾选的音源，**每个音源拆成多个并行请求**（musicdl 单请求内部是串行解析的），控制台不刷进度条，返回耗时
 - 播放：优先给音源直链（客户端直连 CDN），拿不到就回退服务端代理；未缓存时**边下边播**，缓存后支持 HTTP Range 拖动
 - 歌词 / 封面 / 附件下载
-- 持久化：SQLite 存歌曲元信息、搜索历史、**喜欢 / 收藏 / 播放历史**（按账户隔离）
+- 持久化：Redis 存歌曲元信息、搜索历史、搜索结果缓存、**喜欢 / 收藏 / 播放历史**（按账户隔离），服务端启动时自动拉起 Redis、退出时自动关掉
 - 登录：**设备码流**（App 生成码，浏览器批准），每设备一把随机 API Key，服务端只存哈希
 - 安全：密码 PBKDF2-HMAC-SHA256、限速防爆破、按设备吊销
 
@@ -31,17 +31,22 @@ server/                            后端
   tonicuisc_server/
     config.py                      环境变量、音源别名
     service.py                     musicdl 封装：搜索 / 下载 / 缓存 / 边下边播
-    storage.py                     SQLite：歌曲、搜索历史、账户、设备、收藏列表
+    storage.py                     Redis：歌曲、搜索历史、搜索缓存、账户、设备、收藏列表
+    redis_runtime.py               Redis 的定位 / 自动下载 / 拉起 / 退出回收
     auth.py                        账户、设备码登录、API Key 校验
     ratelimit.py                   滑动窗口限速、密码错误锁定
     weblogin.py                    /login 网页（无模板引擎、无 multipart 依赖）
     main.py                        FastAPI 路由 + 鉴权中间件 + 访问日志
     __main__.py                    python -m tonicuisc_server（含管理子命令）
-  scripts/                         smoke.py / smoke_api.py / smoke_db.py（手动冒烟）
-  tests/                           pytest（不联网、不需要 musicdl）
+  scripts/                         smoke.py / smoke_api.py / smoke_db.py / import_sqlite.py
+  tests/                           pytest（不联网、不需要 musicdl、不需要真的 Redis）
   start.ps1 / start.sh             一键启动
   requirements.txt / requirements-dev.txt
   .env.example                     环境变量样例
+
+redis/                             Redis 二进制（首次启动自动下载，不进版本库）
+  win/                             Windows：redis-server.exe
+  linux/                            Linux：redis-server
 
 app/                               Flutter 客户端
   lib/
@@ -131,19 +136,32 @@ flutter build windows --release
 | `TONICUISC_HOST` | `0.0.0.0` | 监听地址 |
 | `TONICUISC_PORT` | `8000` | 端口 |
 | `TONICUISC_SOURCES` | `migu,kuwo` | 启用音源 |
-| `TONICUISC_SEARCH_SIZE` | `10` | 每个音源返回数量 |
-| `TONICUISC_SEARCH_SIZE_PER_PAGE` | `1` | 每个请求取几条；`1` = 10 条拆成 10 个请求并行拿 |
-| `TONICUISC_SEARCH_THREADS` | `10` | 每个音源的并发请求数 |
+| `TONICUISC_SEARCH_SIZE` | `5` | 每个音源的抓取下限（实际按「要几条 ÷ 音源数」分摊） |
+| `TONICUISC_SEARCH_SIZE_PER_PAGE` | `1` | 每个请求取几条的**下限**；实际每页 = `max(该值, ceil(要几条 ÷ 并发数))` |
+| `TONICUISC_SEARCH_THREADS` | `5` | 每个音源的并发请求数（同时也是「要 15 条 → 每页 3 条 → 5 个请求」里的分母） |
 | `TONICUISC_SEARCH_PAGE_SIZE` | `15` | 客户端一页多少条（滑到底再要下一页） |
 | `TONICUISC_SEARCH_MAX` | `60` | 一次搜索最多抓多少条（分页上限） |
 | `TONICUISC_AUTH` | `1` | 设备 API Key 校验（`0` 关闭） |
 | `TONICUISC_DEVICE_CODE_TTL` | `600` | 设备码有效期（秒） |
 | `TONICUISC_TRUST_PROXY` | `1` | 限速是否按反代写的 `X-Forwarded-For` 取来源 IP |
 | `TONICUISC_QQ_COVER` | `1` | 用 QQ 音乐补封面（咪咕/酷我的封面经常糊） |
-| `TONICUISC_QQ_COVER_THREADS` | `8` | 补封面时的并发数 |
+| `TONICUISC_QQ_COVER_THREADS` | `8` | 补封面时的并发数（QQ 单次要 3~4 秒，8 路比 4 路快一倍） |
+| `TONICUISC_QQ_COVER_WAIT` | `25` | `/api/covers` 最多等正在跑的封面查询多久（秒） |
+| `TONICUISC_QQ_COVER_CACHE` | `2048` | QQ 封面查询的 LRU 记忆条数 |
+| `TONICUISC_SEARCH_TTL` | `86400` | 搜索结果缓存在 Redis 里保留多久（秒） |
+| `TONICUISC_SEARCH_SOFT_TTL` | `600` | 软刷新窗口：客户端带 `refresh=true` 时，比这新的缓存直接返回并后台更新 |
+| `TONICUISC_REDIS_URL` | 空 | 完整 Redis 地址；填了服务端只连不管（不启动也不关闭） |
+| `TONICUISC_REDIS_HOST` | `127.0.0.1` | 没填 URL 时连的地址（也是托管实例的 bind 地址） |
+| `TONICUISC_REDIS_PORT` | `6390` | 没填 URL 时连的端口（避开常见 6379，少和别人打架） |
+| `TONICUISC_REDIS_DB` | `0` | 用哪个库 |
+| `TONICUISC_REDIS_SERVER` | 空 | 指定 `redis-server` 可执行文件 |
+| `TONICUISC_REDIS_DIR` | `<仓库>/redis` | 二进制的存放目录（自动下载到其下的 `win/` 或 `linux/`） |
+| `TONICUISC_REDIS_AUTOSTART` | `1` | 启动服务时自动拉起 Redis（`0` = 只连现成的） |
+| `TONICUISC_REDIS_DOWNLOAD` | `1` | 找不到 `redis-server` 时自动下载 |
+| `TONICUISC_REDIS_APPENDONLY` | `1` | 托管实例开 AOF 持久化 |
 | `TONICUISC_PUBLIC_URL` | 空 | 对外地址，启动横幅打印登录链接用 |
-| `TONICUISC_CACHE_DIR` | `server/.cache` | 下载缓存目录 |
-| `TONICUISC_DB` | `<CACHE_DIR>/tonicuisc.db` | SQLite 数据库文件 |
+| `TONICUISC_CACHE_DIR` | `server/.cache` | 下载缓存目录（Redis 数据在 `<CACHE_DIR>/redis`） |
+| `TONICUISC_DB` | `<CACHE_DIR>/tonicuisc.db` | 旧 SQLite 库位置，只给 `scripts/import_sqlite.py` 迁移用 |
 
 ## 接口
 
@@ -162,7 +180,7 @@ flutter build windows --release
 | DELETE | `/api/library/{kind}/{song_id}` | 从列表移除 |
 | DELETE | `/api/library/{kind}` | 清空列表 |
 | GET | `/api/sources` | 可用音源 |
-| GET | `/api/search?keyword=&sources=migu,kuwo&limit=50&refresh=false` | 搜索（`refresh=true` 跳过搜索缓存） |
+| GET | `/api/search?keyword=&sources=migu,kuwo&limit=50&refresh=false` | 搜索（`refresh=true` = 想刷新：缓存比 `TONICUISC_SEARCH_SOFT_TTL` 新就直接返回并后台更新） |
 | GET | `/api/artist?name=周杰伦&sources=&limit=50` | 歌手主页：这个歌手在音源上能搜到的歌 |
 | GET | `/api/history?limit=20` | 搜索历史（按关键词聚合） |
 | GET | `/api/url/{id}` | 音源直链（best effort） |
@@ -172,7 +190,7 @@ flutter build windows --release
 
 除标注「免鉴权」的以外，所有 `/api` 接口都必须带请求头 `X-API-Key`。
 
-`{id}` 形如 `MiguMusicClient:600929000000096577`，由 `/api/search` 返回；内存缓存 3 小时，重启后从 SQLite 恢复。
+`{id}` 形如 `MiguMusicClient:600929000000096577`，由 `/api/search` 返回；内存缓存 3 小时，重启后从 Redis 恢复。
 
 ## 登录（设备码流）
 
@@ -204,6 +222,8 @@ App                         浏览器(/login)                 服务端
 python -m tonicuisc_server devices            # 设备 + 账户列表
 python -m tonicuisc_server revoke <device_id> # 吊销某台设备（= 删记录）
 python -m tonicuisc_server cleanup            # 清理无账户 / 已吊销的设备记录
+python -m tonicuisc_server redis              # 看一眼 Redis（地址 / 版本 / 是不是托管实例）
+python -m tonicuisc_server clear-cache        # 清掉搜索结果缓存（下次搜索重新联网）
 ```
 
 ### 限速（防爆破）
@@ -243,21 +263,21 @@ caddy run --config deploy/Caddyfile     # https://106-35-196-104.nip.io
 
 咪咕 / 酷我给的封面经常是小图或者糊的，所以默认**用 QQ 音乐补一次**：拿「歌名 + 歌手」搜一下 QQ 音乐，从结果的 `albummid` 拼出 500×500 的专辑图 `https://y.gtimg.cn/music/photo_new/T002R500x500M000{albummid}.jpg`。
 
-**搜索接口不等封面**——先按音源原图把列表画出来，客户端渲染完再调 `POST /api/covers {"ids":[...]}` 单独问一次，查到就换图（`lib/state/cover_cache.dart`）。所以补封面慢一点也不会拖慢搜索。
+**搜索接口不等封面**——先按音源原图把列表画出来，同一时间把这批歌丢给后台线程池（默认 8 路）并发查 QQ 封面并写进 Redis；已经查过的封面**直接写进搜索结果**，所以重复搜同一个词第一帧就是 QQ 封面。客户端渲染完再调 `POST /api/covers {"ids":[...]}`（`lib/state/cover_cache.dart`，**不用改**）：要么命中缓存，要么就等同一批已经在跑的请求，**同一首歌绝不会问两遍 QQ**。所以补封面慢一点也不会拖慢搜索。
 
 封面策略是「**宁可先空着，也别先糊一张**」：
 
-| `songs.qq_cover` | 返回给客户端的 `cover_url` |
+| `tonicuisc:qcover:<id>` | 返回给客户端的 `cover_url` |
 | --- | --- |
 | 有地址 | QQ 封面 |
 | `''`（查过、QQ 没有） | 音源原图兜底 |
-| `NULL`（还没查过） | **空**（先不显示，等 `/api/covers` 补） |
+| 不存在（还没查过） | **空**（先不显示，等后台查完 / `/api/covers` 补） |
 
-所以刚搜出来时列表可能短暂没有封面（显示音源首字），一两百毫秒后 QQ 封面到了就换上；列表和全屏播放页**共用同一个缓存**，里外一致。
+所以刚搜出来时列表可能短暂没有封面（显示音源首字），几百毫秒后 QQ 封面到了就换上；列表和全屏播放页**共用同一个缓存**，里外一致。
 
 - 服务端并发查（默认 8 线程），失败或不匹配就走上面的兜底；
 - QQ 搜不到时会返回「最接近」的结果，所以做了匹配校验：歌名要相等、或短的那个（≥4 字）被长的包含，**并且歌手要对得上**——否则搜「不存在的歌名xyzabc」会被 `XY&Z` 这种短名字骗到；
-- 结果缓存在 `songs.qq_cover`：`NULL` = 没查过、`''` = 查过没有、其它 = 地址。同一首歌只真的查一次，重启也不丢；
+- 结果缓存在 `tonicuisc:qcover:<id>`：key 不存在 = 没查过、`''` = 查过没有、其它 = 地址。同一首歌只真的查一次（搜索预热和 `/api/covers` 共用同一批任务），重启也不丢；
 - 歌词里 `[by:]`、`[offset:0]`、`[ti:]` 这类 LRC 元信息标签会被丢掉，不会当歌词显示；
 - 不想要就设 `TONICUISC_QQ_COVER=0`。
 
@@ -272,39 +292,65 @@ caddy run --config deploy/Caddyfile     # https://106-35-196-104.nip.io
 
 想要真·完整曲库，得接专门的歌手接口（比如 QQ 音乐的 `singer_mid` → 歌曲列表），但那些歌的**播放地址还得回咪咕/酷我搜一遍**，成本和复杂度都上一个台阶，暂时没做。
 
-## 数据库（SQLite）
+## 数据（Redis）
 
-`server/.cache/tonicuisc.db`，Python 自带 `sqlite3`，没有额外依赖。主要表：
+所有数据都在 **Redis** 里，服务端启动时自动把本地实例拉起来（找不到就自动下载，见下面的「Redis」一节）。
 
-| 表 | 内容 |
+| key | 内容 |
 | --- | --- |
-| `songs` | 搜到的歌曲元信息 + musicdl `SongInfo` 的 JSON |
-| `searches` / `search_results` | 搜索历史与当时的结果列表 |
-| `users` | 账户（PBKDF2 密码哈希） |
-| `devices` | 设备与 `sha256(api_key)`、绑定账户 |
-| `device_requests` | 设备码登录的中间状态 |
-| `library` | 喜欢 / 收藏 / 播放历史（按 `user_id + kind`） |
+| `tonicuisc:song:<id>` / `tonicuisc:songs` | 搜到的歌曲元信息 + musicdl `SongInfo` 的 JSON（zset 按 last_seen 排序，方便裁剪） |
+| `tonicuisc:search:<n>` / `tonicuisc:searchrecent` | 搜索历史与当时的结果列表（默认保留最近 500 条） |
+| `tonicuisc:user:<id>` / `tonicuisc:username:<名字>` | 账户（PBKDF2 密码哈希；用户名索引不区分大小写） |
+| `tonicuisc:device:<id>` / `tonicuisc:devicehash:<哈希>` | 设备与 `sha256(api_key)`、绑定账户 |
+| `tonicuisc:dreq:<码>` | 设备码登录的中间状态（自带 TTL） |
+| `tonicuisc:lib:<用户>:<类型>` / `tonicuisc:libmeta:*` | 喜欢 / 收藏 / 播放历史 |
+| `tonicuisc:sc:<sha1>` | 搜索结果缓存（默认 24 小时） |
 
 **直链不当长期有效**：酷我 / 咪咕的 `download_url` 是带签名的临时 token，库里给它记了保守的 30 分钟有效期（`URL_TTL_SECONDS`）。重启服务后：
 
-1. 内存缓存空了 → 从 `songs` 表恢复歌曲；
+1. 内存缓存空了 → 从 `tonicuisc:song:*` 恢复歌曲；
 2. 直链还在有效期 → 直接播；
 3. 直链过期 → 用「歌名 + 歌手」自动重搜一次换新链接；
 4. 重搜也失败（歌下架了）→ 返回 404/502，客户端重新搜索即可。
 
-自动裁剪：`searches` 保留最近 500 条、`songs` 保留最近 5000 首，**被收藏/喜欢/历史引用的歌不会被裁掉**。
+自动裁剪：搜索历史保留最近 500 条、歌曲保留最近 5000 首，**被收藏/喜欢/历史引用的歌不会被裁掉**。
+
+**从旧 SQLite 迁移**：老版本的数据用 `python scripts/import_sqlite.py` 一次性搬过来（账户、设备、收藏、搜索历史都保留，可重复执行）。
+
+## Redis
+
+数据全在 Redis 里，所以服务端**自己管 Redis**，不用你另外装：
+
+- 启动 `python -m tonicuisc_server` 时：先试着连 `TONICUISC_REDIS_URL` / `127.0.0.1:6390`；连不上就按 `TONICUISC_REDIS_SERVER` → `redis/win/`（Linux 是 `redis/linux/`）→ `PATH` 里的 `redis-server` 依次找，**都没有就自动下载**到那个目录；
+- 拉起时用生成的 `redis.conf`（只 bind 本地、开 AOF 持久化、日志写 `.cache/redis/redis.log`），数据落在 `.cache/redis/`；
+- **Python 退出时把「自己拉起来的」Redis 一起关掉**（先发 `SHUTDOWN` 让它把 AOF 刷盘，刷不掉才 terminate/kill；另有 `atexit` + Job Object 兜底）；如果连的是你自己已经跑着的 Redis（或给了 `TONICUISC_REDIS_URL`），那就只连不管，绝不去关它；
+- `python -m tonicuisc_server redis` 可以看当前用的地址/版本/是不是托管实例；`clear-cache` 可以清掉搜索结果缓存。
+
+两个目录的分工：
+
+| 目录 | 谁用 | 里面是什么 |
+| --- | --- | --- |
+| `redis/win/` | Windows | 自动下载的 `redis-server.exe`（首次启动时出现） |
+| `redis/linux/` | Linux | 自动下载/解包的 `redis-server`（首次启动时出现） |
+
+仓库里只放脚本和说明（二进制不进版本库，`.gitignore` 已经排掉），离线部署可以提前手动把 `redis-server` 丢进对应目录，用 `TONICUISC_REDIS_SERVER` 指过去也行。
 
 ## 搜索过程
 
 - **只请求选中的音源**：musicdl 的 `MusicClient.search()` 会把配置里所有音源都打一遍，所以服务端直接调用选中音源的 client；没勾的音源不会被请求。
-- **并行拿结果**：musicdl 会按 `search_size_per_source` / `search_size_per_page` 拆成多个搜索 URL 并发请求。服务端会根据「这次要多少条」自动调这两个值，让**请求数保持在并发数附近**：要 15 条 → 每页 2 条、8 个请求；要 30 条 → 每页 3 条、10 个请求。配置里的 `search_size_per_page` 是下限（默认 1，即「10 条分 10 个请求」）。
-- **分页**：`GET /api/search?offset=&limit=` 返回一页 + `has_more`。App 滑到底自动再要 15 条，**按 id 去重**，不会出现重复的歌；同一关键词的结果在服务端缓存 10 分钟，翻页时不需要重新搜（缓存不够多才会重新抓）。
+- **拆成并发请求**：`search_size_per_source = 要几条`、`search_size_per_page = ceil(要几条 / TONICUISC_SEARCH_THREADS)`，于是 musicdl 生成 `search_threads` 个 URL、用同样多的线程并发抓。**不要**把它压成 1 个请求：musicdl 一个请求内部是按结果**串行**解析的（酷我要逐首请求直链），实测「1 个请求拿 15 条」要 18~23s，拆成 5 个请求各 3 条只要 ~5s。
+- **按音源分摊**：想要 15 条、开了 2 个音源 → 每个音源只拿 8 条（`ceil(15/2)`），不再各自都拉 15 条。`TONICUISC_SEARCH_SIZE`（默认 5）是下限。
+- **音源之间并行**：多个音源同时发，各自再铺满 `TONICUISC_SEARCH_THREADS` 个请求。
+- **搜索不等封面**：结果一出来就带**音源原图**返回，同一时间把这批歌丢给常驻的封面线程池（`TONICUISC_QQ_COVER_THREADS`，默认 8）在后台并发查 QQ 封面并写进 Redis。已经查过的封面会**直接写进搜索结果**，所以重复搜同一个词第一帧就是 QQ 封面。App 随后调 `POST /api/covers` 时，要么已命中缓存、要么就等**同一批正在跑的请求**（按歌曲 id 去重，绝不会问两遍 QQ）——`lib/state/cover_cache.dart` 不用改。
+- **分页**：`GET /api/search?offset=&limit=` 返回一页 + `has_more`。App 滑到底自动再要 15 条，**按 id 去重**，不会出现重复的歌；同一关键词的结果在 Redis 里缓存 24 小时（`TONICUISC_SEARCH_TTL`），翻页和**重启服务**都不需要重新搜。首页即使缓存里少几条也先给（后台补全），翻页时则必须凑够，不然那一页是空的。
 - **不打印进度条**：给 musicdl 传一个 `disable=True` 的 rich `Progress`，它就不再往控制台刷进度条。
 - **耗时可见**：服务端每个 `/api` 请求打一行 `[access] GET /api/search 200 5.482s`；`/api/search` 另外在响应里返回 `elapsed`（服务端耗时）。客户端自己再量一次总耗时（含网络往返），显示成「搜索完成 · 用时 5.5 秒（服务端 2.9 秒）· 共 20 首」。
 
 ## 缓存
 
-- **搜索缓存**：相同关键词 + 音源 + limit 在 10 分钟内直接返回，不再联网；并发相同请求只会真正搜一次。
+- **搜索缓存**：相同关键词 + 音源直接返回 Redis 里的结果，不再联网（默认 24 小时，`TONICUISC_SEARCH_TTL`）；并发相同请求只会真正搜一次。重启服务也不会重新搜；翻页时缓存不够才重新抓。
+- **软刷新（App 不用改）**：App 每次搜索都带 `refresh=true`，真按「强制刷新」办就是每搜一次联网 5 秒。所以缓存比 `TONICUISC_SEARCH_SOFT_TTL`（默认 10 分钟）新就直接返回（几十毫秒），同时在后台重新搜一遍更新缓存；超过这个窗口才阻塞着真去搜。`python -m tonicuisc_server clear-cache` 可以立刻清空。
+- **QQ 封面**：`(歌名, 歌手) → albummid` 的 LRU 记 2048 条，同一首歌重复查直接命中（实测 3 首 7.56s → 0.000s）；拿到 albummid 就直接拼 URL，不发第二次请求；网络失败不写缓存，下次还会重试。查过的结果同时写进 `tonicuisc:qcover:*`，重启也不丢。
 - **音频缓存**：下载后的文件统一放在 `.cache/files/<音源>_<id>.<ext>`，同一首歌不会重复下载。
 - musicdl 每次搜索都会新建 `.cache/music/<音源>/<时间戳> <关键词>/`，服务端下载完会把文件搬走、顺手清掉 `search_results.pkl` 之类的记录文件（搜索前也会清理闲置 10 分钟以上的空壳目录）。
 
@@ -370,7 +416,8 @@ python tool/check_dart_balance.py
 cd server
 python scripts/smoke.py 周杰伦        # 只搜一次，看看能不能出结果
 python scripts/smoke_api.py 莫问归期   # 搜索 → 边下边播 → Range → 下载
-python scripts/smoke_db.py            # 验证重启后还能从 SQLite 恢复并播放
+python scripts/smoke_db.py            # 验证重启后还能从 Redis 恢复并播放
+python scripts/import_sqlite.py       # 老版本：把 .cache/tonicuisc.db 里的数据搬到 Redis
 ```
 
 ## 备注
@@ -378,4 +425,4 @@ python scripts/smoke_db.py            # 验证重启后还能从 SQLite 恢复�
 - Linux 构建依赖：`clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev libstdc++-12-dev libmpv-dev libsecret-1-dev libjsoncpp-dev`（CI 已装；`libsecret` 是 `flutter_secure_storage` 要的）。
 - Linux 运行时如果没有 secret service（无桌面 keyring），凭据读写会失败——桌面端主要在 Windows / macOS 上没这个问题。
 - `flutter analyze` 若因依赖版本报错，先执行 `flutter pub upgrade`。
-- 服务端不要同时跑两个实例（同一个 SQLite；端口也会冲突，会看到 `error while attempting to bind on address ('0.0.0.0', 8000)`）。
+- 服务端不要同时跑两个实例（会抢同一个 Redis 的 key 命名空间；端口也会冲突，会看到 `error while attempting to bind on address ('0.0.0.0', 8000)`）。要共用同一个 Redis 就让两个实例错开端口 + `TONICUISC_REDIS_PORT`。

@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-import shutil
 import time
-import uuid
-from pathlib import Path
 
 import pytest
 
+from conftest import make_storage
 from tonicuisc_server.auth import (
     AuthManager,
     hash_key,
@@ -23,15 +21,12 @@ from tonicuisc_server.storage import Storage
 
 @pytest.fixture()
 def auth():
-    root = Path(__file__).resolve().parent / "_scratch" / uuid.uuid4().hex
-    root.mkdir(parents=True, exist_ok=True)
-    store = Storage(root / "test.db")
+    store = make_storage()
     manager = AuthManager(store, ttl=300)
     try:
         yield manager
     finally:
         store.close()
-        shutil.rmtree(root, ignore_errors=True)
 
 
 # ------------------------------------------------------------------ 密码

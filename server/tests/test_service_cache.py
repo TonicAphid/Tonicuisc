@@ -11,8 +11,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from conftest import make_storage
 from tonicuisc_server.service import SEARCH_RESIDUE_MAX_AGE, MusicService
-from tonicuisc_server.storage import Storage
 
 
 @pytest.fixture()
@@ -26,7 +26,7 @@ def service() -> MusicService:
     svc.work_dir.mkdir(parents=True, exist_ok=True)
     svc.files_dir.mkdir(parents=True, exist_ok=True)
     svc.storage.close()
-    svc.storage = Storage(root / "test.db")
+    svc.storage = make_storage()
     try:
         yield svc
     finally:

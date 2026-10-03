@@ -6,6 +6,7 @@ venv/
 .pytest_cache/
 server/.cache/
 server/tests/_scratch/
+server/pytest-cache-files-*/
 server/.env
 
 # ---- Flutter / 前端 ----
@@ -29,6 +30,12 @@ app/linux/flutter/generated_*
 
 # ---- 原生构建产物 ----
 app/android/.gradle/
+
+# ---- Redis：二进制首次启动自动下载，不进仓库（两个目录只保留说明文档）----
+redis/win/*
+redis/linux/*
+!redis/win/*.md
+!redis/linux/*.md
 
 # ---- 其他 ----
 .tmp/

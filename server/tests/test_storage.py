@@ -1,14 +1,12 @@
-"""SQLite 持久化测试：不联网、不需要 musicdl。"""
+"""Redis 持久化测试：用 fakeredis，不联网、不需要 musicdl、不需要真的 Redis。"""
 
 from __future__ import annotations
 
-import shutil
-import uuid
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from conftest import make_storage  # noqa: E402  —— 同一个测试目录里的助手
 from tonicuisc_server.storage import Storage, song_payload
 
 
@@ -53,15 +51,12 @@ def _item(identifier: str = "1") -> dict:
 
 
 @pytest.fixture()
-def storage():
-    root = Path(__file__).resolve().parent / "_scratch" / uuid.uuid4().hex
-    root.mkdir(parents=True, exist_ok=True)
-    store = Storage(root / "test.db")
+def storage() -> Storage:
+    store = make_storage()
     try:
         yield store
     finally:
         store.close()
-        shutil.rmtree(root, ignore_errors=True)
 
 
 def test_song_roundtrip(storage: Storage) -> None:

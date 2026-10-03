@@ -158,8 +158,8 @@ def test_expired_code_cannot_be_approved(app_env) -> None:
     _start()
     app_env["auth"].ttl = -1  # 只在生成时用，这里直接把已有请求改成过期
     request = app_env["store"].get_device_request(CODE)
-    app_env["store"]._conn.execute("UPDATE device_requests SET expires_at = 0 WHERE user_code = ?", (CODE,))
-    app_env["store"]._conn.commit()
+    # 直接把这条请求的过期时间改成 0（Redis 里就是个 hash 字段）
+    app_env["store"].client.hset(app_env["store"].key("dreq", CODE), "expires_at", "0")
     assert request is not None
 
     page = _web({"action": "lookup", "user_code": CODE})

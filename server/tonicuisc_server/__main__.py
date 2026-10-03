@@ -1,10 +1,15 @@
 """``python -m tonicuisc_server`` 启动服务。
 
+服务端的数据都在 Redis 里，启动时会自动把本地 Redis 拉起来（找不到就自动下载，
+见 ``redis_runtime.py``），退出时再把它关掉。
+
 顺带几个不用 API Key 的管理命令（在服务器本机跑）：
 
     python -m tonicuisc_server devices            列出设备和账户
     python -m tonicuisc_server revoke <device_id> 吊销某台设备
     python -m tonicuisc_server cleanup            清理无账户/已吊销的设备记录
+    python -m tonicuisc_server redis              看一眼 Redis 状态（会按需拉起）
+    python -m tonicuisc_server clear-cache [关键词] 清掉搜索结果缓存
 """
 
 from __future__ import annotations
@@ -14,6 +19,7 @@ import time
 
 import uvicorn
 
+from . import redis_runtime
 from .config import SETTINGS
 
 
@@ -44,15 +50,34 @@ def _devices_command(store) -> int:
     return 0
 
 
+def _redis_command() -> int:
+    client = redis_runtime.ensure_redis_client()
+    info = client.info() if hasattr(client, "info") else {}
+    version = info.get("redis_version") if isinstance(info, dict) else None
+    print(f"Redis 地址：{SETTINGS.redis_config()}")
+    print(f"版本：{version or '未知'}")
+    print(f"是否由本进程拉起：{'是（本进程退出时会自动关闭）' if redis_runtime.RUNTIME.started_by_us else '否（用现成的）'}")
+    if redis_runtime.RUNTIME.server_path:
+        print(f"redis-server：{redis_runtime.RUNTIME.server_path}")
+    print(f"数据目录：{SETTINGS.redis_data_dir}")
+    return 0
+
+
 def main() -> None:
     args = sys.argv[1:]
-    if args and args[0] in {"devices", "list", "revoke", "cleanup"}:
+    if args and args[0] in {"devices", "list", "revoke", "cleanup", "redis", "clear-cache"}:
         from .storage import Storage
 
         store = Storage()
         try:
             if args[0] in {"devices", "list"}:
                 raise SystemExit(_devices_command(store))
+            if args[0] == "redis":
+                raise SystemExit(_redis_command())
+            if args[0] == "clear-cache":
+                removed = store.drop_search_cache()
+                print(f"已清掉 {removed} 条搜索结果缓存")
+                raise SystemExit(0)
             if args[0] == "cleanup":
                 # 只删「没有账户」和「已吊销」的记录，正常设备不动
                 orphans = store.delete_devices(without_user=True)
@@ -68,6 +93,8 @@ def main() -> None:
             raise SystemExit(0 if ok else 1)
         finally:
             store.close()
+            # 管理命令跑完就把我们拉起来的 Redis 收掉
+            redis_runtime.shutdown_redis()
 
     uvicorn.run(
         "tonicuisc_server.main:app",

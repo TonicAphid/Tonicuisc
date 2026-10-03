@@ -29,6 +29,7 @@ from . import weblogin
 from .auth import API_KEY_HEADER, PUBLIC_PATHS, AuthManager
 from .config import SETTINGS, SOURCE_ALIASES, resolve_sources, source_label
 from .ratelimit import FailedLoginGuard, SlidingWindowLimiter
+from . import redis_runtime
 from .service import DownloadFailed, MusicService, SongNotFound, song_to_item
 
 MIME_TYPES = {
@@ -45,10 +46,15 @@ MIME_TYPES = {
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """启动时提示登录地址。"""
+    """启动时提示登录地址；退出时把「我们拉起来的」Redis 一起带走。"""
     auth = get_auth()
     print(login_banner(SETTINGS, enabled=auth.enabled), flush=True)
-    yield
+    if redis_runtime.RUNTIME.started_by_us:
+        print(f"[redis] 已启动本地 Redis（{get_service().storage.describe()}），服务退出时会自动关闭", flush=True)
+    try:
+        yield
+    finally:
+        redis_runtime.shutdown_redis()
 
 
 app = FastAPI(title="Tonicuisc API", version="1.0.0", description="咪咕 / 酷我 音源代理", lifespan=lifespan)
@@ -188,11 +194,13 @@ async def _prepare(item_id: str) -> Path:
 @app.get("/api/health")
 async def health() -> dict:
     auth = get_auth()
+    service = get_service()
     return {
         "status": "ok",
         "sources": resolve_sources(SETTINGS.sources),
         "work_dir": str(SETTINGS.work_dir),
-        "database": str(SETTINGS.db_path),
+        "database": service.storage.describe(),
+        "redis_managed": bool(getattr(redis_runtime.RUNTIME, "started_by_us", False)),
         "auth": "enabled" if auth.enabled else "disabled",
     }
 
@@ -405,21 +413,21 @@ async def search(
     source_list = [s for s in (sources or "").replace(" ", ",").split(",") if s] if sources else None
     started = time.perf_counter()
     try:
-        service = get_service()
-        if refresh:
-            await asyncio.to_thread(service.search, keyword, source_list, None, True)
-        page = await asyncio.to_thread(service.search_page, keyword, source_list, offset, limit)
+        # refresh 直接透给 search_page，只搜一次（以前这里先预搜一遍，等于搜两趟）
+        page = await asyncio.to_thread(get_service().search_page, keyword, source_list, offset, limit, refresh)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:  # musicdl network failures
         raise HTTPException(status_code=502, detail=f"搜索失败: {exc}")
+    total = time.perf_counter() - started
+    print(f"[timing] /api/search 全部结束 {total:.2f}s", flush=True)
     return {
         "keyword": keyword,
         "total": page["total"],
         "offset": page["offset"],
         "has_more": page["has_more"],
         # 搜索耗时（秒），客户端用它显示「用时 x.x 秒」
-        "elapsed": round(time.perf_counter() - started, 2),
+        "elapsed": round(total, 2),
         "items": page["items"],
     }
 

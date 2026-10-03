@@ -1,4 +1,4 @@
-"""验证「重启后还能播」：数据全部来自 SQLite，不依赖内存缓存。
+"""验证「重启后还能播」：数据全部来自 Redis，不依赖内存缓存。
 
 用法（在 server/ 目录下，先跑过 smoke_api.py 生成数据）：
     python scripts/smoke_db.py
@@ -8,21 +8,20 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
-from tonicuisc_server.config import SETTINGS
 from tonicuisc_server.main import app, get_service
 from tonicuisc_server.storage import Storage
 
 
 def main() -> int:
     store = Storage()
-    print("db file:", SETTINGS.db_path)
-    print("songs in db:", store.count_songs())
+    print("redis:", store.describe())
+    print("songs in redis:", store.count_songs())
     print("history:", [(row["keyword"], row["times"]) for row in store.recent_searches(5)])
 
     song_ids = store.recent_song_ids(3)
     print("recent song ids:", song_ids)
     if not song_ids:
-        print("数据库是空的，先跑一次 scripts/smoke_api.py")
+        print("Redis 是空的，先跑一次 scripts/smoke_api.py")
         return 1
 
     song_id = song_ids[0]
@@ -32,8 +31,8 @@ def main() -> int:
         if service.cached_file(candidate) is not None:
             song_id = candidate
             break
-    song = service.get_song(song_id)  # 只会走 SQLite
-    print("restored from db:", song_id, "->", getattr(song, "song_name", None), getattr(song, "ext", None))
+    song = service.get_song(song_id)  # 只会走 Redis
+    print("restored from redis:", song_id, "->", getattr(song, "song_name", None), getattr(song, "ext", None))
 
     with TestClient(app) as client:
         lyric = client.get(f"/api/lyric/{song_id}")
