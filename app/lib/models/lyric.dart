@@ -81,6 +81,8 @@ class LyricSheet {
     final limit = lines.length < 3 ? lines.length : 3;
     var cut = 0;
     for (var i = 0; i < limit; i++) {
+      // 头部那几行是没有时间轴的；已经带时间轴（哪怕 00:00）就是正式歌词，不能动
+      if (lines[i].time != Duration.zero) break;
       final text = _norm(lines[i].text);
       if (text.isEmpty || lines[i].text.length > 15) break; // 头部行都很短
       if (wantTitle.isNotEmpty && text == wantTitle) {
