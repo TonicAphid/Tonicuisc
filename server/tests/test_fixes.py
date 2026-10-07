@@ -197,8 +197,12 @@ def test_song_without_singer_cannot_match() -> None:
 
 
 # --------------------------------------------------------------------- 分页
-def test_short_first_page_still_reports_has_more(service) -> None:
+def test_short_first_page_still_reports_has_more(service, monkeypatch) -> None:
     """首页为了少等允许缓存不足就返回，但 has_more 不能因此变成 False。"""
+    canned = [song_to_item(_song(str(i))) for i in range(15)]
+    # 短缓存会触发后台补全，必须 fake：不然这条用例就在后台真联网了
+    monkeypatch.setattr(service, "_search_sources", lambda *args, **kwargs: canned)
+
     key = ("老歌", ("MiguMusicClient",))
     service.storage.save_search_cache(key, [song_to_item(_song(str(i))) for i in range(3)])
 

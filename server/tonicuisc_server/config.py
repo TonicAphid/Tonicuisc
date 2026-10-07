@@ -80,8 +80,10 @@ class Settings:
     search_size: int = int(os.getenv("TONICUISC_SEARCH_SIZE", "5"))
     #: 每个请求取几首（下限）：实际每页条数 = max(这个值, ceil(要几条 / 并发数))
     search_size_per_page: int = int(os.getenv("TONICUISC_SEARCH_SIZE_PER_PAGE", "1"))
-    #: 每个音源同时并发多少个请求（musicdl 每个请求内部串行解析，所以并发数=并行度）
-    search_threads: int = int(os.getenv("TONICUISC_SEARCH_THREADS", "5"))
+    #: 每个音源同时并发多少个请求（musicdl 每个请求内部串行解析，所以并发数=并行度）。
+    #: 实测酷我 15 条：5 路 3.6s、15 路 2.0s；上游抖动时（单首 4s）5 路要 12.7s、15 路 ~5s。
+    #: 拧大是拿上游并发换稳定时延，怕被限流就设回 5。
+    search_threads: int = int(os.getenv("TONICUISC_SEARCH_THREADS", "10"))
     #: 客户端一页多少条（滑到底再要下一页）
     search_page_size: int = int(os.getenv("TONICUISC_SEARCH_PAGE_SIZE", "15"))
     #: 一次搜索最多抓多少条（分页上限，别让请求数炸）
@@ -96,7 +98,8 @@ class Settings:
     qq_cover: bool = os.getenv("TONICUISC_QQ_COVER", "1").lower() not in {"0", "false", "no", "off"}
     #: 补封面时的并发数（QQ 单次要 3~4 秒，实测 8 路比 4 路快一倍）
     qq_cover_threads: int = int(os.getenv("TONICUISC_QQ_COVER_THREADS", "8"))
-    #: /api/covers 最多等正在跑的封面查询多久（秒）；等不到就先给音源原图
+    #: /api/covers 最多等正在跑的封面查询多久（秒）；到点还没结果就**先不返回**这
+    #: 个 id（「还没定论」），客户端过几秒再问——把它记成原图/空串就等于结案了
     qq_cover_wait: float = float(os.getenv("TONICUISC_QQ_COVER_WAIT", "25"))
     #: QQ 封面查询的记忆条数（同一首歌/同一批歌重复查时秒回）
     qq_cover_cache_size: int = int(os.getenv("TONICUISC_QQ_COVER_CACHE", "2048"))

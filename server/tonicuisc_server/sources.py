@@ -119,11 +119,14 @@ class SourceMixin:
         per_page = self._per_page(per_source)
         pages = -(-per_source // per_page)
 
-        def run(name: str) -> tuple[str, list[Any], float]:
+        def run(name: str) -> tuple[str, list[Any], float, float]:
             source_client = clients[name]
             # 「改抓取量 → 发请求」整段锁住：抓取量是写在共享 client 上的，
-            # 并发搜索各写各的会让 musicdl 按错的尺寸去分页
+            # 并发搜索各写各的会让 musicdl 按错的尺寸去分页。
+            # 等锁时间单独记账：它和「音源本身慢」长得一模一样，不拆开看不出来。
+            queued = time.perf_counter()
             with self._source_lock(name):
+                waited = time.perf_counter() - queued
                 self._tune_fetch_size(source_client, per_source)
                 started = time.perf_counter()
                 songs = (
@@ -138,7 +141,7 @@ class SourceMixin:
                     or []
                 )
                 elapsed = time.perf_counter() - started
-            return name, songs, elapsed
+            return name, songs, elapsed, waited
 
         timing_log(
             f"音源搜索: {keyword!r} 每源 {per_source} 条 / 每页 {per_page} 条 "
@@ -150,9 +153,11 @@ class SourceMixin:
             for future in as_completed(futures):
                 name = futures[future]
                 try:
-                    name, songs, elapsed = future.result()
+                    name, songs, elapsed, waited = future.result()
                     results[name] = songs
-                    timing_log(f"  {name}: {len(songs)} 条 / {elapsed:.2f}s")
+                    # 等锁 >50ms 才显示：说明前面有个搜索（多半是软刷新的后台线程）占着音源
+                    wait_note = f"（等锁 {waited:.2f}s）" if waited > 0.05 else ""
+                    timing_log(f"  {name}: {len(songs)} 条 / {elapsed:.2f}s{wait_note}")
                 except Exception as exc:
                     results[name] = []
                     timing_log(f"  {name}: 失败 {exc}")

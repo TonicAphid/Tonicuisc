@@ -32,7 +32,9 @@ from .storage import Storage
 API_KEY_HEADER = "x-api-key"
 
 #: 不需要 API Key 的路径
-PUBLIC_PATHS = {"/api/health", "/api/device/start", "/api/device/status", "/login"}
+#: 除这些路径外，所有 /api 请求都要带设备 key。``/health`` 是 ``/api/health`` 的
+#: 兼容别名（本机探活工具按约定打这个路径），一起免鉴权。
+PUBLIC_PATHS = {"/api/health", "/health", "/api/device/start", "/api/device/status", "/login"}
 
 #: 设备码格式：A1B1-C1D1（8 位大写字母数字 + 中间一个横杠）
 USER_CODE_RE = re.compile(r"^[A-Z0-9]{4}-[A-Z0-9]{4}$")

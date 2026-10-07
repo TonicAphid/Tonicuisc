@@ -46,6 +46,27 @@ def _no_network_cover(monkeypatch):
     monkeypatch.setattr(artwork_module, "SETTINGS", dataclasses.replace(artwork_module.SETTINGS, qq_cover=False))
 
 
+@pytest.fixture(autouse=True)
+def _no_real_music_client(monkeypatch):
+    """兜底：不许在测试里构造真的 musicdl 客户端（= 真联网）。
+
+    拦在 `SourceMixin.client` 这个接缝上：用例自己注入了 `service._client` 就照常返回，
+    否则直接抛错告诉你要怎么 fake。没有这层闸时，「缓存不够 → 后台补全」会偷偷跑一次
+    真音源搜索：本地两三秒看不出来，CI 上被墙能拖 200 多秒，还会活到解释器收尾才打日志
+    → `_enter_buffered_busy` → Fatal Python error → 整轮测试 exit 134（明明 124 passed 也算失败）。
+    """
+
+    def blocked(self):
+        with self._client_lock:
+            if self._client is None:
+                raise AssertionError(
+                    "测试禁止构造真实 musicdl 客户端：请给 service._client 注入桩（见 test_search_cache）"
+                )
+            return self._client
+
+    monkeypatch.setattr(service_module.MusicService, "client", property(blocked))
+
+
 @pytest.fixture()
 def redis_client():
     """一个干净的 fakeredis 客户端（同一个用例里多次取到的是同一个）。"""

@@ -61,6 +61,9 @@ class ArtworkMixin:
     def covers(self, item_ids: list[str]) -> dict[str, str]:
         """按需补封面：返回每个 id 能用的最好封面（QQ 优先，其次音源原图）。
 
+        **只返回有结论的 id**（含空串 = 查过、确实没有更好的）；没出现的 id 表示
+        「还在查 / 这次没查成」，客户端会过几秒再来问——所以调用方别把缺席当「没有」。
+
         查过的结果落 Redis（'' = 查过没有），同一首歌只真的查一次；
         正在后台预热的那批会被这里「接住」，不会重复请求 QQ。
         元信息一次 pipeline 取回来（以前每个 id 两次往返，200 个就是 400 次）。
@@ -83,8 +86,9 @@ class ArtworkMixin:
             if state:
                 found[item_id] = state
             elif state == "":
-                if original:
-                    found[item_id] = original  # QQ 没有，用音源原图兜底
+                # QQ 没有 → 音源原图兜底；原图也没有就给**空串**（= 查过了、确实没有），
+                # 别省略：省略在新契约里是「还没定论」，客户端会一直重问
+                found[item_id] = original
             else:
                 waiting.append(
                     (
@@ -99,15 +103,26 @@ class ArtworkMixin:
 
         started = time.perf_counter()
         deadline = started + max(SETTINGS.qq_cover_wait, 0)
+        undecided: list[tuple[str, str]] = []
         for item_id, original, future in waiting:
             try:
                 url = future.result(timeout=max(deadline - time.perf_counter(), 0.01))
             except Exception:
-                url = None  # 超时/失败：先给音源原图，后台查完会落库，下次就命中了
+                url = None  # 到点了还没跑完
             if url:
                 found[item_id] = url
-            elif original:
-                found[item_id] = original
+            else:
+                undecided.append((item_id, original))
+
+        if undecided:
+            # 这次没拿到定论的，再看一眼缓存：落库了 = 有结论（QQ 没有 → 原图，原图也没有
+            # 就是空串）；没落库 = 还在跑 / 这次真失败 → **一个字都不返回**。
+            # 返回值的语义是「有 key = 结论，没 key = 待定」：旧实现这里会把音源原图
+            # 塞回去，客户端把原图当成结论记死，QQ 封面就永远换不上了。
+            states = self._cover_states([item_id for item_id, _ in undecided])
+            for item_id, original in undecided:
+                if states.get(item_id) is not None:
+                    found[item_id] = original
         timing_log(
             f"/api/covers: {len(item_ids)} 个 id，要查 {len(waiting)} 首 / "
             f"耗时 {time.perf_counter() - started:.2f}s"

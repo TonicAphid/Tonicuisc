@@ -138,7 +138,7 @@ flutter build windows --release
 | `TONICUISC_SOURCES` | `migu,kuwo` | 启用音源 |
 | `TONICUISC_SEARCH_SIZE` | `5` | 每个音源的抓取下限（实际按「要几条 ÷ 音源数」分摊） |
 | `TONICUISC_SEARCH_SIZE_PER_PAGE` | `1` | 每个请求取几条的**下限**；实际每页 = `max(该值, ceil(要几条 ÷ 并发数))` |
-| `TONICUISC_SEARCH_THREADS` | `5` | 每个音源的并发请求数（同时也是「要 15 条 → 每页 3 条 → 5 个请求」里的分母） |
+| `TONICUISC_SEARCH_THREADS` | `10` | 每个音源的并发请求数（也是「要 15 条 → 每页 2 条 → 8 个请求」里的分母）。实测酷我 15 条：10 路比 5 路快约 30%，上游抖动时差距更大；怕被限流设回 `5` |
 | `TONICUISC_SEARCH_PAGE_SIZE` | `15` | 客户端一页多少条（滑到底再要下一页） |
 | `TONICUISC_SEARCH_MAX` | `60` | 一次搜索最多抓多少条（分页上限） |
 | `TONICUISC_AUTH` | `1` | 设备 API Key 校验（`0` 关闭） |
@@ -146,7 +146,7 @@ flutter build windows --release
 | `TONICUISC_TRUST_PROXY` | `1` | 限速是否按反代写的 `X-Forwarded-For` 取来源 IP |
 | `TONICUISC_QQ_COVER` | `1` | 用 QQ 音乐补封面（咪咕/酷我的封面经常糊） |
 | `TONICUISC_QQ_COVER_THREADS` | `8` | 补封面时的并发数（QQ 单次要 3~4 秒，8 路比 4 路快一倍） |
-| `TONICUISC_QQ_COVER_WAIT` | `25` | `/api/covers` 最多等正在跑的封面查询多久（秒） |
+| `TONICUISC_QQ_COVER_WAIT` | `25` | `/api/covers` 最多等正在跑的封面查询多久（秒）；到点还没结果的 id 先不返回，客户端过几秒再问 |
 | `TONICUISC_QQ_COVER_CACHE` | `2048` | QQ 封面查询的 LRU 记忆条数 |
 | `TONICUISC_SEARCH_TTL` | `86400` | 搜索结果缓存在 Redis 里保留多久（秒） |
 | `TONICUISC_SEARCH_SOFT_TTL` | `600` | 软刷新窗口：客户端带 `refresh=true` 时，比这新的缓存直接返回并后台更新 |
@@ -168,6 +168,7 @@ flutter build windows --release
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/api/health` | 服务状态（**免鉴权**） |
+| GET | `/health` | 上面那个的兼容别名（本机探活按约定打这个路径，**免鉴权**） |
 | POST | `/api/device/start` | App 登记设备码，发起登录（**免鉴权**） |
 | GET | `/api/device/status` | App 轮询登录状态，批准后返回一次 `api_key`（**免鉴权**） |
 | GET / POST | `/login` | 设备码登录网页（**免鉴权**） |
@@ -264,18 +265,21 @@ caddy run --config deploy/Caddyfile     # https://106-35-196-104.nip.io
 
 咪咕 / 酷我给的封面经常是小图或者糊的，所以默认**用 QQ 音乐补一次**：拿「歌名 + 歌手」搜一下 QQ 音乐，从结果的 `albummid` 拼出 500×500 的专辑图 `https://y.gtimg.cn/music/photo_new/T002R500x500M000{albummid}.jpg`。
 
-**搜索接口不等封面**——先按音源原图把列表画出来，同一时间把这批歌丢给后台线程池（默认 8 路）并发查 QQ 封面并写进 Redis；已经查过的封面**直接写进搜索结果**，所以重复搜同一个词第一帧就是 QQ 封面。客户端渲染完再调 `POST /api/covers {"ids":[...]}`（`lib/state/cover_cache.dart`，**不用改**）：要么命中缓存，要么就等同一批已经在跑的请求，**同一首歌绝不会问两遍 QQ**。所以补封面慢一点也不会拖慢搜索。
+**搜索接口不等封面**——先按音源原图把列表画出来，同一时间把这批歌丢给后台线程池（默认 8 路）并发查 QQ 封面并写进 Redis；已经查过的封面**直接写进搜索结果**，所以重复搜同一个词第一帧就是 QQ 封面。客户端渲染完再调 `POST /api/covers {"ids":[...]}`（`lib/state/cover_cache.dart`）：要么命中缓存，要么就等同一批已经在跑的请求，**同一首歌绝不会问两遍 QQ**；服务端还没拿到定论的 id 会缺席，客户端隔两秒再问（最多 3 轮），查到就换上去。所以补封面慢一点也不会拖慢搜索。
 
 封面策略是「**先给能看的，再换成更好的**」：
 
 | `tonicuisc:qcover:<id>` | 返回给客户端的 `cover_url` |
 | --- | --- |
 | 有地址 | QQ 封面 |
-| `''`（查过、QQ 没有） | 音源原图兜底 |
+| `''`（查过、QQ 没有） | 音源原图兜底（原图也没有就返回**空串** = 查过了、确实没有） |
 | 不存在（还没查过） | **音源原图**（先画出来，后台查到 QQ 封面再换上） |
+| 这次没等到定论 | **不返回这个 id**（= 还在查），客户端过几秒再问一次 |
 
 > 查询**失败**（QQ 超时/挂了）和「查过、没有」是两回事：失败**不写缓存**，下次还会重试；
 > 只有真的查过并且没有，才会记成 `''`。否则一次网络抖动就让这首歌永远只剩糊图。
+> 所以 `/api/covers` 的返回值是「**有这个 key = 结论，没这个 key = 待定**」：
+> 把原图当成结论塞回去，客户端就再也不会重问，QQ 封面永远换不上。
 
 所以刚搜出来时列表显示音源原图（加载不出来就退回音源首字），几百毫秒后 QQ 封面到了就换上；列表和全屏播放页**共用同一个缓存**，里外一致。
 
@@ -342,7 +346,7 @@ caddy run --config deploy/Caddyfile     # https://106-35-196-104.nip.io
 ## 搜索过程
 
 - **只请求选中的音源**：musicdl 的 `MusicClient.search()` 会把配置里所有音源都打一遍，所以服务端直接调用选中音源的 client；没勾的音源不会被请求。
-- **拆成并发请求**：`search_size_per_source = 要几条`、`search_size_per_page = ceil(要几条 / TONICUISC_SEARCH_THREADS)`，于是 musicdl 生成 `search_threads` 个 URL、用同样多的线程并发抓。**不要**把它压成 1 个请求：musicdl 一个请求内部是按结果**串行**解析的（酷我要逐首请求直链），实测「1 个请求拿 15 条」要 18~23s，拆成 5 个请求各 3 条只要 ~5s。
+- **拆成并发请求**：`search_size_per_source = 要几条`、`search_size_per_page = ceil(要几条 / TONICUISC_SEARCH_THREADS)`，于是 musicdl 生成对应数量的 URL、用同样多的线程并发抓。**不要**把它压成 1 个请求：musicdl 一个请求内部是按结果**串行**解析的（酷我要逐首请求直链），实测「1 个请求拿 15 条」要 18~23s，拆开就好得多——**5 路（每页 3 条）3.6s、15 路（每页 1 条）2.0s**；上游抽风（单首要 4s）时 5 路会拖到 12.7s，15 路仍只要 ~5s。所以并发数是拿上游负载换稳定时延，默认 `10`（每页 2 条），需要更快就设 `15`。
 - **按音源分摊**：想要 15 条、开了 2 个音源 → 每个音源只拿 8 条（`ceil(15/2)`），不再各自都拉 15 条。`TONICUISC_SEARCH_SIZE`（默认 5）是下限。
 - **音源之间并行**：多个音源同时发，各自再铺满 `TONICUISC_SEARCH_THREADS` 个请求。
 - **搜索不等封面**：结果一出来就带**音源原图**返回，同一时间把这批歌丢给常驻的封面线程池（`TONICUISC_QQ_COVER_THREADS`，默认 8）在后台并发查 QQ 封面并写进 Redis。已经查过的封面会**直接写进搜索结果**，所以重复搜同一个词第一帧就是 QQ 封面。App 随后调 `POST /api/covers` 时，要么已命中缓存、要么就等**同一批正在跑的请求**（按歌曲 id 去重，绝不会问两遍 QQ）——`lib/state/cover_cache.dart` 不用改。

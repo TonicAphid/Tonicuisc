@@ -40,6 +40,13 @@ def test_health_is_public(app_env) -> None:
     assert resp.json()["auth"] == "enabled"
 
 
+def test_health_alias_is_public(app_env) -> None:
+    """/health 是 /api/health 的兼容别名：本机探活按约定打它，不该再刷屏 404。"""
+    resp = client.get("/health")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "ok"
+
+
 def test_api_requires_key(app_env) -> None:
     for path in ("/api/sources", "/api/history", "/api/devices", "/api/me"):
         assert client.get(path).status_code == 401, path

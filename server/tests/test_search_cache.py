@@ -372,7 +372,7 @@ def test_covers_skip_songs_without_qq_match(service: MusicService, monkeypatch) 
     items = service.search("天地龙鳞", sources=["kuwo"])
 
     assert _wait_for(lambda: service.storage.qq_cover_of(items[0]["id"]) is not None)
-    assert service.covers([items[0]["id"]]) == {}, "没查到就不返回，客户端保持原图"
+    assert service.covers([items[0]["id"]]) == {items[0]["id"]: ""}, "空串 = 查过确实没有，客户端据此停止重问"
     assert service.storage.qq_cover_of(items[0]["id"]) == "", "但记下查过了"
 
 
@@ -383,8 +383,12 @@ def test_covers_disabled_returns_empty(service: MusicService) -> None:
     assert service.cover_inflight() == 0, "关掉封面就不该有任何后台任务"
 
 
-def test_covers_deadline_falls_back_to_source_cover(service: MusicService, monkeypatch) -> None:
-    """封面查得太慢时先给音源原图，绝不让 /api/covers 把 App 吊死。"""
+def test_covers_deadline_leaves_result_pending(service: MusicService, monkeypatch) -> None:
+    """封面查得太慢时到点就返回，绝不让 /api/covers 把 App 吊死。
+
+    拿不到定论的 id **一个字都不返回**：客户端把缺席理解成「还在查」，过几秒再问。
+    旧实现这里会把音源原图塞回去，客户端拿原图当结论记死，QQ 封面永远换不上。
+    """
     release = threading.Event()
 
     def slow_cover(name: str, singers: str = "") -> str:
@@ -404,7 +408,7 @@ def test_covers_deadline_falls_back_to_source_cover(service: MusicService, monke
     release.set()
 
     assert elapsed < 2.0, "到点了就该返回，不能一直等"
-    assert found[items[0]["id"]] == "https://kuwo/original.jpg", "等不到就用音源原图"
+    assert items[0]["id"] not in found, "没定论就别返回，客户端下次再问"
 
 
 def test_cover_falls_back_to_source_cover(service: MusicService, monkeypatch) -> None:

@@ -2,7 +2,7 @@
 
 Endpoints
 ---------
-GET /api/health                    服务状态
+GET /api/health                    服务状态（GET /health 是同一件事的兼容别名）
 GET /api/sources                   可用音源
 GET /api/search?keyword=&sources=&limit=
 GET /api/url/{item_id}             直链（best effort）
@@ -29,6 +29,7 @@ from pydantic import BaseModel, Field
 from . import weblogin
 from .auth import API_KEY_HEADER, PUBLIC_PATHS, AuthManager
 from .config import SETTINGS, SOURCE_ALIASES, resolve_sources, source_label
+from .items import timing_log
 from .ratelimit import FailedLoginGuard, SlidingWindowLimiter
 from . import redis_runtime
 from .service import DownloadFailed, MusicService, SongNotFound, song_to_item
@@ -213,6 +214,22 @@ async def health() -> dict:
         "redis_managed": bool(getattr(redis_runtime.RUNTIME, "started_by_us", False)),
         "auth": "enabled" if auth.enabled else "disabled",
     }
+
+
+#: 本机探活按约定打的是 `/health`，刷过一屏 404。路由本身没副作用，顺手记下是谁在打：
+#: 每个 User-Agent 只记一行，不会因为每秒一次又把日志刷爆。
+_PROBE_USER_AGENTS: set[str] = set()
+
+
+@app.get("/health")
+async def health_alias(request: Request) -> dict:
+    """`/api/health` 的兼容别名（免鉴权，见 ``PUBLIC_PATHS``）。"""
+    ua = (request.headers.get("user-agent") or "?").strip() or "?"
+    if ua not in _PROBE_USER_AGENTS:
+        _PROBE_USER_AGENTS.add(ua)
+        who = request.client.host if request.client else "?"
+        timing_log(f"探活: {who} -> GET /health, user-agent={ua!r}（已用 /api/health 兜住）")
+    return await health()
 
 
 class DeviceStartRequest(BaseModel):
