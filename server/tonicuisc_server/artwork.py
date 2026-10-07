@@ -63,13 +63,15 @@ class ArtworkMixin:
 
         查过的结果落 Redis（'' = 查过没有），同一首歌只真的查一次；
         正在后台预热的那批会被这里「接住」，不会重复请求 QQ。
+        元信息一次 pipeline 取回来（以前每个 id 两次往返，200 个就是 400 次）。
         """
         if not item_ids:
             return {}
         found: dict[str, str] = {}
         waiting: list[tuple[str, str, Future[str | None]]] = []
+        metas = self.storage.songs_meta(item_ids[:200])
         for item_id in item_ids[:200]:
-            meta = self.storage.song_meta(item_id)
+            meta = metas.get(item_id)
             if meta is None:
                 continue
             original = str(meta.get("cover_url") or "")
@@ -146,8 +148,17 @@ class ArtworkMixin:
             return future
 
     def _lookup_cover(self, item_id: str, name: str, singers: str) -> str | None:
-        """真去问一次 QQ 并落库（跑在封面线程池里）。"""
-        url = qq_cover(name, singers)
+        """真去问一次 QQ 并落库（跑在封面线程池里）。
+
+        **网络失败不落库**：落库等于宣布「查过了、没有」，这首歌以后就再也不查，
+        永远只剩音源的糊图（qqmusic 的注释和 README 都承诺过会重试）。
+        """
+        try:
+            url = qq_cover(name, singers)
+        except Exception as exc:  # CoverLookupError，以及任何没预料到的异常
+            # 关键是**不写缓存**，所以这里不区分异常类型
+            timing_log(f"QQ 封面查询失败（不写缓存，下次重试）{item_id}: {type(exc).__name__}: {exc}")
+            return None
         try:
             self.storage.set_qq_cover(item_id, url)
         except Exception:
@@ -158,3 +169,16 @@ class ArtworkMixin:
         """给诊断用：当前有多少首歌正在查封面。"""
         with self._cover_lock:
             return sum(1 for future in self._cover_jobs.values() if not future.done())
+
+    def close_cover_pool(self) -> None:
+        """退出前收掉封面线程池。
+
+        ``ThreadPoolExecutor`` 在解释器退出时会 **join 队列里所有任务**，
+        每个封面查询 timeout 6s，Ctrl+C 时队列里堆几百个就得干等两分多钟
+        （这时 Redis 已经关了，任务全在报错，却还得排着队跑完）。
+        """
+        with self._cover_lock:
+            pool, self._cover_pool = self._cover_pool, None
+            self._cover_jobs.clear()
+        if pool is not None:
+            pool.shutdown(wait=False, cancel_futures=True)

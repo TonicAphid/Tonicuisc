@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 
 import '../api/api_client.dart';
@@ -51,13 +53,8 @@ class LibraryState extends ChangeNotifier {
 
   /// 切换「喜欢」/「收藏」；本地先翻转，失败再翻回来。
   Future<void> toggle(String kind, String songId) async {
-    final target = kind == 'like' ? _likedIds : _favoriteIds;
-    final wasOn = target.contains(songId);
-    if (wasOn) {
-      target.remove(songId);
-    } else {
-      target.add(songId);
-    }
+    final wasOn = _idsOf(kind).contains(songId);
+    _setOn(kind, songId, !wasOn);
     _bump(kind, wasOn ? -1 : 1);
     notifyListeners();
     try {
@@ -67,15 +64,26 @@ class LibraryState extends ChangeNotifier {
         await api.libraryAdd(kind, songId);
       }
     } catch (_) {
-      // 回滚
-      if (wasOn) {
-        target.add(songId);
-      } else {
-        target.remove(songId);
-      }
+      // 回滚。注意必须拿**当前**那套集合：等接口的这段时间里可能有一次
+      // refresh() 把 `_likedIds` 整个换掉了，拿着旧引用回滚改的是已经被丢掉的孤儿 Set，
+      // 界面不会跟着变，计数还会被多减一次。
+      _setOn(kind, songId, wasOn);
       _bump(kind, wasOn ? 1 : -1);
       notifyListeners();
+      // 再和服务端对一次账：乐观更新和刚拉到的汇总会互相打架（计数可能偏一）
+      unawaited(refresh());
       rethrow;
+    }
+  }
+
+  Set<String> _idsOf(String kind) => kind == 'like' ? _likedIds : _favoriteIds;
+
+  void _setOn(String kind, String songId, bool on) {
+    final ids = _idsOf(kind);
+    if (on) {
+      ids.add(songId);
+    } else {
+      ids.remove(songId);
     }
   }
 

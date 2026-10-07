@@ -169,11 +169,16 @@ class _LibraryListPageState extends State<LibraryListPage> {
       setState(() => _songs = _songs.where((item) => item.id != song.id).toList());
       messenger.showSnackBar(SnackBar(content: Text('已从「$_title」移除 ${song.name}')));
     } catch (err) {
-      messenger.showSnackBar(SnackBar(content: Text('移除失败：$err')));
+      if (err is UnauthorizedException) {
+        await widget.onUnauthorized('$err');
+        return;
+      }
+      if (mounted) messenger.showSnackBar(SnackBar(content: Text('移除失败：$err')));
     }
   }
 
   Future<void> _clear() async {
+    final messenger = ScaffoldMessenger.of(context);
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
@@ -185,14 +190,18 @@ class _LibraryListPageState extends State<LibraryListPage> {
         ],
       ),
     );
-    if (confirmed != true) return;
+    if (confirmed != true || !mounted) return;
     try {
       await widget.library.clear(widget.kind);
       if (!mounted) return;
       setState(() => _songs = const []);
     } catch (err) {
+      if (err is UnauthorizedException) {
+        await widget.onUnauthorized('$err');
+        return;
+      }
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('清空失败：$err')));
+        messenger.showSnackBar(SnackBar(content: Text('清空失败：$err')));
       }
     }
   }

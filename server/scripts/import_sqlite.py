@@ -5,7 +5,7 @@
     python scripts/import_sqlite.py                 # 默认搬 .cache/tonicuisc.db
     python scripts/import_sqlite.py --from D:\\old\\tonicuisc.db
     python scripts/import_sqlite.py --dry-run       # 只统计，不写 Redis
-    python scripts/import_sqlite.py --keep-going    # 已经导入过也继续（默认跳过非空库）
+    python scripts/import_sqlite.py --force       # 已经导入过也继续（默认跳过非空库）
 
 搬到 Redis 的内容：歌曲元信息、账户、设备、搜索历史、收藏/喜欢/播放历史。
 设备码登录的中间状态（device_requests）只有 10 分钟寿命，不搬。

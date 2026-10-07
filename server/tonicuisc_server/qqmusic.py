@@ -8,8 +8,11 @@
 * **LRU 记忆**：``(歌名, 歌手)`` → albummid。同一首歌、同一批歌重复查直接命中，不再联网；
 * **命中 albummid 就直接拼 URL**，一次搜索搞定，不用再发第二次请求。
 
-网络失败**不写缓存**（下次还会重试），只有「确实没有」才会被记住。
-查不到就返回 None，绝不抛异常影响正常搜索。
+网络失败**不写缓存**（下次还会重试），只有「确实没有」才会被记住：
+
+* 查不到 / 对不上 → 返回 ``None``，调用方据此写 ``''``（查过、没有）；
+* 网络失败 / 接口报错 → 抛 :class:`CoverLookupError`，调用方**不写缓存**，
+  下次还会重试。要是把失败也记成「查过没有」，这首歌就永远只剩糊的原图了。
 """
 
 from __future__ import annotations
@@ -25,6 +28,10 @@ from .config import SETTINGS
 
 SEARCH_URL = "https://c.y.qq.com/soso/fcgi-bin/client_search_cp"
 COVER_TEMPLATE = "https://y.gtimg.cn/music/photo_new/T002R500x500M000{}.jpg"
+
+
+class CoverLookupError(RuntimeError):
+    """查 QQ 封面时网络/接口出错（区别于「确实没有这首歌的封面」）。"""
 
 HEADERS = {
     "User-Agent": (
@@ -87,6 +94,8 @@ def _is_same_song(song: dict[str, Any], title: str, artists: str) -> bool:
 
     if not want_singers:
         return True  # 没给歌手，只能靠歌名
+    if not got_singers:
+        return False  # 我给了歌手、QQ 结果却没歌手字段：对不上，不能放行
     return want_singers in got_singers or got_singers in want_singers
 
 
@@ -114,14 +123,18 @@ def _album_mid(title: str, artists: str, timeout: float = 6.0) -> str | None:
 
 
 def search_cover(title: str, artists: str = "", timeout: float = 6.0) -> str | None:
-    """按歌名 + 歌手找 QQ 音乐的专辑封面，找不到或对不上返回 None。"""
+    """按歌名 + 歌手找 QQ 音乐的专辑封面。
+
+    找不到或对不上返回 ``None``（可以放心记成「查过、没有」）；
+    网络/接口失败抛 :class:`CoverLookupError`（**不许**记成「没有」）。
+    """
     title, artists = (title or "").strip(), (artists or "").strip()
     if not title and not artists:
         return None
     try:
         mid = _album_mid(title, artists, timeout)
-    except Exception:
-        return None  # 网络问题不写缓存，下次还试
+    except Exception as exc:
+        raise CoverLookupError(f"QQ 封面查询失败: {exc}") from exc
     return cover_url_for_album(mid)
 
 

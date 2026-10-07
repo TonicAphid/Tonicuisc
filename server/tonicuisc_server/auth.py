@@ -91,6 +91,21 @@ def valid_username(value: str) -> bool:
     return bool(re.fullmatch(r"[A-Za-z0-9_.@-]{2,32}", (value or "").strip()))
 
 
+#: 「这个用户名不存在」时拿去跑的假哈希：让失败响应的耗时和真密码一致，
+#: 否则靠响应时间就能枚举用户名（登录页特意不列账户名单，就是为了防这个）。
+_DUMMY_PASSWORD_HASH: str | None = None
+_DUMMY_LOCK = threading.Lock()
+
+
+def _dummy_password_hash() -> str:
+    global _DUMMY_PASSWORD_HASH
+    if _DUMMY_PASSWORD_HASH is None:
+        with _DUMMY_LOCK:
+            if _DUMMY_PASSWORD_HASH is None:
+                _DUMMY_PASSWORD_HASH = hash_password(secrets.token_urlsafe(16))
+    return _DUMMY_PASSWORD_HASH
+
+
 class AuthManager:
     def __init__(self, storage: Storage, ttl: int | None = None, enabled: bool | None = None) -> None:
         self.storage = storage
@@ -98,6 +113,8 @@ class AuthManager:
         self.ttl = SETTINGS.device_code_ttl if ttl is None else ttl
         self.enabled = SETTINGS.auth_enabled if enabled is None else enabled
         self._lock = threading.Lock()
+        #: 领取 api_key 时「读 + 清」的互斥
+        self._claim_lock = threading.Lock()
 
     # ------------------------------------------------------------------ 账户
     def register(self, username: str, password: str) -> dict[str, Any] | None:
@@ -108,7 +125,10 @@ class AuthManager:
 
     def authenticate(self, username: str, password: str) -> dict[str, Any] | None:
         user = self.storage.find_user((username or "").strip())
-        if user is None or not verify_password(password or "", user["password_hash"]):
+        if user is None:
+            verify_password(password or "", _dummy_password_hash())  # 时间对齐，别让人靠耗时猜用户名
+            return None
+        if not verify_password(password or "", user["password_hash"]):
             return None
         self.storage.touch_user_login(user["id"])
         return {"id": user["id"], "username": user["username"]}
@@ -130,26 +150,32 @@ class AuthManager:
         )
 
     def request_status(self, user_code: str, poll_secret: str) -> dict[str, Any]:
-        """App 轮询：pending / approved / denied / expired。"""
+        """App 轮询：pending / approved / denied / expired。
+
+        「读 key → 清 key」必须整段上锁：断线重连、多进程轮询同时到，
+        否则两个请求都能把明文 key 拿走（README 承诺只给一次）。
+        """
         code = normalize_user_code(user_code)
-        request = self.storage.get_device_request(code)
-        if request is None:
-            return {"status": "expired"}
-        if not hmac.compare_digest(str(request["poll_hash"]), hash_key(poll_secret or "")):
-            # 别人拿着同一个码来问，什么也不给
-            return {"status": "expired"}
-        if request["expires_at"] < time.time() and request["status"] == "pending":
-            return {"status": "expired"}
-        if request["status"] != "approved":
-            return {"status": request["status"]}
-        if not request["api_key"]:
-            # 已经取走过一次了
-            return {"status": "claimed"}
-        self.storage.clear_device_request_key(code)
+        with self._claim_lock:
+            request = self.storage.get_device_request(code)
+            if request is None:
+                return {"status": "expired"}
+            if not hmac.compare_digest(str(request["poll_hash"]), hash_key(poll_secret or "")):
+                # 别人拿着同一个码来问，什么也不给
+                return {"status": "expired"}
+            if request["expires_at"] < time.time() and request["status"] == "pending":
+                return {"status": "expired"}
+            if request["status"] != "approved":
+                return {"status": request["status"]}
+            if not request["api_key"]:
+                # 已经取走过一次了
+                return {"status": "claimed"}
+            api_key = request["api_key"]
+            self.storage.clear_device_request_key(code)
         user = self.storage.get_user(request["user_id"]) if request["user_id"] else None
         return {
             "status": "approved",
-            "api_key": request["api_key"],
+            "api_key": api_key,
             "device_id": request["device_id"],
             "username": (user or {}).get("username"),
         }
@@ -166,7 +192,12 @@ class AuthManager:
             key_hash=hash_key(api_key),
             user_id=user_id,
         )
-        return self.storage.approve_device_request(code, user_id, api_key, device["id"])
+        if not self.storage.approve_device_request(code, user_id, api_key, device["id"]):
+            # 批准这一步失败（码刚好过期/被抢）：把刚建的设备删掉，
+            # 不然会留下一条「有账户、却没人持有 key」的孤儿设备，cleanup 永远删不到
+            self.storage.delete_device(device["id"], own_only=False)
+            return False
+        return True
 
     def deny(self, user_code: str) -> bool:
         return self.storage.deny_device_request(normalize_user_code(user_code))

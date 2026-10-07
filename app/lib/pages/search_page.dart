@@ -38,6 +38,14 @@ class _SearchPageState extends State<SearchPage> {
   final ScrollController _scroll = ScrollController();
 
   List<Song> _results = const [];
+
+  /// 服务端那边已经取过多少条。**不能用 `_results.length`**：翻页回来的重复条目会被去重，
+  /// 一旦用显示条数当 offset，就会反复要同一段（永远要不到新歌，还一直显示「加载更多」）。
+  int _offset = 0;
+
+  /// 搜索代次：每次重新搜索 +1，让还在飞的翻页请求知道自己的结果该被丢掉。
+  int _epoch = 0;
+
   bool _searching = false;
   bool _loadingMore = false;
   bool _hasMore = false;
@@ -68,6 +76,7 @@ class _SearchPageState extends State<SearchPage> {
   Future<void> _search() async {
     final keyword = _keyword.text.trim();
     if (keyword.isEmpty || _searching) return;
+    final epoch = ++_epoch; // 让上一轮还没回来的翻页请求作废
     setState(() {
       _searching = true;
       _error = null;
@@ -87,8 +96,10 @@ class _SearchPageState extends State<SearchPage> {
       );
       stopwatch.stop();
       if (!mounted) return;
+      if (epoch != _epoch) return; // 不该走到这（_searching 挡着）；真发生了也别拿旧结果覆盖新一轮
       setState(() {
         _results = result.items;
+        _offset = result.items.length;
         _hasMore = result.hasMore;
         _elapsed = stopwatch.elapsedMilliseconds / 1000;
         _serverElapsed = result.elapsed;
@@ -103,6 +114,7 @@ class _SearchPageState extends State<SearchPage> {
       }
       setState(() {
         _results = const [];
+        _offset = 0;
         _error = friendlyError(err, widget.api.baseUrl);
       });
     } finally {
@@ -113,24 +125,33 @@ class _SearchPageState extends State<SearchPage> {
   /// 滑到底：再要 15 条，按 id 去重，绝不重复显示。
   Future<void> _loadMore() async {
     if (!_hasMore || _loadingMore || _searching || _lastKeyword.isEmpty) return;
+    final epoch = _epoch;
     setState(() => _loadingMore = true);
     try {
       final result = await widget.api.search(
         _lastKeyword,
         sources: _sources.toList(),
-        offset: _results.length,
+        offset: _offset,
         limit: _pageSize,
       );
       if (!mounted) return;
+      if (epoch != _epoch) return; // 期间用户已经搜了别的词，这批结果不要了
       final existing = _results.map((song) => song.id).toSet();
       final fresh = result.items.where((song) => !existing.contains(song.id)).toList();
       setState(() {
         _results = [..._results, ...fresh];
-        // 服务端说没有了、或者这一页全是我这儿已经有的，就不再要了
-        _hasMore = result.hasMore && fresh.isNotEmpty;
+        // 偏移量按「服务端给了多少」推进：即使去重去掉了几条，下一次也要接着往后要
+        _offset += result.items.length;
+        // 服务端说没有了、或者这一页压根是空的，就不再要了
+        _hasMore = result.hasMore && result.items.isNotEmpty;
       });
       unawaited(CoverCache.resolve(widget.api, fresh));
-    } catch (err) {
+    } on UnauthorizedException catch (err) {
+      // 翻页也可能是 401：不能悄悄吞掉，否则用户停在过期的 key 上出不去
+      if (!mounted) return;
+      setState(() => _hasMore = false);
+      await widget.onUnauthorized('$err');
+    } catch (_) {
       if (mounted) setState(() => _hasMore = false);
     } finally {
       if (mounted) setState(() => _loadingMore = false);
@@ -167,7 +188,7 @@ class _SearchPageState extends State<SearchPage> {
         await widget.onUnauthorized('$err');
         return;
       }
-      messenger.showSnackBar(SnackBar(content: Text('操作失败：$err')));
+      if (mounted) messenger.showSnackBar(SnackBar(content: Text('操作失败：$err')));
     }
   }
 

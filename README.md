@@ -125,7 +125,7 @@ flutter build windows --release
 1. App 打开就是登录页，自动生成一个设备码（`A1B1-C1D1`）
 2. 点「打开登录页并复制设备码」→ 弹出系统浏览器并已复制设备码
 3. 在网页里粘贴设备码 → 注册新账户或登录已有账户 → 批准
-4. App 每 2 秒轮询，批准后自动进入，密钥写进系统安全存储
+4. App 每 2 秒轮询，批准后自动进入，密钥写进系统安全存储；**Windows / Linux 上会额外在本机普通设置里留一份明文副本**（见下面「设备与鉴权」的取舍说明），移动端不留
 
 ## 后端配置
 
@@ -172,11 +172,11 @@ flutter build windows --release
 | GET | `/api/device/status` | App 轮询登录状态，批准后返回一次 `api_key`（**免鉴权**） |
 | GET / POST | `/login` | 设备码登录网页（**免鉴权**） |
 | GET | `/api/me` | 当前账户 + 本设备信息 |
-| GET | `/api/devices` | 已登录设备列表 |
-| DELETE | `/api/devices/{device_id}` | 吊销设备（**直接删除记录**，它的 key 立刻失效） |
+| GET | `/api/devices` | 已登录设备列表（**只列本账户的** + 没有账户的旧设备；别的账户看不到） |
+| DELETE | `/api/devices/{device_id}` | 吊销设备（**直接删除记录**，它的 key 立刻失效；只能删本账户/无主的，别人的设备回 404） |
 | GET | `/api/library/summary` | 三个列表的数量 + 喜欢/收藏的 id |
 | GET | `/api/library/{kind}` | 列表内容（`kind` = `like` / `favorite` / `history`） |
-| POST | `/api/library/{kind}` | 加入列表（喜欢/收藏幂等，历史累加播放次数） |
+| POST | `/api/library/{kind}` | 加入列表（喜欢/收藏幂等，历史累加播放次数；歌曲不在库里回 404） |
 | DELETE | `/api/library/{kind}/{song_id}` | 从列表移除 |
 | DELETE | `/api/library/{kind}` | 清空列表 |
 | GET | `/api/sources` | 可用音源 |
@@ -214,7 +214,8 @@ App                         浏览器(/login)                 服务端
 - 账户密码用 **PBKDF2-HMAC-SHA256（20 万次迭代 + 随机盐）**存储；
 - 设备 API Key 256 bit 随机，`devices` 表里**只有 `sha256(key)`**；批准到领取之间的明文只暂存在 `device_requests` 行里，App 取走立刻清空；
 - 登录页**不列出服务器上有哪些账户**，用户名靠手填，避免泄露账户名单；
-- App 收到 401 自动清凭据并回到登录页。
+- App 收到 401 自动清凭据并回到登录页——**搜索 / 翻页 / 列表增删 / 歌手页 / 播放页的红心 / 歌词 / 设备列表**每个入口都会走这条路（并发来好几个 401 也只清一次、只提示一次）；
+- **桌面端明文副本的取舍**：Windows / Linux 的安全存储偶发「这个进程写进去、下个进程读不回来」，会导致每次启动都得重新配对，所以 `credentials.dart` 读回校验失败会退回普通存储，并**在桌面端额外留一份明文副本**。代价是能读到 App 沙盒设置的人也能看到这把 key（`X-API-Key` 在 HTTP 明文链路上本来就能被抓走，见下面「这套东西的边界」）。「我的」页会在真退回普通存储时给出提示，安全存储恢复后提示自动消失。
 
 本机管理（不需要 key）：
 
@@ -238,7 +239,7 @@ python -m tonicuisc_server clear-cache        # 清掉搜索结果缓存（下�
 
 来源 IP 默认取反向代理写的 `X-Forwarded-For`（`TONICUISC_TRUST_PROXY=1`）。**如果把端口直接暴露到公网、前面没有反代，要设成 `0`**，否则可以伪造这个头绕过限速。
 
-关闭鉴权：`TONICUISC_AUTH=0`（任何人可调，仅限完全可信环境）。
+关闭鉴权：`TONICUISC_AUTH=0`（任何人可调，仅限完全可信环境）。这时没有「设备 / 账户」概念，收藏类接口把数据归到固定的 `local` 账户下——否则中间件不写设备信息，`/api/library/*` 会一律 400。
 
 **这套东西的边界**（很重要）：
 
@@ -265,15 +266,18 @@ caddy run --config deploy/Caddyfile     # https://106-35-196-104.nip.io
 
 **搜索接口不等封面**——先按音源原图把列表画出来，同一时间把这批歌丢给后台线程池（默认 8 路）并发查 QQ 封面并写进 Redis；已经查过的封面**直接写进搜索结果**，所以重复搜同一个词第一帧就是 QQ 封面。客户端渲染完再调 `POST /api/covers {"ids":[...]}`（`lib/state/cover_cache.dart`，**不用改**）：要么命中缓存，要么就等同一批已经在跑的请求，**同一首歌绝不会问两遍 QQ**。所以补封面慢一点也不会拖慢搜索。
 
-封面策略是「**宁可先空着，也别先糊一张**」：
+封面策略是「**先给能看的，再换成更好的**」：
 
 | `tonicuisc:qcover:<id>` | 返回给客户端的 `cover_url` |
 | --- | --- |
 | 有地址 | QQ 封面 |
 | `''`（查过、QQ 没有） | 音源原图兜底 |
-| 不存在（还没查过） | **空**（先不显示，等后台查完 / `/api/covers` 补） |
+| 不存在（还没查过） | **音源原图**（先画出来，后台查到 QQ 封面再换上） |
 
-所以刚搜出来时列表可能短暂没有封面（显示音源首字），几百毫秒后 QQ 封面到了就换上；列表和全屏播放页**共用同一个缓存**，里外一致。
+> 查询**失败**（QQ 超时/挂了）和「查过、没有」是两回事：失败**不写缓存**，下次还会重试；
+> 只有真的查过并且没有，才会记成 `''`。否则一次网络抖动就让这首歌永远只剩糊图。
+
+所以刚搜出来时列表显示音源原图（加载不出来就退回音源首字），几百毫秒后 QQ 封面到了就换上；列表和全屏播放页**共用同一个缓存**，里外一致。
 
 - 服务端并发查（默认 8 线程），失败或不匹配就走上面的兜底；
 - QQ 搜不到时会返回「最接近」的结果，所以做了匹配校验：歌名要相等、或短的那个（≥4 字）被长的包含，**并且歌手要对得上**——否则搜「不存在的歌名xyzabc」会被 `XY&Z` 这种短名字骗到；
@@ -342,7 +346,7 @@ caddy run --config deploy/Caddyfile     # https://106-35-196-104.nip.io
 - **按音源分摊**：想要 15 条、开了 2 个音源 → 每个音源只拿 8 条（`ceil(15/2)`），不再各自都拉 15 条。`TONICUISC_SEARCH_SIZE`（默认 5）是下限。
 - **音源之间并行**：多个音源同时发，各自再铺满 `TONICUISC_SEARCH_THREADS` 个请求。
 - **搜索不等封面**：结果一出来就带**音源原图**返回，同一时间把这批歌丢给常驻的封面线程池（`TONICUISC_QQ_COVER_THREADS`，默认 8）在后台并发查 QQ 封面并写进 Redis。已经查过的封面会**直接写进搜索结果**，所以重复搜同一个词第一帧就是 QQ 封面。App 随后调 `POST /api/covers` 时，要么已命中缓存、要么就等**同一批正在跑的请求**（按歌曲 id 去重，绝不会问两遍 QQ）——`lib/state/cover_cache.dart` 不用改。
-- **分页**：`GET /api/search?offset=&limit=` 返回一页 + `has_more`。App 滑到底自动再要 15 条，**按 id 去重**，不会出现重复的歌；同一关键词的结果在 Redis 里缓存 24 小时（`TONICUISC_SEARCH_TTL`），翻页和**重启服务**都不需要重新搜。首页即使缓存里少几条也先给（后台补全），翻页时则必须凑够，不然那一页是空的。
+- **分页**：`GET /api/search?offset=&limit=` 返回一页 + `has_more`。App 滑到底自动再要 15 条，**按 id 去重**，不会出现重复的歌；同一关键词的结果在 Redis 里缓存 24 小时（`TONICUISC_SEARCH_TTL`），翻页和**重启服务**都不需要重新搜。客户端的 `offset` 按「服务端已经返回过多少条」推进，**不受去重影响**——去重只改显示条数，否则会反复要同一段、翻不动页。首页即使缓存里少几条也先给（后台补全），翻页时则必须凑够，不然那一页是空的。
 - **不打印进度条**：给 musicdl 传一个 `disable=True` 的 rich `Progress`，它就不再往控制台刷进度条。
 - **耗时可见**：服务端每个 `/api` 请求打一行 `[access] GET /api/search 200 5.482s`；`/api/search` 另外在响应里返回 `elapsed`（服务端耗时）。客户端自己再量一次总耗时（含网络往返），显示成「搜索完成 · 用时 5.5 秒（服务端 2.9 秒）· 共 20 首」。
 
@@ -357,7 +361,7 @@ caddy run --config deploy/Caddyfile     # https://106-35-196-104.nip.io
 ## 播放链路
 
 1. 先请求 `/api/url/{id}` 拿音源直链，直接连 CDN 播放（最快出声，服务端不中转）；请求时带上返回的 headers（部分 CDN 需要 UA / Cookie）。
-2. 直链拿不到、或播放器报错，自动回退 `/api/stream/{id}`。
+2. 直链拿不到、或播放器报错，自动回退 `/api/stream/{id}`；**回退请求带着 `X-API-Key`**（`just_audio` 自己发 HTTP，不带的话开着鉴权的服务端会回 401，整首歌放不出来）。
 3. `/api/stream/{id}` 未缓存时**边下边播**：从音源拉数据的同时写缓存并吐给播放器（实测首字节 ~0.5s）；中断会丢掉半截文件；缓存完成后转为按 Range 读本地文件。
 
 播放后端：iOS / macOS 用 just_audio 原生实现，Windows / Linux 通过 `just_audio_media_kit`（media_kit）。
@@ -371,7 +375,7 @@ caddy run --config deploy/Caddyfile     # https://106-35-196-104.nip.io
 - **歌手主页**（`lib/pages/artist_page.dart`）：这个歌手能搜到的所有歌、「全部播放」、逐首点红心（完整度见上面的「歌手主页」一节）。
 - **列表 tab**（`lib/pages/library_page.dart`）：最上面是**播放列表**（显示正在播放的歌、队列长度、播放模式），下面是 **我喜欢 / 收藏 / 播放历史**，各自显示数量，点进去可播放、单条移除、清空。
 - **播放队列**（`lib/pages/queue_page.dart`）：全屏播放页点列表按钮弹出，或在「列表」tab 里整页打开。
-- **播放模式**：顺序播放 / 列表循环 / 单曲循环 / 随机播放，在播放页和队列页都能切；播完自动按模式走下一首。
+- **播放模式**：顺序播放 / 列表循环 / 单曲循环 / 随机播放，在播放页和队列页都能切；播完自动按模式走下一首（队列只有一首时随机播放也重头再来，顺序播放才停下）。快速连点「下一首」只会让最后一次点歌生效，不会被上一次没加载完的覆盖。
 - **我的 tab**（`lib/pages/profile_page.dart`）：账户名、本机设备名与设备 ID、服务器地址、重新登录、退出登录、版本号、已登录设备列表（可逐台吊销，删完即从列表消失）。
 - **底部播放条**：封面缩略图、播放/暂停、进度拖动；点一下展开全屏播放页。
 - **全屏播放页**（`lib/pages/now_playing_page.dart`）：大封面 + 喜欢/收藏 + 歌词跟随高亮（点歌词跳转）+ 进度条 + 上一首 / 播放暂停 / 下一首。**拖进度条时音频继续播，滑块跟手指走，松手才跳到那个位置**。
@@ -380,7 +384,7 @@ caddy run --config deploy/Caddyfile     # https://106-35-196-104.nip.io
 
 ## CI
 
-- **`server-ci.yml`**：安装依赖 → `compileall` → `pytest`（62 个用例，不联网、不需要 musicdl）。
+- **`server-ci.yml`**：安装依赖 → `compileall` → `pytest`（124 个用例，不联网、不需要 musicdl）。
 - **`build.yml`**：
   1. `静态检查` job 先跑 `flutter analyze` + `flutter test`；
   2. `Windows / Linux / macOS / iOS` **`needs: analyze`**，静态检查过了才开始烧构建时间（出错 1 分钟就能拿到反馈，不会 4 个平台白跑）；
@@ -390,7 +394,9 @@ caddy run --config deploy/Caddyfile     # https://106-35-196-104.nip.io
 版本号：`tool/apply_version.py` 从 **tag 或提交标题**里取 `v0.0.7` / `v0.1.0` / `v1.0.0`，后面跟 `fix` 也认（`v0.0.7fix`），写两处：
 
 - `app/lib/version.dart` —— 界面显示的版本（带 fix）
-- `app/pubspec.yaml` —— 只能是合法 semver，fix 体现在 build number 上
+- `app/pubspec.yaml` —— 只能是合法 semver（`x.y.z+build`）；**build number = `github.run_number`**，`fix` 只体现在上面那行显示标签里，不会进 pubspec
+
+匹配**必须带 `v` 前缀**：否则提交信息里随口一句「依赖升到 1.2.3」「python 3.11」就会被当成版本号写进产物。本地手写也一样：`python tool/apply_version.py v0.1.5 --build=3`；不带版本号时回退到 `app/pubspec.yaml` 里现有的值。
 
 Release 命名：**标题 = 提交标题**（`run-name` 也是），**标签 = 提交标题里的 `v0.0.x`**。没写版本号时依次回退：推送的 tag → 手动输入 → `app/pubspec.yaml`。重复同一版本会更新标题并覆盖同名产物，不需要手动打 tag。
 
@@ -403,7 +409,7 @@ iOS 产物为未签名 `.ipa`，安装需要自行用 Xcode 重签。
 改完代码推之前先跑这两条：
 
 ```bash
-# 服务端测试（62 个用例，秒级，不联网）
+# 服务端测试（124 个用例，秒级，不联网）
 cd server && python -m pytest -q
 
 # Dart 括号配平（CI 里的 analyze 只能等远端，这个本地就能查低级错误）

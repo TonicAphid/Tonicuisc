@@ -17,22 +17,32 @@ class NowPlayingPage extends StatefulWidget {
     required this.controller,
     required this.api,
     required this.library,
+    this.onUnauthorized,
   });
 
   final PlayerController controller;
   final ApiClient api;
   final LibraryState library;
 
+  /// 401 时交给外壳处理（清凭据回登录页）；不给就只弹个提示。
+  final Future<void> Function(String message)? onUnauthorized;
+
   static Future<void> open(
     BuildContext context,
     PlayerController controller,
     ApiClient api,
-    LibraryState library,
-  ) {
+    LibraryState library, {
+    Future<void> Function(String message)? onUnauthorized,
+  }) {
     return Navigator.of(context).push(
       MaterialPageRoute(
         fullscreenDialog: true,
-        builder: (_) => NowPlayingPage(controller: controller, api: api, library: library),
+        builder: (_) => NowPlayingPage(
+          controller: controller,
+          api: api,
+          library: library,
+          onUnauthorized: onUnauthorized,
+        ),
       ),
     );
   }
@@ -94,12 +104,18 @@ class _NowPlayingPageState extends State<NowPlayingPage> {
     });
     try {
       final raw = await widget.api.lyric(song.id);
+      // 换歌了就别把上一首的歌词/错误盖到这一首上
       if (!mounted || _loadedSongId != song.id) return;
       setState(() => _sheet = LyricSheet.parse(raw, title: song.name, artist: song.singers));
     } catch (err) {
-      if (mounted) setState(() => _error = '歌词获取失败：$err');
+      if (err is UnauthorizedException && widget.onUnauthorized != null) {
+        if (mounted) await widget.onUnauthorized!('$err');
+        return;
+      }
+      if (mounted && _loadedSongId == song.id) setState(() => _error = '歌词获取失败：$err');
     } finally {
-      if (mounted) setState(() => _loading = false);
+      // stale 的那次不许动 _loading：不然会把新一轮「正在加载」提前收掉
+      if (mounted && _loadedSongId == song.id) setState(() => _loading = false);
     }
   }
 
@@ -199,7 +215,11 @@ class _NowPlayingPageState extends State<NowPlayingPage> {
     try {
       await widget.library.toggle(kind, song.id);
     } catch (err) {
-      messenger.showSnackBar(SnackBar(content: Text('操作失败：$err')));
+      if (err is UnauthorizedException && widget.onUnauthorized != null) {
+        await widget.onUnauthorized!('$err');
+        return;
+      }
+      if (mounted) messenger.showSnackBar(SnackBar(content: Text('操作失败：$err')));
     }
   }
 

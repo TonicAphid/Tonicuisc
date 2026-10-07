@@ -73,18 +73,27 @@ class _MainShellState extends State<MainShell> with WidgetsBindingObserver {
     final name = await Credentials.deviceName();
     final username = await Credentials.username();
     if (!mounted) return;
+    _adoptApi(ApiClient(url, apiKey: key));
     setState(() {
       _baseUrl = url;
       _apiKey = key;
       _deviceName = name;
       _username = username;
-      _api = ApiClient(url, apiKey: key);
-      _library = LibraryState(_api);
       _booted = true;
     });
     if (key != null && key.isNotEmpty) {
       unawaited(_library.refresh());
     }
+  }
+
+  /// 统一的「换 ApiClient」动作：重建 LibraryState + 让播放器跟着换。
+  ///
+  /// 换 key、换服务器、退出登录都必须走这里——漏掉播放器那一步就会出现
+  /// 「界面已经登出/换了地址，播放器还在拿旧 key 往旧地址发回退流和播放历史」。
+  void _adoptApi(ApiClient api) {
+    _api = api;
+    _library = LibraryState(api);
+    _player.updateApi(api);
   }
 
   Future<void> _handleLoggedIn(String apiKey, String deviceId, String username) async {
@@ -95,11 +104,10 @@ class _MainShellState extends State<MainShell> with WidgetsBindingObserver {
       username: username,
     );
     if (!mounted) return;
+    _adoptApi(ApiClient(_baseUrl, apiKey: apiKey));
     setState(() {
       _apiKey = apiKey;
       _username = username.isEmpty ? null : username;
-      _api = ApiClient(_baseUrl, apiKey: apiKey);
-      _library = LibraryState(_api);
       _notice = null;
       _tab = 0;
     });
@@ -107,27 +115,28 @@ class _MainShellState extends State<MainShell> with WidgetsBindingObserver {
   }
 
   Future<void> _handleUnauthorized(String message) async {
+    // 幂等：一次 401 会从好几个页面同时冒出来，只清一次凭据、只提示一次
+    if (!_loggedIn) return;
     await Credentials.clear();
     CoverCache.clear();
     if (!mounted) return;
-    setState(() {
-      _apiKey = null;
-      _username = null;
-      _api = ApiClient(_baseUrl);
-      _notice = message;
-    });
+    _apiKey = null;
+    _username = null;
+    _notice = message;
+    _adoptApi(ApiClient(_baseUrl));
+    setState(() {});
   }
 
   Future<void> _logout() async {
+    if (!_loggedIn) return;
     await Credentials.clear();
     CoverCache.clear();
     if (!mounted) return;
-    setState(() {
-      _apiKey = null;
-      _username = null;
-      _api = ApiClient(_baseUrl);
-      _notice = null;
-    });
+    _apiKey = null;
+    _username = null;
+    _notice = null;
+    _adoptApi(ApiClient(_baseUrl));
+    setState(() {});
   }
 
   Future<void> _editServerUrl() async {
@@ -152,11 +161,9 @@ class _MainShellState extends State<MainShell> with WidgetsBindingObserver {
     final normalized = ApiClient.normalizeBaseUrl(value);
     await ApiClient.saveBaseUrl(normalized);
     if (!mounted) return;
-    setState(() {
-      _baseUrl = normalized;
-      _api = ApiClient(normalized, apiKey: _apiKey);
-      _library = LibraryState(_api);
-    });
+    // 收藏列表、播放器的回退流都要跟着换到新地址（播放器里的旧 ApiClient 还指着旧主机）
+    _adoptApi(ApiClient(normalized, apiKey: _apiKey));
+    setState(() => _baseUrl = normalized);
   }
 
   static const List<String> _titles = ['Tonicuisc', '列表', '我的'];
@@ -228,7 +235,12 @@ class _MainShellState extends State<MainShell> with WidgetsBindingObserver {
       bottomNavigationBar: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          PlayerBar(controller: _player, api: _api, library: _library),
+          PlayerBar(
+            controller: _player,
+            api: _api,
+            library: _library,
+            onUnauthorized: _handleUnauthorized,
+          ),
           NavigationBar(
             selectedIndex: _tab,
             onDestinationSelected: (index) {

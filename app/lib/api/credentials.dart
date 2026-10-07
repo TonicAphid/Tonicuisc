@@ -12,8 +12,10 @@ import 'package:shared_preferences/shared_preferences.dart';
 /// 桌面端的 secure storage 偶尔会「这个进程写进去、下个进程读不回来」，
 /// 表现就是每次启动都要重新登录。所以：
 /// * 写入后**读回校验**，对不上就用普通存储；
-/// * Windows / Linux 上**额外留一份普通存储的副本**兜底（移动端不留）。
-/// 真的退回普通存储时，「我的」页面会提示。
+/// * Windows / Linux 上**额外留一份普通存储（SharedPreferences）的明文副本**兜底，
+///   **移动端不留**。这意味着桌面端上能读到 App 沙盒设置的人也能看到明文 key——
+///   换来的收益是「不用每次启动都重新配对」，README 里写了这条取舍。
+/// 真的退回普通存储时，「我的」页面会提示；安全存储恢复后提示会自动消失。
 class Credentials {
   static const String _apiKeyKey = 'tonicuisc_api_key';
   static const String _deviceIdKey = 'tonicuisc_device_id';
@@ -38,7 +40,10 @@ class Credentials {
   static Future<String?> _read(String key) async {
     try {
       final value = await _storage.read(key: key);
-      if (value != null && value.isNotEmpty) return value;
+      if (value != null && value.isNotEmpty) {
+        usingFallback = false; // 安全存储这次读回来了，之前的「退回普通存储」提示作废
+        return value;
+      }
     } catch (_) {
       usingFallback = true;
     }
@@ -58,6 +63,7 @@ class Credentials {
       // 读回校验：写进去读不回来就当作不可用
       final check = await _storage.read(key: key);
       if (check == value) {
+        usingFallback = false; // 这次成功用上安全存储了
         if (_mirrorToPrefs) {
           await prefs.setString(_fallbackKey(key), value);
         } else {

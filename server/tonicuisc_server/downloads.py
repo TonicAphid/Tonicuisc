@@ -10,6 +10,7 @@ import re
 import shutil
 import threading
 import time
+import uuid
 from collections.abc import Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -43,8 +44,13 @@ class DownloadMixin:
             return self._download_locks.setdefault(item_id, threading.Lock())
 
     def cache_path(self, song: Any) -> Path:
-        """稳定的缓存文件名：<音源>_<id>.<格式>。"""
-        ext = clean(song.ext).lstrip(".") or "mp3"
+        """稳定的缓存文件名：<音源>_<id>.<格式>。
+
+        ``ext`` 是音源给的元数据，必须洗成纯后缀：``../../x`` 这种能把文件写出
+        ``files_dir`` 之外（写文件和读歌词都会跟着越界）。
+        """
+        raw_ext = clean(getattr(song, "ext", "") or "").lstrip(".")
+        ext = re.sub(r"[^A-Za-z0-9]", "", raw_ext).lower()[:8] or "mp3"
         stem = re.sub(r'[\\/:*?"<>|]', "_", f"{song.source}_{song.identifier}")
         return self.files_dir / f"{stem}.{ext}"
 
@@ -69,7 +75,12 @@ class DownloadMixin:
         try:
             shutil.move(str(source_path), str(target))
         except OSError:
-            shutil.copyfile(source_path, target)
+            try:
+                shutil.copyfile(source_path, target)
+            except OSError as exc:
+                # move 和 copy 都失败：抛个能被上层翻译成 502 的错，
+                # 而不是让原始 OSError 冒泡成 500
+                raise DownloadFailed(f"缓存文件搬运失败: {exc}") from exc
         lyric_source, lyric_target = source_path.with_suffix(".lrc"), target.with_suffix(".lrc")
         if lyric_source.exists() and not lyric_target.exists():
             try:
@@ -104,6 +115,7 @@ class DownloadMixin:
 
     def _prune_search_dirs(self) -> None:
         """清掉 musicdl 每次搜索留下的 "<时间戳> <关键词>" 空壳目录（只剩 *.pkl）。"""
+        self._prune_partial_files()
         if not self.work_dir.exists():
             return
         now = time.time()
@@ -128,6 +140,21 @@ class DownloadMixin:
                 except OSError:
                     pass
 
+    def _prune_partial_files(self, max_age: float = 600.0) -> None:
+        """清掉边下边播留下的半截 ``*.part``（临时文件是按请求随机命名的）。
+
+        正在写的那些一定很新，所以闲置超过 ``max_age`` 秒才删。
+        """
+        if not self.files_dir.exists():
+            return
+        now = time.time()
+        for partial in self.files_dir.glob("*.part"):
+            try:
+                if now - partial.stat().st_mtime >= max_age:
+                    partial.unlink(missing_ok=True)
+            except OSError:
+                continue
+
     # ------------------------------------------------------------------ 下载
     def ensure_file(self, item_id: str) -> Path:
         """下载这首歌并返回本地路径（线程安全）。"""
@@ -143,20 +170,26 @@ class DownloadMixin:
             if legacy is not None and legacy.exists() and legacy.stat().st_size > 0:
                 return self._promote(legacy, target)
             downloaded: list[Any] = []
+            last_error: Exception | None = None
             for attempt in range(2):
                 try:
                     downloaded = self.client.download(song_infos=[song]) or []
+                    last_error = None
                 except Exception as exc:  # 网络 / 音源侧失败
-                    refreshed = self._refresh(song)  # 直链过期就换一条再试
-                    if attempt == 0 and refreshed is not song:
-                        song = refreshed
-                        continue
-                    raise DownloadFailed(str(exc)) from exc
+                    downloaded, last_error = [], exc
+                # 找到能用的文件就收工；找不到（含 musicdl **静默返回空列表**）
+                # 也走一次「换直链再试」——以前只有抛异常才重试
+                for candidate in [*downloaded, song]:
+                    candidate_path = self._legacy_path(candidate)
+                    if candidate_path is not None and candidate_path.exists() and candidate_path.stat().st_size > 0:
+                        return self._promote(candidate_path, target)
+                refreshed = self._refresh(song)  # 直链过期就换一条再试
+                if attempt == 0 and refreshed is not song:
+                    song = refreshed
+                    continue
                 break
-            for candidate in [*downloaded, song]:
-                candidate_path = self._legacy_path(candidate)
-                if candidate_path is not None and candidate_path.exists() and candidate_path.stat().st_size > 0:
-                    return self._promote(candidate_path, target)
+            if last_error is not None:
+                raise DownloadFailed(str(last_error)) from last_error
             raise DownloadFailed("下载失败：音源未返回可用文件")
 
     def cached_file(self, item_id: str) -> Path | None:
@@ -199,7 +232,9 @@ class DownloadMixin:
             raise DownloadFailed(str(last_error))
         target = self.cache_path(song)
         target.parent.mkdir(parents=True, exist_ok=True)
-        return response, target, target.with_name(target.name + ".part")
+        # 每次拉流用自己的临时文件：两个请求同时边下边播同一个文件时，
+        # 共用一个 .part 会把字节交错写坏缓存
+        return response, target, target.with_name(f"{target.name}.{uuid.uuid4().hex[:8]}.part")
 
     def _open_url(self, song: Any, url: str) -> Any:
         headers = {str(k): str(v) for k, v in dict(getattr(song, "default_download_headers", None) or {}).items()}
@@ -233,14 +268,19 @@ class DownloadMixin:
         finally:
             response.close()
             if completed:
-                temp_path.replace(target)
+                try:
+                    temp_path.replace(target)
+                except OSError:
+                    # Windows 上目标正被 Range 读占用时会失败：这份就当没下过，
+                    # 不能让异常冒泡把整个响应打断
+                    temp_path.unlink(missing_ok=True)
             else:
                 temp_path.unlink(missing_ok=True)
 
     # ------------------------------------------------------------------ 歌词
     def lyric(self, item_id: str) -> str:
         song = self.get_song(item_id)
-        text = clean(song.lyric)
+        text = clean(getattr(song, "lyric", None))  # 从 Redis 重建的对象可能没这个字段
         if text:
             return text
         lrc = self.cache_path(song).with_suffix(".lrc")

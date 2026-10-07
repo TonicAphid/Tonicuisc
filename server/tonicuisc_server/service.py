@@ -44,6 +44,8 @@ class MusicService(SourceMixin, SearchMixin, ArtworkMixin, DownloadMixin):
         #: 正在后台「软刷新」的关键词（同一个关键词只跑一个）
         self._revalidating: set[tuple[str, tuple[str, ...]]] = set()
         self._download_locks: dict[str, threading.Lock] = {}
+        #: 同一音源一次只跑一个搜索（抓取量字段是写在共享 client 上的，见 sources.py）
+        self._source_locks: dict[str, threading.Lock] = {}
         self._locks_guard = threading.Lock()
         #: QQ 封面：常驻线程池 + 正在查的歌曲（搜索预热和 /api/covers 共用同一批任务）
         #: 锁要可重入：`_submit_cover` 拿着它的时候会去 `_cover_executor()` 里再拿一次
@@ -82,7 +84,7 @@ class MusicService(SourceMixin, SearchMixin, ArtworkMixin, DownloadMixin):
         return song
 
     def _restore(self, item_id: str) -> Any | None:
-        """内存没有就去 SQLite 找；音源直链过期就重搜一次刷新。"""
+        """内存没有就去 Redis 找；音源直链过期就重搜一次刷新。"""
         payload = self.storage.load_song(item_id)
         if payload is None:
             return None
@@ -127,22 +129,27 @@ class MusicService(SourceMixin, SearchMixin, ArtworkMixin, DownloadMixin):
             return song
         for candidate in results.get(getattr(song, "source", None), []) or []:
             if str(getattr(candidate, "identifier", "")) == str(getattr(song, "identifier", "")):
-                self._remember(candidate)
+                try:
+                    self._remember(candidate)  # 入库失败不能把「已经拿到新直链」这件事也搞砸
+                except Exception:
+                    pass
                 return candidate
         return song
 
     # ------------------------------------------------------------------ 直链
     def direct_url(self, item_id: str) -> dict[str, Any]:
         song = self.get_song(item_id)
-        url = song.download_url
+        # 从 Redis 重建出来的 payload 可能缺字段（老数据 / 手工写过），一律取不到就当没有，
+        # 不能直接属性访问抛 AttributeError → 500
+        url = getattr(song, "download_url", None)
         if not isinstance(url, str) or not url.startswith("http"):
             raise DownloadFailed("该歌曲没有可直接播放的链接")
-        headers = {str(k): str(v) for k, v in dict(song.default_download_headers or {}).items()}
-        cookies = dict(song.default_download_cookies or {})
+        headers = {str(k): str(v) for k, v in dict(getattr(song, "default_download_headers", None) or {}).items()}
+        cookies = dict(getattr(song, "default_download_cookies", None) or {})
         if cookies:
             headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in cookies.items())
         return {
             "url": url,
             "headers": headers,
-            "ext": clean(song.ext).lstrip("."),
+            "ext": clean(getattr(song, "ext", "") or "").lstrip("."),
         }

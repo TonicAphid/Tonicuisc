@@ -147,5 +147,5 @@ def test_devices_store_only_hash(auth: AuthManager) -> None:
     assert device is not None
     assert device["key_hash"] == hash_key(api_key)
     assert device["username"] == "aphid"
-    assert "api_key" not in auth.storage.list_devices()[0]
-    assert "key_hash" not in auth.storage.list_devices()[0]
+    assert "api_key" not in auth.storage.list_devices(user["id"])[0]
+    assert "key_hash" not in auth.storage.list_devices(user["id"])[0]

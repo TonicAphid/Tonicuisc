@@ -102,7 +102,7 @@ class SearchMixin:
             started = time.perf_counter()
             try:
                 with self._search_lock(key):
-                    items = self._search_sources(keyword, set(selected), limit)
+                    items = self._search_sources(keyword, set(selected), limit, record=False)
                     self._save_cache(key, items)
                 timing_log(
                     f"search '{keyword}' -> 后台刷新完成（{len(items)} 条 / {time.perf_counter() - started:.2f}s）"
@@ -172,15 +172,25 @@ class SearchMixin:
             "offset": offset,
             "limit": size,
             "total": len(items),
-            # 这一页是满的、音源还有货、并且没到上限 → 还能继续加载
-            "has_more": len(page) >= size and len(items) >= need and need < SETTINGS.search_max,
+            # 这一页有内容、而且还没抓到上限 → 客户端可以继续要下一页。
+            # 别用「这一页是不是满的」判断：首页为了让用户少等，允许缓存不足就先返回
+            # （allow_short），那样 has_more 会恒为 False，用户再也翻不动了；
+            # 真没货时下一页自然会拿到空页，那时再收手。
+            "has_more": bool(page) and need < SETTINGS.search_max,
         }
 
     def _search_lock(self, key: tuple[str, tuple[str, ...]]) -> threading.Lock:
         with self._locks_guard:
             return self._search_locks.setdefault(key, threading.Lock())
 
-    def _search_sources(self, keyword: str, wanted: set[str], limit: int | None) -> list[dict[str, Any]]:
+    def _search_sources(
+        self,
+        keyword: str,
+        wanted: set[str],
+        limit: int | None,
+        *,
+        record: bool = True,
+    ) -> list[dict[str, Any]]:
         source_started = time.perf_counter()
         self._prune_search_dirs()
         results = self._search_selected(keyword, wanted, limit)
@@ -212,7 +222,10 @@ class SearchMixin:
             f"| 合计 {time.perf_counter() - source_started:.2f}s"
             f"（封面：{len(items) - warmed} 张已就绪，{warmed} 张后台预热中）"
         )
-        self.storage.record_search(keyword, sorted(wanted), [item["id"] for item in items])
+        # 只有用户真的搜了一次才算搜索历史：后台软刷新也记的话，
+        # /api/history 的次数会虚高，还会把 500 条历史窗口顶掉（连带每轮都全量裁剪歌曲）
+        if record:
+            self.storage.record_search(keyword, sorted(wanted), [item["id"] for item in items])
         return items
 
     # ---------------------------------------------------------------- 歌手页
@@ -226,7 +239,11 @@ class SearchMixin:
         name = (name or "").strip()
         if not name:
             return {"name": name, "total": 0, "items": [], "filtered": False}
-        items = self.search(name, sources=sources, limit=max(limit * 2, 60))
+        # 抓取量夹在「2 倍且至少 60」和 search_max 之间：
+        # 想要的条数比音源实际给的多时，缓存永远凑不够 need，歌手页就会每次都真联网
+        # （以前就是这样：每进一次歌手页就等 5~20 秒）。allow_short 让它先给、后台补。
+        fetch = min(max(limit * 2, 60), max(SETTINGS.search_max, limit))
+        items = self.search(name, sources=sources, limit=fetch, allow_short=True)
         tokens = split_artists(name)
         matched = [item for item in items if any(token in str(item.get("singers") or "").lower() for token in tokens)]
         filtered = bool(matched)

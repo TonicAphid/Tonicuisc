@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 import time
 import uuid
 from typing import TYPE_CHECKING, Any
@@ -89,6 +90,8 @@ class Storage:
             client = ensure_redis_client()
         self.client: Any = client
         self.ns = namespace
+        #: 收藏列表的「读-改-写」用（Redis 不是事务，得自己串起来）
+        self._lib_lock = threading.Lock()
 
     def close(self) -> None:
         """断开连接池。
@@ -203,16 +206,29 @@ class Storage:
         return payload
 
     def song_meta(self, item_id: str) -> dict[str, Any] | None:
-        data = self.client.hgetall(self._song_key(item_id))
-        if not data:
-            return None
-        # 数字字段在 SQLite 里是数值，这里还原回去，调用方不用关心后端换了
-        data["has_lyric"] = _integer(data.get("has_lyric")) or 0
-        data["duration_s"] = _integer(data.get("duration_s"))
-        for field in ("url_expire_at", "first_seen", "last_seen"):
-            data[field] = _number(data.get(field)) or 0.0
-        data["qq_cover"] = self.client.get(self._cover_key(item_id))
-        return data
+        return self.songs_meta([item_id]).get(item_id)
+
+    def songs_meta(self, item_ids: list[str]) -> dict[str, dict[str, Any]]:
+        """批量取歌曲元信息（``/api/covers`` 一次问 200 个 id，别一首一首查）。"""
+        if not item_ids:
+            return {}
+        pipe = self.client.pipeline(transaction=False)
+        for item_id in item_ids:
+            pipe.hgetall(self._song_key(item_id))
+            pipe.get(self._cover_key(item_id))
+        values = pipe.execute()
+        out: dict[str, dict[str, Any]] = {}
+        for index, item_id in enumerate(item_ids):
+            data, qq_cover = values[2 * index], values[2 * index + 1]
+            if not data:
+                continue
+            data["has_lyric"] = _integer(data.get("has_lyric")) or 0
+            data["duration_s"] = _integer(data.get("duration_s"))
+            for field in ("url_expire_at", "first_seen", "last_seen"):
+                data[field] = _number(data.get(field)) or 0.0
+            data["qq_cover"] = qq_cover
+            out[item_id] = data
+        return out
 
     def qq_cover_of(self, item_id: str) -> str | None:
         """已缓存的 QQ 封面：None = 还没查过，'' = 查过但没有。"""
@@ -228,12 +244,16 @@ class Storage:
         values = pipe.execute()
         return dict(zip(item_ids, values))
 
+    def known_song(self, item_id: str) -> bool:
+        """歌曲元信息还在不在（收藏/喜欢列表按它取显示用的字段）。"""
+        return bool(self.client.exists(self._song_key(item_id)))
+
     def set_qq_cover(self, item_id: str, url: str | None) -> None:
         """写封面缓存；url 为 None 表示查过但没找到（存空串）。"""
         self.client.set(self._cover_key(item_id), _text(url))
 
     def covers_to_lookup(self, item_ids: list[str]) -> list[str]:
-        """哪些歌还没查过 QQ 封面（库里没有的歌不算，和以前的 SQL 语义一致）。"""
+        """哪些歌还没查过 QQ 封面（库里没有的歌不算）。"""
         if not item_ids:
             return []
         pipe = self.client.pipeline(transaction=False)
@@ -263,6 +283,8 @@ class Storage:
         if not stale:
             return 0
         referenced = self._referenced_song_ids()
+        if referenced is None:
+            return 0  # 引用清单没读全就别删：宁可多留，也不能把收藏里的歌裁没了
         victims = [song_id for song_id in stale if song_id not in referenced]
         if not victims:
             return 0
@@ -273,18 +295,22 @@ class Storage:
         pipe.execute()
         return len(victims)
 
-    def _referenced_song_ids(self) -> set[str]:
-        """所有用户收藏 / 喜欢 / 历史里出现过的歌曲 id。"""
+    def _referenced_song_ids(self) -> set[str] | None:
+        """所有用户收藏 / 喜欢 / 历史里出现过的歌曲 id。
+
+        读不全就返回 ``None``（调用方跳过这轮裁剪）：返回空集合会被当成
+        「没人引用」，Redis 抖一下就把收藏里的歌删光了。
+        """
         referenced: set[str] = set()
         try:
             keys = list(self.client.scan_iter(match=self._k("lib", "*"), count=200))
         except Exception:
-            return referenced
+            return None
         for key in keys:
             try:
                 referenced.update(self.client.zrange(key, 0, -1))
             except Exception:
-                continue
+                return None
         return referenced
 
     # ---------------------------------------------------------------- history
@@ -427,7 +453,13 @@ class Storage:
     def touch_device(self, device_id: str) -> None:
         self.client.hset(self._k("device", device_id), "last_seen", repr(time.time()))
 
-    def list_devices(self) -> list[dict[str, Any]]:
+    def list_devices(self, user_id: str | None = None, *, own_only: bool = True) -> list[dict[str, Any]]:
+        """设备列表。
+
+        ``own_only`` 时只给「属于这个账户的 + 没有账户的孤儿设备」——否则任何一台
+        配对成功的设备都能看到全站账户名单（``username`` 也在里面）。
+        ``own_only=False`` 只在鉴权关闭（没有账户概念）时用。
+        """
         device_ids = self.client.zrange(self._devices_key, 0, -1)
         if not device_ids:
             return []
@@ -440,8 +472,11 @@ class Storage:
             if not row:
                 continue
             device = self._device_row(row)
+            owner = device.get("user_id")
+            if own_only and owner and owner != user_id:
+                continue
             device.pop("key_hash", None)  # 哈希本身别发出去
-            device["username"] = self._username_of(device.get("user_id"))
+            device["username"] = self._username_of(owner)
             items.append(device)
         return items
 
@@ -451,10 +486,16 @@ class Storage:
         self.client.hset(self._k("device", device_id), "revoked", "1")
         return True
 
-    def delete_device(self, device_id: str) -> bool:
-        """直接从库里删掉这台设备，它的 key 立刻失效（查不到哈希了）。"""
+    def delete_device(self, device_id: str, user_id: str | None = None, *, own_only: bool = True) -> bool:
+        """直接从库里删掉这台设备，它的 key 立刻失效（查不到哈希了）。
+
+        ``own_only`` 时只允许删本账户（或无主）的设备，防止跨账户吊销。
+        """
         row = self._device(device_id)
         if row is None:
+            return False
+        owner = row.get("user_id")
+        if own_only and owner and owner != user_id:
             return False
         pipe = self.client.pipeline(transaction=False)
         pipe.delete(self._k("device", device_id))
@@ -483,7 +524,7 @@ class Storage:
             elif revoked and row.get("revoked"):
                 victims.append(device_id)
         for device_id in victims:
-            self.delete_device(device_id)
+            self.delete_device(device_id, own_only=False)  # 清理是全库的，不做归属过滤
         return len(victims)
 
     # ------------------------------------------------------------------ users
@@ -632,22 +673,27 @@ class Storage:
 
     # ---------------------------------------------------------------- library
     def add_to_library(self, user_id: str, kind: str, song_id: str) -> None:
-        """喜欢/收藏是幂等的；历史会累加播放次数并刷新时间。"""
+        """喜欢/收藏是幂等的；历史会累加播放次数并刷新时间。
+
+        读-改-写要整段上锁：并发播放同一首歌时，两边都读到旧的 ``play_count``
+        会让计数少加一次。
+        """
         now = time.time()
         key = self._lib_key(user_id, kind)
         meta_key = self._lib_meta_key(user_id, kind)
-        info = _json_dict(self.client.hget(meta_key, song_id))
-        if kind == "history":
-            created = _number(info.get("created_at")) or now
-            play_count = (_integer(info.get("play_count")) or 0) + 1
-        else:
-            if info:
-                return  # 已经喜欢/收藏过了，时间不动
-            created, play_count = now, 1
-        pipe = self.client.pipeline(transaction=False)
-        pipe.zadd(key, {song_id: now})
-        pipe.hset(meta_key, song_id, json.dumps({"created_at": created, "play_count": play_count}))
-        pipe.execute()
+        with self._lib_lock:
+            info = _json_dict(self.client.hget(meta_key, song_id))
+            if kind == "history":
+                created = _number(info.get("created_at")) or now
+                play_count = (_integer(info.get("play_count")) or 0) + 1
+            else:
+                if info:
+                    return  # 已经喜欢/收藏过了，时间不动
+                created, play_count = now, 1
+            pipe = self.client.pipeline(transaction=False)
+            pipe.zadd(key, {song_id: now})
+            pipe.hset(meta_key, song_id, json.dumps({"created_at": created, "play_count": play_count}))
+            pipe.execute()
 
     def remove_from_library(self, user_id: str, kind: str, song_id: str) -> bool:
         pipe = self.client.pipeline(transaction=False)
@@ -723,13 +769,17 @@ class Storage:
         return self._k("sc", digest)
 
     def save_search_cache(self, key: tuple[str, tuple[str, ...]], items: list[dict[str, Any]]) -> None:
-        """把一次搜索的结果存进 Redis（默认 24 小时），重启后也能直接命中。"""
+        """把一次搜索的结果存进 Redis（默认 24 小时），重启后也能直接命中。
+
+        ``TONICUISC_SEARCH_TTL <= 0`` 表示**不缓存**：直接把旧的踹掉，
+        否则「不带过期」的键会被当成永远新鲜，``refresh=true`` 就再也搜不动了。
+        """
         ttl = int(SETTINGS.search_ttl or 0)
+        if ttl <= 0:
+            self.client.delete(self._cache_key(key))
+            return
         payload = json.dumps(items, ensure_ascii=False)
-        if ttl > 0:
-            self.client.set(self._cache_key(key), payload, ex=ttl)
-        else:
-            self.client.set(self._cache_key(key), payload)
+        self.client.set(self._cache_key(key), payload, ex=ttl)
 
     def load_search_cache(self, key: tuple[str, tuple[str, ...]]) -> list[dict[str, Any]] | None:
         raw = self.client.get(self._cache_key(key))
@@ -751,8 +801,10 @@ class Storage:
         ttl = int(self.client.ttl(self._cache_key(key)))
         if ttl == -2:
             return None  # 没有这条缓存
-        if ttl < 0:
-            return 0.0  # 没设过期时间，当作刚写的
+        if ttl == -1:
+            # 键在、但没设过期时间（旧版本写过 / TTL 配成过 0）：算不出年龄，
+            # 当作「不知道多新」，让调用方按过期处理去重搜
+            return None
         return max(int(SETTINGS.search_ttl) - ttl, 0)
 
     def drop_search_cache(self) -> int:

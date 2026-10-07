@@ -14,6 +14,7 @@ GET /api/download/{item_id}        附件下载
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from collections.abc import Iterator
 from contextlib import asynccontextmanager
@@ -54,6 +55,11 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        # 先收封面线程池（否则退出要等队列里几百个查询跑完），再关 Redis
+        try:
+            get_service().close_cover_pool()
+        except Exception:
+            pass
         redis_runtime.shutdown_redis()
 
 
@@ -158,14 +164,19 @@ def _parse_range(header: str | None, size: int) -> tuple[int, int] | None:
         return None
     spec = header[len("bytes=") :].split(",")[0].strip()
     start_s, _, end_s = spec.partition("-")
-    if not start_s:  # suffix range: bytes=-500
-        length = int(end_s or 0)
-        if length <= 0:
-            return None
-        return max(size - length, 0), size - 1
-    start = int(start_s)
-    end = int(end_s) if end_s else size - 1
-    if start >= size:
+    try:
+        if not start_s:  # suffix range: bytes=-500
+            length = int(end_s or 0)
+            if length <= 0:
+                return None
+            return max(size - length, 0), size - 1
+        start = int(start_s)
+        end = int(end_s) if end_s else size - 1
+    except ValueError:
+        # RFC 7233：Range 头是垃圾就当没带（返回整个文件），别让 int() 炸成 500
+        return None
+    if start >= size or end < start:
+        # 起点超出文件、或 start > end（会算出负的 Content-Length）→ 416
         raise HTTPException(status_code=416, detail="Range not satisfiable", headers={"Content-Range": f"bytes */{size}"})
     return start, min(end, size - 1)
 
@@ -198,7 +209,6 @@ async def health() -> dict:
     return {
         "status": "ok",
         "sources": resolve_sources(SETTINGS.sources),
-        "work_dir": str(SETTINGS.work_dir),
         "database": service.storage.describe(),
         "redis_managed": bool(getattr(redis_runtime.RUNTIME, "started_by_us", False)),
         "auth": "enabled" if auth.enabled else "disabled",
@@ -260,10 +270,23 @@ async def me(request: Request) -> dict:
     }
 
 
+#: ``/login`` 的响应头：这个页面能输密码，不许被别的站点 iframe（点击劫持）
+LOGIN_HEADERS = {
+    "Cache-Control": "no-store",
+    "Content-Security-Policy": (
+        "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; "
+        "frame-ancestors 'none'; base-uri 'none'; img-src 'none'"
+    ),
+    "X-Frame-Options": "DENY",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+}
+
+
 @app.get("/login", response_class=HTMLResponse)
 async def login_page() -> HTMLResponse:
     """设备码登录页（浏览器打开）。"""
-    return HTMLResponse(weblogin.code_step(), headers={"Cache-Control": "no-store"})
+    return HTMLResponse(weblogin.code_step(), headers=LOGIN_HEADERS)
 
 
 @app.post("/login", response_class=HTMLResponse)
@@ -271,19 +294,20 @@ async def login_submit(request: Request) -> HTMLResponse:
     source = client_key(request)
     allowed, retry_after = login_limiter.check(source)
     if not allowed:
-        return HTMLResponse(weblogin.rate_limited_step(retry_after), status_code=429, headers={"Cache-Control": "no-store"})
+        return HTMLResponse(weblogin.rate_limited_step(retry_after), status_code=429, headers=LOGIN_HEADERS)
     raw = (await request.body()).decode("utf-8", "ignore")
     form = {key: values[0] for key, values in parse_qs(raw).items() if values}
     page = await asyncio.to_thread(weblogin.render, form, get_auth(), source, failed_login_guard)
-    return HTMLResponse(page, headers={"Cache-Control": "no-store"})
+    return HTMLResponse(page, headers=LOGIN_HEADERS)
 
 
 @app.get("/api/devices")
 async def devices(request: Request) -> dict:
-    items = await asyncio.to_thread(get_service().storage.list_devices)
+    """本账户的设备；没关联账户的孤儿设备也留着（旧版配对流程的残留要能清理）。"""
+    user_id = _request_user_id(request)
+    items = await asyncio.to_thread(get_service().storage.list_devices, user_id)
     current = getattr(request.state, "device", {}) or {}
     for item in items:
-        # SQLite 里是 0/1，客户端按布尔判断，统一成 bool
         item["revoked"] = bool(item.get("revoked"))
         item["current"] = item["id"] == current.get("id")
         item["blocked"] = bool(item.get("revoked")) or not item.get("user_id")
@@ -291,9 +315,14 @@ async def devices(request: Request) -> dict:
 
 
 @app.delete("/api/devices/{device_id}")
-async def revoke_device(device_id: str) -> dict:
-    """吊销设备 = 直接从库里删掉，它的 key 立刻失效，列表里也不再出现。"""
-    ok = await asyncio.to_thread(get_service().storage.delete_device, device_id)
+async def revoke_device(device_id: str, request: Request) -> dict:
+    """吊销设备 = 直接从库里删掉，它的 key 立刻失效，列表里也不再出现。
+
+    只能删本账户的设备（外加没有账户的孤儿设备），否则任何一台配对成功的设备
+    都能把别人的设备踢下线。
+    """
+    user_id = _request_user_id(request)
+    ok = await asyncio.to_thread(get_service().storage.delete_device, device_id, user_id)
     if not ok:
         raise HTTPException(status_code=404, detail="设备不存在")
     print(f"[device] 已吊销设备 {device_id[:8]}…", flush=True)
@@ -307,13 +336,30 @@ class LibraryAddRequest(BaseModel):
     song_id: str = Field(..., min_length=3, max_length=200)
 
 
-def current_user(request: Request) -> str:
-    """从已校验的设备里取账户；设备没绑账户就没法用收藏类功能。"""
+#: 鉴权关闭（``TONICUISC_AUTH=0``）时收藏数据归到这个「本地」账户下，
+#: 不然中间件根本不写 ``request.state.device``，收藏类接口会一律 400。
+LOCAL_USER_ID = "local"
+
+
+def _request_user_id(request: Request) -> str | None:
+    """当前请求所属账户；没绑账户（孤儿设备 / 鉴权关闭）返回 None。"""
     device = getattr(request.state, "device", {}) or {}
     user_id = device.get("user_id")
-    if not user_id:
-        raise HTTPException(status_code=400, detail="这台设备没有关联账户，请重新登录")
-    return str(user_id)
+    return str(user_id) if user_id else None
+
+
+def current_user(request: Request) -> str:
+    """从已校验的设备里取账户；设备没绑账户就没法用收藏类功能。
+
+    鉴权关闭时没有「设备」概念，退到 :data:`LOCAL_USER_ID`，
+    保证 ``TONICUISC_AUTH=0`` 下收藏接口也能用（README 承诺过「任何人可调」）。
+    """
+    user_id = _request_user_id(request)
+    if user_id:
+        return user_id
+    if not get_auth().enabled:
+        return LOCAL_USER_ID
+    raise HTTPException(status_code=400, detail="这台设备没有关联账户，请重新登录")
 
 
 def _kind_or_400(kind: str) -> str:
@@ -346,7 +392,12 @@ async def library_list(kind: str, request: Request, limit: int = Query(200, ge=1
 async def library_add(kind: str, payload: LibraryAddRequest, request: Request) -> dict:
     user_id = current_user(request)
     store = get_service().storage
-    await asyncio.to_thread(store.add_to_library, user_id, _kind_or_400(kind), payload.song_id)
+    _kind_or_400(kind)
+    if not await asyncio.to_thread(store.known_song, payload.song_id):
+        # 歌曲记录不在库里就没法显示（列表按 songs 取元信息），
+        # 收下只会在列表里留一个空洞，还让 counts 和条数对不上
+        raise HTTPException(status_code=404, detail="歌曲不存在或已过期，请重新搜索")
+    await asyncio.to_thread(store.add_to_library, user_id, kind, payload.song_id)
     counts = await asyncio.to_thread(store.library_counts, user_id)
     return {"kind": kind, "song_id": payload.song_id, "counts": counts}
 
@@ -380,7 +431,9 @@ async def artist(
         return await asyncio.to_thread(get_service().artist, name, source_list, limit)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    except Exception as exc:
+    except Exception as exc:  # musicdl network failures
+        # 打一行真实原因：不然 AttributeError 这类 bug 也会被包装成「搜索失败 502」，很难查
+        print(f"[error] /api/artist 失败 {type(exc).__name__}: {exc}", flush=True)
         raise HTTPException(status_code=502, detail=f"搜索失败: {exc}")
 
 
@@ -418,6 +471,7 @@ async def search(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:  # musicdl network failures
+        print(f"[error] /api/search 失败 {type(exc).__name__}: {exc}", flush=True)
         raise HTTPException(status_code=502, detail=f"搜索失败: {exc}")
     total = time.perf_counter() - started
     print(f"[timing] /api/search 全部结束 {total:.2f}s", flush=True)
@@ -488,7 +542,14 @@ async def stream(item_id: str, request: Request) -> StreamingResponse:
             headers={"Accept-Ranges": "none"},
         )
 
-    size = path.stat().st_size
+    size = 0
+    try:
+        size = path.stat().st_size
+    except OSError:
+        # 文件刚被缓存清理掉：当作过期，让客户端重新搜索，而不是 500
+        raise HTTPException(status_code=404, detail="歌曲不存在或已过期，请重新搜索")
+    if size <= 0:
+        raise HTTPException(status_code=404, detail="缓存文件为空，请重新搜索")
     media_type = MIME_TYPES.get(path.suffix.lstrip(".").lower(), "application/octet-stream")
     rng = _parse_range(request.headers.get("range"), size)
     if rng is None:
@@ -519,7 +580,11 @@ async def download(item_id: str) -> FileResponse:
         filename = f"{item['name']} - {item['singers']}.{item['ext']}"
     except SongNotFound:
         filename = path.name
-    stem = Path(filename).stem.encode("ascii", "ignore").decode().strip(" .-_")
+    except Exception:  # 从 Redis 重建的对象缺字段时，别让整个下载 500
+        filename = path.name
+    # ascii 那半边只能留安全字符：\r \n " ; 都是 ASCII，留着会把响应头截断/注入
+    stem = Path(filename).stem.encode("ascii", "ignore").decode()
+    stem = re.sub(r'[\r\n";\\]', " ", stem).strip(" .-_")
     ascii_name = f"{stem}{path.suffix}" if any(ch.isalnum() for ch in stem) else f"tonicuisc{path.suffix}"
     disposition = f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(filename)}"
     return FileResponse(

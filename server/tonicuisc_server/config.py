@@ -47,15 +47,22 @@ def _env_list(name: str, default: list[str]) -> list[str]:
 
 
 def resolve_sources(aliases: list[str]) -> list[str]:
-    """Translate short aliases (``migu``) into musicdl class names."""
+    """Translate short aliases (``migu``) into musicdl class names.
+
+    别名（大小写不敏感）和类名（``MiguMusicClient``）都认——以前只在前半段认类名，
+    紧接着又用「小写别名表」判 unknown，于是传类名会被接受后再抛一次 ValueError。
+    """
     resolved: list[str] = []
+    unknown: list[str] = []
+    class_names = set(SOURCE_ALIASES.values())
     for alias in aliases:
         key = alias.strip().lower()
         if key in SOURCE_ALIASES:
             resolved.append(SOURCE_ALIASES[key])
-        elif alias in SOURCE_ALIASES.values():
-            resolved.append(alias)
-    unknown = [a for a in aliases if a.strip().lower() not in SOURCE_ALIASES]
+        elif alias.strip() in class_names:
+            resolved.append(alias.strip())
+        else:
+            unknown.append(alias)
     if unknown:
         raise ValueError(f"unsupported source(s): {', '.join(unknown)}; supported: {', '.join(SOURCE_ALIASES)}")
     return resolved

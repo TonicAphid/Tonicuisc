@@ -77,6 +77,9 @@ class _ProfilePageState extends State<ProfilePage> {
   }
 
   Future<void> _revoke(Map<String, dynamic> device) async {
+    // 在任何 await 之前把 messenger 抓出来：对话框期间页面可能被关掉，
+    // 之后再 ScaffoldMessenger.of(context) 会拿到一个已失活的 element 直接抛
+    final messenger = ScaffoldMessenger.of(context);
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
@@ -88,9 +91,8 @@ class _ProfilePageState extends State<ProfilePage> {
         ],
       ),
     );
-    if (confirmed != true) return;
+    if (confirmed != true || !mounted) return;
     final wasCurrent = device['current'] == true;
-    final messenger = ScaffoldMessenger.of(context);
     try {
       await widget.api.revokeDevice('${device['id']}');
       if (wasCurrent) {

@@ -125,6 +125,12 @@ class ApiClient {
         if (apiKey != null && apiKey!.isNotEmpty) 'X-API-Key': apiKey!,
       };
 
+  /// 播放器直接发起的请求（`/api/stream` 回退流、下载）**必须**带上的头。
+  ///
+  /// just_audio 自己发 HTTP，不走 [ApiClient] 的方法；漏了 `X-API-Key`，
+  /// 服务端开着鉴权时回退流就是 401，整首歌放不出来。
+  Map<String, String> get streamHeaders => _headers;
+
   static String normalizeBaseUrl(String value) => value.trim().replaceAll(RegExp(r'/+$'), '');
 
   /// 设备码登录第一步：把 App 生成的设备码登记到服务端。

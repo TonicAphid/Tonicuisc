@@ -206,7 +206,7 @@ def test_first_page_accepts_short_cache(service: MusicService, monkeypatch) -> N
 
     calls: list[str] = []
 
-    def fake_sources(keyword, wanted, limit):
+    def fake_sources(keyword, wanted, limit, **_):  # record= 之类的新参数不影响这里
         calls.append(keyword)  # 只有后台刷新会走到这里
         time.sleep(0.3)
         return [song_to_item(_song(f"new-{i}")) for i in range(15)]

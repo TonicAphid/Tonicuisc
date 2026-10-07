@@ -93,7 +93,11 @@ class _ArtistPageState extends State<ArtistPage> {
     try {
       await widget.library.toggle('like', song.id);
     } catch (err) {
-      messenger.showSnackBar(SnackBar(content: Text('操作失败：$err')));
+      if (err is UnauthorizedException && widget.onUnauthorized != null) {
+        await widget.onUnauthorized!('$err');
+        return;
+      }
+      if (mounted) messenger.showSnackBar(SnackBar(content: Text('操作失败：$err')));
     }
   }
 

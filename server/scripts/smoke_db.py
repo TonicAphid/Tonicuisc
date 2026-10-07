@@ -6,6 +6,11 @@
 
 from __future__ import annotations
 
+import os
+
+# 见 scripts/smoke_api.py：脚本不带 X-API-Key，默认又开着鉴权会全 401。
+os.environ.setdefault("TONICUISC_AUTH", "0")
+
 from fastapi.testclient import TestClient
 
 from tonicuisc_server.main import app, get_service

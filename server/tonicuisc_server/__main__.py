@@ -9,7 +9,7 @@
     python -m tonicuisc_server revoke <device_id> 吊销某台设备
     python -m tonicuisc_server cleanup            清理无账户/已吊销的设备记录
     python -m tonicuisc_server redis              看一眼 Redis 状态（会按需拉起）
-    python -m tonicuisc_server clear-cache [关键词] 清掉搜索结果缓存
+    python -m tonicuisc_server clear-cache          清掉搜索结果缓存
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ def _format_time(value: float | None) -> str:
 
 
 def _devices_command(store) -> int:
-    devices = store.list_devices()
+    devices = store.list_devices(own_only=False)  # 本机管理命令：看全库，不按账户过滤
     if not devices:
         print("还没有已登录设备")
         return 0

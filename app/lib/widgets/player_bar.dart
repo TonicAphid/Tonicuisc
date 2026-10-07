@@ -8,11 +8,20 @@ import 'song_avatar.dart';
 
 /// 底部播放条：播放/暂停、进度、拖动跳转；点一下展开全屏播放页。
 class PlayerBar extends StatelessWidget {
-  const PlayerBar({super.key, required this.controller, required this.api, required this.library});
+  const PlayerBar({
+    super.key,
+    required this.controller,
+    required this.api,
+    required this.library,
+    this.onUnauthorized,
+  });
 
   final PlayerController controller;
   final ApiClient api;
   final LibraryState library;
+
+  /// 401 交给外壳处理；不给就只在播放页里弹提示。
+  final Future<void> Function(String message)? onUnauthorized;
 
   @override
   Widget build(BuildContext context) {
@@ -42,7 +51,13 @@ class PlayerBar extends StatelessWidget {
                     children: [
                       Expanded(
                         child: InkWell(
-                          onTap: () => NowPlayingPage.open(context, controller, api, library),
+                          onTap: () => NowPlayingPage.open(
+                            context,
+                            controller,
+                            api,
+                            library,
+                            onUnauthorized: onUnauthorized,
+                          ),
                           child: Row(
                             children: [
                               SongAvatar(song: song, size: 40, radius: 6),

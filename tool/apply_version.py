@@ -6,7 +6,8 @@
 
 会写两处：
 * app/lib/version.dart  —— App 界面上显示的版本（可以把 fix 带上）
-* app/pubspec.yaml      —— 只能放合法 semver，fix 用 build number 表达
+* app/pubspec.yaml      —— 只能放合法 semver（x.y.z+build），build number 是
+                            传进来的 --build（CI 里是 run_number），fix 不进 pubspec
 """
 
 from __future__ import annotations
@@ -20,8 +21,10 @@ ROOT = Path(__file__).resolve().parent.parent
 VERSION_FILE = ROOT / "app" / "lib" / "version.dart"
 PUBSPEC = ROOT / "app" / "pubspec.yaml"
 
-#: v1 / v1.2 / v1.2.3，后面可以跟 fix（允许空格、-、_、. 分隔）
-VERSION_RE = re.compile(r"[vV]?(\d+)\.(\d+)(?:\.(\d+))?(?:[\s\-_.]*([fF][iI][xX]))?")
+#: v1 / v1.2 / v1.2.3，后面可以跟 fix（允许空格、-、_、. 分隔）。
+#: **必须带 v**：不带的话提交信息里「依赖升到 1.2.3」「python 3.11」就会被当成版本号。
+#: 本地手写也要带：python tool/apply_version.py v0.1.5 --build=3
+VERSION_RE = re.compile(r"[vV](\d+)\.(\d+)(?:\.(\d+))?(?:[\s\-_.]*([fF][iI][xX]))?")
 
 
 def parse_version(text: str) -> tuple[str, str] | None:

@@ -5,6 +5,7 @@ musicdl 是懒加载的，这样没装 musicdl 时 ``/api/health`` 也能用。
 
 from __future__ import annotations
 
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import TYPE_CHECKING, Any
@@ -12,18 +13,17 @@ from typing import TYPE_CHECKING, Any
 from .config import SETTINGS, resolve_sources
 from .items import timing_log
 
-if TYPE_CHECKING:  # 只是给读代码/类型检查看的，宿主 MusicService 提供这些属性
-    from threading import Lock
-
-
 class SourceMixin:
-    """宿主需要提供：``_client``、``_client_lock``、``_quiet``、``work_dir``。"""
+    """宿主需要提供：``_client``、``_client_lock``、``_quiet``、``work_dir``、
+    ``_source_locks``、``_locks_guard``。"""
 
     if TYPE_CHECKING:
         _client: Any
         _client_lock: Any
         _quiet: Any
         work_dir: Any
+        _source_locks: dict[str, Any]
+        _locks_guard: Any
 
     # ------------------------------------------------------------------ client
     @property
@@ -84,6 +84,15 @@ class SourceMixin:
         except Exception:
             pass
 
+    def _source_lock(self, name: str) -> Any:
+        """每个音源一把锁：``search_size_per_source`` 是写在**共享 client 对象**上的。
+
+        不同音源之间依然并行（这是主要的并行度），但同一个音源上，
+        两次不同 ``need`` 的搜索不能同时改这两个字段，否则抓取量和请求数会互相覆盖。
+        """
+        with self._locks_guard:
+            return self._source_locks.setdefault(name, threading.Lock())
+
     def _search_selected(self, keyword: str, wanted: set[str], need: int | None = None) -> dict[str, list[Any]]:
         """只请求被选中的音源。
 
@@ -112,20 +121,24 @@ class SourceMixin:
 
         def run(name: str) -> tuple[str, list[Any], float]:
             source_client = clients[name]
-            self._tune_fetch_size(source_client, per_source)
-            started = time.perf_counter()
-            songs = (
-                source_client.search(
-                    keyword=keyword,
-                    num_threadings=threadings.get(name, SETTINGS.search_threads),
-                    request_overrides=overrides.get(name, {}),
-                    rule=rules.get(name, {}),
-                    # 传一个禁用输出的 Progress，musicdl 就不会再打印进度条
-                    main_process_context=self._quiet_progress(),
+            # 「改抓取量 → 发请求」整段锁住：抓取量是写在共享 client 上的，
+            # 并发搜索各写各的会让 musicdl 按错的尺寸去分页
+            with self._source_lock(name):
+                self._tune_fetch_size(source_client, per_source)
+                started = time.perf_counter()
+                songs = (
+                    source_client.search(
+                        keyword=keyword,
+                        num_threadings=threadings.get(name, SETTINGS.search_threads),
+                        request_overrides=overrides.get(name, {}),
+                        rule=rules.get(name, {}),
+                        # 传一个禁用输出的 Progress，musicdl 就不会再打印进度条
+                        main_process_context=self._quiet_progress(),
+                    )
+                    or []
                 )
-                or []
-            )
-            return name, songs, time.perf_counter() - started
+                elapsed = time.perf_counter() - started
+            return name, songs, elapsed
 
         timing_log(
             f"音源搜索: {keyword!r} 每源 {per_source} 条 / 每页 {per_page} 条 "

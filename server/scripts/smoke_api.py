@@ -6,8 +6,14 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import time
+
+# 冒烟脚本自己发请求、不带 X-API-Key，而默认配置开着鉴权（TONICUISC_AUTH=1），
+# 不先关掉的话 /api/search 会一律 401、断言全挂。必须在 import 服务端**之前**设，
+# 因为 config.SETTINGS 在 import 时就定型了。只影响本脚本进程。
+os.environ.setdefault("TONICUISC_AUTH", "0")
 
 from fastapi.testclient import TestClient
 

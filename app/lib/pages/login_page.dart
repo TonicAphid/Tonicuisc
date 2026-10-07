@@ -291,7 +291,8 @@ class _LoginPageState extends State<LoginPage> {
           Text(
             '登录地址：$_loginUrl\n'
             '设备码 10 分钟内有效。批准后这台设备会拿到一把专属密钥，'
-            '只存在系统安全存储里，界面上看不到，服务端也只保存它的哈希。',
+            '存进系统安全存储（Windows/Linux 上会额外留一份本机明文副本，'
+            '免得每次启动都要重新配对；移动端不留），服务端只保存它的哈希。',
             style: theme.textTheme.bodySmall,
           ),
         ],

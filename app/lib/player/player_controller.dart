@@ -28,35 +28,46 @@ enum PlayMode {
 /// - 点歌优先用音源直链，失败再回退服务端代理流。
 class PlayerController extends ChangeNotifier {
   PlayerController() {
-    _player.positionStream.listen((value) {
-      _position = value;
-      notifyListeners();
-    });
-    _player.durationStream.listen((value) {
-      _duration = value;
-      notifyListeners();
-    });
-    _player.playerStateStream.listen((value) {
-      _playing = value.playing;
-      if (value.processingState == ProcessingState.completed) {
-        _playing = false;
-        unawaited(_handleCompleted());
-      }
-      notifyListeners();
-    });
-    _player.playbackEventStream.listen(
-      (_) {},
-      onError: (Object error, StackTrace stack) => _handlePlaybackError(error),
-    );
+    // 这些订阅必须存下来：dispose 时要取消，否则播放器一关，
+    // 流回调还可能在 ChangeNotifier 已经销毁之后调 notifyListeners()（debug 下直接断言崩溃）
+    _subscriptions.addAll([
+      _player.positionStream.listen((value) {
+        _position = value;
+        _notify();
+      }),
+      _player.durationStream.listen((value) {
+        _duration = value;
+        _notify();
+      }),
+      _player.playerStateStream.listen((value) {
+        _playing = value.playing;
+        if (value.processingState == ProcessingState.completed) {
+          _playing = false;
+          unawaited(_handleCompleted());
+        }
+        _notify();
+      }),
+      _player.playbackEventStream.listen(
+        (_) {},
+        onError: (Object error, StackTrace stack) => unawaited(_handlePlaybackError(error)),
+      ),
+    ]);
   }
 
   final AudioPlayer _player = AudioPlayer();
   final Random _random = Random();
+  final List<StreamSubscription<dynamic>> _subscriptions = <StreamSubscription<dynamic>>[];
 
   List<Song> _queue = const [];
   int _index = -1;
   PlayMode _mode = PlayMode.loopAll;
   ApiClient? _api;
+
+  /// 点歌代次：每点一次 +1。上一次点歌还没加载完就被下一次接管时，
+  /// 旧的那次必须直接退出，否则它会把过期的音频塞进播放器（播出来的和列表高亮不是同一首）。
+  int _generation = 0;
+
+  bool _disposed = false;
 
   Duration _position = Duration.zero;
   Duration? _duration;
@@ -65,6 +76,12 @@ class PlayerController extends ChangeNotifier {
   String? _error;
   bool _usingDirect = false;
   Uri? _fallbackStream;
+
+  /// 销毁之后不再通知（异步的点歌流程可能在页面已销毁后才跑完）。
+  void _notify() {
+    if (_disposed) return;
+    notifyListeners();
+  }
 
   // ------------------------------------------------------------------ 状态
   List<Song> get queue => List.unmodifiable(_queue);
@@ -96,22 +113,25 @@ class PlayerController extends ChangeNotifier {
     final song = current;
     final api = _api;
     if (song == null || api == null) return;
+    final gen = ++_generation;
     _error = null;
     _duration = null;
     _position = Duration.zero;
     _loading = true;
-    notifyListeners();
+    _notify();
     try {
       await _start(song, api);
     } catch (err) {
+      if (gen != _generation) return; // 已经被下一次点歌接管，别把上一首的错误报到这一首上
       _error = '播放失败：$err';
       _playing = false;
       _loading = false;
-      notifyListeners();
+      _notify();
       return;
     }
+    if (gen != _generation) return; // 加载期间用户又点了一首：让新的那次说了算，这里不许 resume
     _loading = false;
-    notifyListeners();
+    _notify();
     unawaited(_reportPlay(api, song.id)); // 播放历史，失败不影响播放
     _resume();
   }
@@ -137,7 +157,10 @@ class PlayerController extends ChangeNotifier {
     } catch (_) {
       // 直链不可用（过期 / 需要额外鉴权）时走服务端代理
     }
-    await _player.setAudioSource(AudioSource.uri(_fallbackStream!, tag: _mediaItem(song)));
+    // 回退到服务端代理流：必须带上 X-API-Key，否则服务端开着鉴权时就是 401
+    await _player.setAudioSource(
+      AudioSource.uri(_fallbackStream!, headers: api.streamHeaders, tag: _mediaItem(song)),
+    );
     _usingDirect = false;
   }
 
@@ -147,7 +170,7 @@ class PlayerController extends ChangeNotifier {
       _player.play().catchError((Object error) {
         _error = '播放失败：$error';
         _playing = false;
-        notifyListeners();
+        _notify();
       }),
     );
   }
@@ -156,7 +179,13 @@ class PlayerController extends ChangeNotifier {
   /// 下一个：手动点会循环，自动播完在「顺序播放」模式下会停下。
   int? _nextIndex({required bool auto}) {
     if (_queue.isEmpty) return null;
-    if (_mode == PlayMode.shuffle && _queue.length > 1) {
+    if (_queue.length == 1) {
+      // 队列只有一首：随机播放没有「下一个」，但播完还是该重头再来
+      // （以前这里会 fall through，随机模式下自动切歌直接停住）
+      if (auto && _mode == PlayMode.order) return null;
+      return 0;
+    }
+    if (_mode == PlayMode.shuffle) {
       var next = _index;
       while (next == _index) {
         next = _random.nextInt(_queue.length);
@@ -203,7 +232,7 @@ class PlayerController extends ChangeNotifier {
     if (target == null) {
       await _player.pause();
       await _player.seek(Duration.zero);
-      notifyListeners();
+      _notify();
       return;
     }
     _index = target;
@@ -212,7 +241,7 @@ class PlayerController extends ChangeNotifier {
 
   void setMode(PlayMode mode) {
     _mode = mode;
-    notifyListeners();
+    _notify();
   }
 
   PlayMode cycleMode() {
@@ -236,7 +265,7 @@ class PlayerController extends ChangeNotifier {
       return;
     }
     if (index < _index) _index -= 1;
-    notifyListeners();
+    _notify();
   }
 
   Future<void> toggle() async {
@@ -248,24 +277,54 @@ class PlayerController extends ChangeNotifier {
     }
   }
 
-  Future<void> seek(Duration position) => _player.seek(position);
+  Future<void> seek(Duration position) {
+    // 乐观先把滑块挪过去：松手到 positionStream 真的跳过去之间有几帧，
+    // 不然滑块会「先跳过去、又倒着退回来」才落位
+    _position = position;
+    _notify();
+    return _player.seek(position);
+  }
+
+  /// 换服务器 / 重新登录 / 退出登录之后调用：新的请求要用新的地址和 key。
+  ///
+  /// 不调的话，播放器里存的还是旧 `_api`——回退流会打到旧地址、播放历史会用旧 key 发。
+  /// 已经在播的这一首不动（音频是播放器自己在读，和 ApiClient 无关）。
+  void updateApi(ApiClient api) {
+    _api = api;
+    _fallbackStream = null; // 旧地址的流不能再拿来当回退
+    _usingDirect = false;
+    _notify();
+  }
 
   void stop() {
-    _player.stop();
+    ++_generation; // 让还在飞的那次点歌别在 stop 之后又 resume 起来
+    unawaited(_player.stop());
     _queue = const [];
     _index = -1;
     _playing = false;
-    notifyListeners();
+    _loading = false;
+    _error = null;
+    _position = Duration.zero;
+    _duration = null;
+    _usingDirect = false;
+    _fallbackStream = null;
+    _notify();
   }
 
   // ------------------------------------------------------------------ 出错
   Future<void> _handlePlaybackError(Object error) async {
-    final fallback = _fallbackStream;
     final song = current;
-    if (_usingDirect && fallback != null && song != null) {
+    if (song == null) return; // 队列空了（stop 过 / 还没点歌），没什么好回退的
+    final gen = _generation;
+    final fallback = _fallbackStream;
+    final api = _api;
+    if (_usingDirect && fallback != null && api != null) {
       _usingDirect = false;
       try {
-        await _player.setAudioSource(AudioSource.uri(fallback, tag: _mediaItem(song)));
+        await _player.setAudioSource(
+          AudioSource.uri(fallback, headers: api.streamHeaders, tag: _mediaItem(song)),
+        );
+        if (gen != _generation) return; // 期间已经切歌了，别把上一首接管过来
         _resume();
         return;
       } catch (err) {
@@ -274,8 +333,9 @@ class PlayerController extends ChangeNotifier {
     } else {
       _error = '播放失败：$error';
     }
+    if (gen != _generation) return;
     _playing = false;
-    notifyListeners();
+    _notify();
   }
 
   MediaItem _mediaItem(Song song) => MediaItem(
@@ -289,7 +349,12 @@ class PlayerController extends ChangeNotifier {
 
   @override
   void dispose() {
-    _player.dispose();
+    _disposed = true;
+    for (final subscription in _subscriptions) {
+      subscription.cancel();
+    }
+    _subscriptions.clear();
+    unawaited(_player.dispose());
     super.dispose();
   }
 }
