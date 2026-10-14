@@ -13,7 +13,7 @@ os.environ.setdefault("TONICUISC_AUTH", "0")
 
 from fastapi.testclient import TestClient
 
-from tonicuisc_server.main import app, get_service
+from tonicuisc_server.api import app, get_service
 from tonicuisc_server.storage import Storage
 
 

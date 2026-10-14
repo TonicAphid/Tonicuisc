@@ -13,7 +13,8 @@
 - 歌词 / 封面 / 附件下载
 - 持久化：Redis 存歌曲元信息、搜索历史、搜索结果缓存、**喜欢 / 收藏 / 播放历史**（按账户隔离），服务端启动时自动拉起 Redis、退出时自动关掉
 - 登录：**设备码流**（App 生成码，浏览器批准），每设备一把随机 API Key，服务端只存哈希
-- 安全：密码 PBKDF2-HMAC-SHA256、限速防爆破、按设备吊销
+- 安全：密码 PBKDF2-HMAC-SHA256、限速防爆破、按设备吊销、忘记密码用**恢复码**重置
+- 控制台：启动后底部常驻 `>` 提示符（像 MC 服务端），`h` 看命令、`q` 停服，设备 / 密码 / 恢复码 / 缓存都能直接操作
 
 **客户端**
 
@@ -29,17 +30,26 @@
 ```
 server/                            后端
   tonicuisc_server/
-    config.py                      环境变量、音源别名
-    service.py                     musicdl 封装：搜索 / 下载 / 缓存 / 边下边播
-    storage.py                     Redis：歌曲、搜索历史、搜索缓存、账户、设备、收藏列表
-    redis_runtime.py               Redis 的定位 / 自动下载 / 拉起 / 退出回收
-    auth.py                        账户、设备码登录、API Key 校验
-    ratelimit.py                   滑动窗口限速、密码错误锁定
-    weblogin.py                    /login 网页（无模板引擎、无 multipart 依赖）
-    main.py                        FastAPI 路由 + 鉴权中间件 + 访问日志
-    __main__.py                    python -m tonicuisc_server（含管理子命令）
+    core/                          基础设施：config（环境变量、音源别名）/ constants / errors /
+                                   logging / text / tls（证书、自签）/ runtime（线程池）
+    storage/                       Redis：base（连接、key）+ songs / history / users / devices /
+                                   device_requests / library / search_cache + redis_runtime
+    auth/                          鉴权：tokens（密码、API Key 哈希）/ codes（设备码、恢复码）/
+                                   accounts（注册、校验、找回）/ device_flow（设备码登录流）/
+                                   ratelimit（滑动窗口限速、防爆破）
+    services/                      业务：sources（只搜选中的音源）/ searching（搜索、分页）/
+                                   downloads（下载、缓存、边下边播）/ artwork（封面）/
+                                   qqmusic + MusicService 门面
+    api/                           HTTP：app（装配）/ deps（服务与鉴权单例）/ middleware
+                                   （鉴权闸门 + 访问日志）/ limiters / ranges /
+                                   routes（health、account、library、media、search、login）
+    web/                           /login 网页：pages（怎么画）+ login（点了之后干什么）
+    cli/                           命令行：commands（管理命令）/ console（`>` 控制台）/
+                                   launch（uvicorn + 原生 TLS）
+    __main__.py                    python -m tonicuisc_server
   scripts/                         smoke.py / smoke_api.py / smoke_db.py / import_sqlite.py
   tests/                           pytest（不联网、不需要 musicdl、不需要真的 Redis）
+  pytest.ini                       只在 tests/ 里收集
   start.ps1 / start.sh             一键启动
   requirements.txt / requirements-dev.txt
   .env.example                     环境变量样例
@@ -50,24 +60,31 @@ redis/                             Redis 二进制（首次启动自动下载，
 
 app/                               Flutter 客户端
   lib/
-    main.dart                      入口（桌面端初始化 media_kit、移动端初始化后台播放）
+    main.dart                      入口：只做平台初始化（media_kit / 后台播放 / 自签开关）
     version.dart                   构建时由 tool/apply_version.py 写入
-    api/api_client.dart            HTTP 客户端、错误翻译、默认服务器地址
-    api/credentials.dart           设备凭据（系统安全存储 + 桌面端兜底）
+    app/app.dart                   应用根 widget（主题）
+    app/main_shell.dart            三个 tab 的外壳 + 登录闸门 + 401 收口
+    core/api_client.dart           HTTP 客户端（接口方法、`X-API-Key`、下载）
+    core/api_errors.dart           异常类型 + friendlyError（把报错翻成人话）
+    core/server_config.dart        默认服务器地址 + 本机保存的地址
+    core/credentials.dart          设备凭据（系统安全存储 + 桌面端兜底）
+    core/self_signed.dart          自签证书开关（内网 HTTPS）
+    features/auth/device_login.dart      设备码登录协议 + 轮询节奏
+    features/auth/login_page.dart        登录页
+    features/search/search_page.dart     搜索 tab
+    features/search/artist_page.dart     歌手主页
+    features/library/library_page.dart   列表 tab（播放队列 + 三个歌单）
+    features/library/library_state.dart  喜欢/收藏/历史的本地缓存（乐观更新）
+    features/player/player_controller.dart  队列、播放模式、上/下一首
+    features/player/now_playing_page.dart   全屏播放页（封面 / 歌词 / 进度）
+    features/player/queue_page.dart         播放队列（整页 / 底部弹层）
+    features/player/player_bar.dart         底部播放条
+    features/player/play_mode_icons.dart    播放模式图标
+    features/profile/profile_page.dart      我的 tab（账户 / 设备 / 版本）
     models/song.dart               歌曲模型
     models/lyric.dart              LRC 解析
-    player/player_controller.dart  队列、播放模式、上/下一首
-    state/library_state.dart       喜欢/收藏/历史的本地缓存（乐观更新）
-    pages/main_shell.dart          三个 tab 的外壳
-    pages/login_page.dart          设备码登录页
-    pages/search_page.dart         搜索 tab
-    pages/library_page.dart        列表 tab（播放列表 + 三个歌单）
-    pages/queue_page.dart          播放队列（整页 / 底部弹层）
-    pages/now_playing_page.dart    全屏播放页（封面 / 歌词 / 进度）
-    pages/profile_page.dart        我的 tab（账户 / 设备 / 版本）
-    widgets/player_bar.dart        底部播放条
-    widgets/song_avatar.dart       封面（失败退回音源首字）
-    widgets/play_mode_icons.dart   播放模式图标
+    shared/cover_cache.dart        QQ 封面缓存（按 id 批量问，同一首只问一次）
+    shared/song_avatar.dart        封面（失败退回音源首字）
   test/                            纯 Dart 单测（歌词解析、模型、文件名过滤）
 
 tool/                              构建与自检脚本
@@ -75,10 +92,15 @@ tool/                              构建与自检脚本
   apply_patches.ps1/.sh            覆盖 macOS 权限、iOS Info.plist
   apply_version.py                 从 tag / 提交标题写版本号
   check_dart_balance.py            本地自检 Dart 括号配平
+  check_dart_imports.py            本地自检 Dart import 是否指到真实文件
   platform_patches/                原生配置补丁源文件
 
-deploy/Caddyfile                   nip.io + Let's Encrypt 反代样例
-.github/workflows/                 server-ci.yml（后端）/ build.yml（客户端）
+deploy/                            家里部署（外部 v4 + v6 双栈 → 内部 IPv4）
+  Caddyfile.template               Caddy 配置模板（按当前环境生成实际配置）
+  open-firewall.ps1                放行入站 80 / 443（管理员，可 -Remove 撤销）
+  update_dns.py                    维护 A / AAAA 记录（阿里云解析，--update 才真改）
+  .aliyun.env.example              AK 配置样例（真文件 .aliyun.env 已 gitignore）
+.github/workflows/                 server-ci.yml（后端）/ build.yml（客户端）/ macos.yml（macOS 单独构建）
 ```
 
 ## 快速开始
@@ -96,7 +118,7 @@ Windows 也可以直接 `pwsh -File server/start.ps1`。启动后控制台会打
 ```
 ========================================================
   Tonicuisc 服务已启动
-  登录页: http://192.168.5.37:8000/login
+  登录页: https://uisc.tonicaphid.cn/login
   在 App 里点「登录」拿到设备码，再用手机浏览器打开上面的链接
 ========================================================
 ```
@@ -118,7 +140,7 @@ flutter run -d windows     # 或 linux / macos
 flutter build windows --release
 ```
 
-**默认服务器地址是 `http://192.168.5.37:8000`**，定义在 `app/lib/api/api_client.dart` 的 `kDefaultServerUrl`——要换服务器改这一行即可。用户在「我的 → 服务器地址」改过之后会存在本机，不会再回到默认值。
+**默认服务器地址是 `https://uisc.tonicaphid.cn`**，定义在 `app/lib/core/server_config.dart` 的 `kDefaultServerUrl`——要换服务器改这一行即可。用户在本机改过之后会存在本地设置里，不会再回到默认值；改地址的入口是「我的」页**长按版本号**（平时隐藏，App 不再要求用户填 IP）。同一个弹窗里还有「**允许自签证书**」开关，内网自签 HTTPS 时才需要打开。
 
 ### 第一次登录
 
@@ -159,7 +181,10 @@ flutter build windows --release
 | `TONICUISC_REDIS_AUTOSTART` | `1` | 启动服务时自动拉起 Redis（`0` = 只连现成的） |
 | `TONICUISC_REDIS_DOWNLOAD` | `1` | 找不到 `redis-server` 时自动下载 |
 | `TONICUISC_REDIS_APPENDONLY` | `1` | 托管实例开 AOF 持久化 |
-| `TONICUISC_PUBLIC_URL` | 空 | 对外地址，启动横幅打印登录链接用 |
+| `TONICUISC_PUBLIC_URL` | 空 | 对外地址，启动横幅打印登录链接用（配了就以它为准） |
+| `TONICUISC_TLS_CERT` | 空 | 证书链 PEM 路径；和 `TONICUISC_TLS_KEY` 两个都填才开**原生 HTTPS** |
+| `TONICUISC_TLS_KEY` | 空 | 私钥 PEM 路径 |
+| `TONICUISC_THREADS` | `64` | `asyncio.to_thread` 的线程池大小（搜索 / 下载 / Redis 调用都走它；默认只有 `min(32, cpu+4)`） |
 | `TONICUISC_CACHE_DIR` | `server/.cache` | 下载缓存目录（Redis 数据在 `<CACHE_DIR>/redis`） |
 | `TONICUISC_DB` | `<CACHE_DIR>/tonicuisc.db` | 旧 SQLite 库位置，只给 `scripts/import_sqlite.py` 迁移用 |
 
@@ -169,9 +194,9 @@ flutter build windows --release
 | --- | --- | --- |
 | GET | `/api/health` | 服务状态（**免鉴权**） |
 | GET | `/health` | 上面那个的兼容别名（本机探活按约定打这个路径，**免鉴权**） |
-| POST | `/api/device/start` | App 登记设备码，发起登录（**免鉴权**） |
-| GET | `/api/device/status` | App 轮询登录状态，批准后返回一次 `api_key`（**免鉴权**） |
-| GET / POST | `/login` | 设备码登录网页（**免鉴权**） |
+| POST | `/api/device/start` | App 登记设备码，发起登录（**免鉴权**；带 `device_id` = 重新配对，服务端就地复用旧记录、旧 key 作废，不新开条目） |
+| POST | `/api/device/status` | App 轮询登录状态，批准后返回一次 `api_key`（**免鉴权**；`user_code` + `poll_secret` 都在 **JSON 请求体**里，不走 query——query 会进访问日志） |
+| GET / POST | `/login` | 设备码登录网页，含注册 / **忘记密码（恢复码重置）**（**免鉴权**） |
 | GET | `/api/me` | 当前账户 + 本设备信息 |
 | GET | `/api/devices` | 已登录设备列表（**只列本账户的** + 没有账户的旧设备；别的账户看不到） |
 | DELETE | `/api/devices/{device_id}` | 吊销设备（**直接删除记录**，它的 key 立刻失效；只能删本账户/无主的，别人的设备回 404） |
@@ -204,17 +229,20 @@ App                         浏览器(/login)                 服务端
  │ 显示设备码，按钮弹出浏览器并复制码
  │                       粘贴设备码 ──────────────────────► 校验设备码
  │                       填用户名+密码 / 注册新账户 ──────► 建账户、建设备、发 key（暂存）
- │ GET /api/device/status?code&poll_secret（每 2s）───────► approved + api_key
+ │ POST /api/device/status{code, poll_secret}（1s→2s→3s）─► approved + api_key
  │ 存进系统安全存储          ◄──────────────────────────── 立刻清掉暂存的明文
 ```
 
 要点：
 
-- **设备码由 App 生成**（`A1B1-C1D1`，字母表去掉了容易看错的 `I/O/0/1`），10 分钟有效、用过即废；
-- **轮询密钥 `poll_secret` 只有 App 知道**，别人猜到设备码也拿不到 key；
+- **设备码由 App 生成**（`A1B1-C1D1`，字母表去掉了容易看错的 `I/O/0/1`，服务端 `auth/codes.py` 用的是同一张表），10 分钟有效、用过即废；
+- **轮询密钥 `poll_secret` 只有 App 知道**，而且**走 POST 请求体**（以前走 query，会原样进 uvicorn / Caddy 的访问日志，等于把这个秘密写进了日志）；别人猜到设备码也拿不到 key；
+- **轮询节奏自适应**：刚登记 1 秒一次（批准完马上能进），越等越慢到 3 秒；连续几次网络失败会把原因显示出来，而不是永远停在「等待批准…」；
+- **`claimed` 会被认出来**：批准过但 key 已被取走过一次（比如上次拿到了 key 却没存住）时，登录页会立刻提示「这次登录已经完成过了，点换一个设备码」，不会让用户干等十分钟；
 - 账户密码用 **PBKDF2-HMAC-SHA256（20 万次迭代 + 随机盐）**存储；
+- **忘记密码走恢复码**：`K7MP2-QX9RT-3WZHB-ND5LF` 这样 4 组 × 5 位（100 bit，去掉了看混的 `0/O/1/I`），同样用 PBKDF2 存、明文只在生成时给一次；登录页点「忘记密码」输入它就能重设密码，**用过一次自动作废并换新的**。没接邮件/短信，这是唯一能证明「你是账户主人」又不落到局域网手里的凭证，所以**丢了就得回服务器上重新生成**（见下面的 `recovery-code`）；
 - 设备 API Key 256 bit 随机，`devices` 表里**只有 `sha256(key)`**；批准到领取之间的明文只暂存在 `device_requests` 行里，App 取走立刻清空；
-- 登录页**不列出服务器上有哪些账户**，用户名靠手填，避免泄露账户名单；
+- 登录页**不列出服务器上有哪些账户**，用户名靠手填，避免泄露账户名单；**注册也过同一把防爆破锁**（撞名撞多了会被临时拒绝），否则「用户名已被占用」本身就是个现成的枚举接口，登录那边费力用假哈希抹平耗时就白做了；
 - App 收到 401 自动清凭据并回到登录页——**搜索 / 翻页 / 列表增删 / 歌手页 / 播放页的红心 / 歌词 / 设备列表**每个入口都会走这条路（并发来好几个 401 也只清一次、只提示一次）；
 - **桌面端明文副本的取舍**：Windows / Linux 的安全存储偶发「这个进程写进去、下个进程读不回来」，会导致每次启动都得重新配对，所以 `credentials.dart` 读回校验失败会退回普通存储，并**在桌面端额外留一份明文副本**。代价是能读到 App 沙盒设置的人也能看到这把 key（`X-API-Key` 在 HTTP 明文链路上本来就能被抓走，见下面「这套东西的边界」）。「我的」页会在真退回普通存储时给出提示，安全存储恢复后提示自动消失。
 
@@ -223,10 +251,27 @@ App                         浏览器(/login)                 服务端
 ```bash
 python -m tonicuisc_server devices            # 设备 + 账户列表
 python -m tonicuisc_server revoke <device_id> # 吊销某台设备（= 删记录）
+python -m tonicuisc_server set-password <用户名>   # 重置密码（不用问旧密码，交互输入两次）
+python -m tonicuisc_server recovery-code <用户名>  # 生成新的恢复码（旧的作废，明文只显示一次）
 python -m tonicuisc_server cleanup            # 清理无账户 / 已吊销的设备记录
 python -m tonicuisc_server redis              # 看一眼 Redis（地址 / 版本 / 是不是托管实例）
 python -m tonicuisc_server clear-cache        # 清掉搜索结果缓存（下次搜索重新联网）
+python -m tonicuisc_server cert <域名或IP>      # 生成自签证书（内网 HTTPS 用）
 ```
+
+启动后控制台底部会一直留一个 `>` 提示符（跟 MC 服务端那样），直接敲命令——简写、
+全名、唯一前缀都行，`h` 随时看帮助：
+
+```text
+h  帮助          l   看设备和账户        r <ID>  吊销设备（ID 可只输前几位，唯一即可）
+p <用户> 重置密码  c <用户> 生成恢复码    x   清理无主 / 已吊销的设备记录
+rd  Redis 状态    cc  清搜索缓存          log off 关掉请求日志（控制台更清净）
+q   停止服务（Ctrl+C 等价）
+```
+
+日志把 `>` 顶掉的问题也处理了：控制台空闲时，任何输出（uvicorn 的 `INFO:`、应用的
+`[access]` / `[timing]`）安静约 60ms 后都会把 `>` 自动补画回行尾——多行输出只在末尾
+补一个，命令执行期间不补，敲字回显不会被打断。
 
 ### 限速（防爆破）
 
@@ -234,7 +279,7 @@ python -m tonicuisc_server clear-cache        # 清掉搜索结果缓存（下�
 | --- | --- | --- |
 | `/login` 提交 | 30 次/分钟/来源 IP | 防刷页面、防脚本 |
 | `/api/device/start` | 30 次/分钟/来源 IP | 防刷设备码 |
-| 密码错误 | 5 次/5 分钟/(IP + 用户名) | **防爆破**，锁定期内即使密码正确也拒绝 |
+| 密码错误 | 5 次/5 分钟/(IP + 用户名) | **防爆破**，锁定期内即使密码正确也拒绝（**恢复码填错也记在这里**） |
 
 超限返回 429 并带 `Retry-After`，网页上显示「密码错误次数过多，请在 N 秒后再试」。
 
@@ -247,25 +292,107 @@ python -m tonicuisc_server clear-cache        # 清掉搜索结果缓存（下�
 - 它解决「谁能调接口」+「按设备吊销」。**HTTP 明文下，链路上抓包的人可以直接拿走 key**——要真安全必须上 HTTPS。
 - 设备被物理接触（越狱 / root / 调试器）就能读出 key，这是所有客户端凭据的共性。
 
-## HTTPS（nip.io）
+## HTTPS（家里部署：外部 v4 + v6 双栈 → 内网 IPv4）
 
-`deploy/Caddyfile` 里已经按公网 IP 写好：
+家里部署、不买服务器，外面**同时**用 IPv4 和 IPv6（哪个通用哪个），内部转发走 IPv4 回环：
 
-```bash
-caddy run --config deploy/Caddyfile     # https://106-35-196-104.nip.io
+```
+手机 / 浏览器 ──公网 v4 或 v6 : 443──► Caddy（部署机）──IPv4 127.0.0.1:8000──► tonicuisc_server
 ```
 
-规则是把 IP 里的点换成横杠（`106.35.196.104` → `106-35-196-104.nip.io`），Caddy 自动申请并续期 Let's Encrypt 证书。**前提是 80/443 能从公网回连**——nip.io 只是把域名解析到那个 IP，Let's Encrypt 校验时是从公网反连你的机器，所以纯内网 IP（`192.168.x.x`）签不下来。
+**服务端自己只监听 IPv4 回环，永远不直接对外；外面只能从 Caddy 的 443 进来。**
+`deploy/Caddyfile` 已按这个拓扑写好。
 
-内网自签就用 mkcert：`mkcert 192.168.5.37`，把根证书装到手机上（iOS 要在「关于本机 → 证书信任设置」里手动打开），Caddyfile 里注释掉的部分有示例。
+### 两个域名
 
-公网暴露后注意：`/login` 是免鉴权的，建议只开放 443、给 Caddy 加上访问限速，密码别用弱口令。
+| 域名 | 用途 | 绑哪台机器 | 记录 |
+| --- | --- | --- | --- |
+| `uisc.tonicaphid.cn` | **正式**，App 全部访问走它 | 部署机（清凉那台） | **A + AAAA 双栈** |
+| `tuisc.tonicaphid.cn` | **测试**，自己调试用 | 这台测试机 | **A + AAAA 双栈** |
+
+两边都是双栈：**别只加 AAAA 而漏了 A**（或反过来），否则另一族网络下的客户端会白等一轮超时。
+App 只需要认 `uisc`——先 v4 还是先 v6 由系统按 RFC 6724 自己挑，客户端不用管。
+
+### 一次性准备
+
+1. **DNS（阿里云解析）**：`tonicaphid.cn` 的 NS 是 `dns13/dns14.hichina.com`，记录在**阿里云云解析 DNS** 里改。
+   给两个域名各配 **A + AAAA** 两条，值用脚本探测（见下）。
+2. **放行入站 443（和 80）**：
+   - Windows 防火墙：`pwsh -File deploy/open-firewall.ps1`（管理员），只加两条具名规则，可 `-Remove` 撤销；
+   - 光猫 / 路由器：**IPv4 端口映射**（外网 443 → 部署机 443）+ **IPv6 防火墙放行** TCP 80/443。
+     两族都要放行——只放 v6 的话，纯 IPv4 网络就连不上。
+3. **服务端 `server/.env`**：
+   ```
+   TONICUISC_HOST=127.0.0.1                        # 只监听 IPv4 回环
+   TONICUISC_PUBLIC_URL=https://uisc.tonicaphid.cn  # 启动横幅 / 登录链接用它
+   ```
+4. **装 Caddy 并启动**（这台机器没有 winget/scoop/choco，手动下载）：
+   从 https://caddyserver.com/download 下 Windows amd64 的 `caddy.exe`，放到 `deploy/`（或加进 PATH），然后
+   ```
+   caddy run --config deploy/Caddyfile
+   ```
+   Caddy 会自动向 Let's Encrypt 申请证书并续期。
+
+验证：从手机（**走流量，别连家里 Wi-Fi**）打开 `https://uisc.tonicaphid.cn/api/health`。
+
+### 地址会变，要定期刷 DNS
+
+家宽的地址不是永久的：**IPv6 前缀**重播就可能换一段，**IPv4** 也可能变。所以记录要定期刷新：
+
+```bash
+python deploy/update_dns.py                                  # uisc，只探测并打印
+python deploy/update_dns.py --record tuisc.tonicaphid.cn      # 测试域名
+python deploy/update_dns.py --update                          # 真的写进阿里云解析
+python deploy/update_dns.py --only v6                         # 只维护 AAAA
+```
+
+**⚠ 要在托管那个域名的那台机器上跑**：脚本探测的是「本机」的公网地址。
+uisc 在部署机跑、tuisc 在这台测试机跑——两台机器的 IPv6 后缀不同（可能共用同一个 IPv4），
+在一台上跑另一个域名的更新会把记录写成那台机器的地址。
+
+阿里云 AK 放在 `deploy/.aliyun.env`（照 `deploy/.aliyun.env.example` 填，已 gitignore），
+或设环境变量 `ALIYUN_ACCESS_KEY_ID` / `ALIYUN_ACCESS_KEY_SECRET`。
+建议用 **RAM 子账号**、权限只给云解析 DNS。脚本用阿里云 DNS API 的 HMAC-SHA1 签名，不需要装 SDK。
+
+**⚠ 稳定地址 vs 临时地址（最容易填错的地方）**：Windows 开了隐私扩展后网卡上有两个全局 IPv6——
+**稳定地址**（`SuffixOrigin=Link`，如 `...:fe45:2163:abb8:c9c0`）接口标识固定，**对外服务要用它**；
+**临时地址**（`SuffixOrigin=Random`，如 `...:e95a:b195:7846:d960`）会轮换，而且**系统默认用它出网**，
+所以 `api6.ipify.org` 探测到的是临时地址。两者**前缀相同**（同一 `/64`）属于正常，**不代表挂了代理**；
+脚本以**本机网卡的稳定地址**为准，只有**前缀都不同**时才警告（那才是走了 VPN / 代理出口）。
+
+### 家里的两个坑
+
+- **80 / 443 入站可能被封**：部分地区运营商封住宅宽带的 80/443。封了有两条路——用 DNS-01 签证书并改用
+  非标端口（比如 8443），或者套一层 CDN 代理。
+- **纯 IPv4 或纯 IPv6 的网络**：双栈记录本身覆盖了两族，但如果你只放行了其中一族，另一族就连不上
+  （IPv4 需要路由器端口映射，IPv6 需要防火墙放行，两件事都要做）。
+
+### 不想让 Caddy 管证书（内网 / 纯局域网）
+
+服务端也能自己跑 HTTPS，两个环境变量都填上就开：
+
+```bash
+python -m tonicuisc_server cert 192.168.5.37     # 生成自签证书（.cache/tls/ 下）
+# 把打印出来的两行写进 server/.env：
+#   TONICUISC_TLS_CERT=...192.168.5.37.crt
+#   TONICUISC_TLS_KEY=...192.168.5.37.key
+python -m tonicuisc_server                        # 现在直接是 https://192.168.5.37:8000
+```
+
+- 用一个给一个不算数：**只填一个当作没配**，避免「以为开了 HTTPS，其实还是明文」；
+- 证书里会带上 `localhost` / `127.0.0.1` / `::1`，本机自测不用另开一张；
+- 自签证书手机 / 浏览器会提示不受信任，把 `.crt` 装到设备上并手动信任即可（iOS 还要在「关于本机 → 证书信任设置」里打开）；App 这边在「我的」页**长按版本号**的弹窗里打开「允许自签证书」（默认关，公网域名不需要）；
+- 生成优先用 `cryptography`（在 `requirements.txt` 里），没装就退回调 `openssl`。
+
+两种方式**不要同时用**：让 Caddy 终止 TLS 时，服务端跑明文 HTTP（只在 `127.0.0.1` 上）即可，套两层 TLS 只会更慢。
+
+公网暴露后注意：`/login` 是免鉴权的，80 只留给 Caddy 做跳转和证书校验（8000 别对公网开），密码别用弱口令。
 
 ## 封面（QQ 音乐）
 
 咪咕 / 酷我给的封面经常是小图或者糊的，所以默认**用 QQ 音乐补一次**：拿「歌名 + 歌手」搜一下 QQ 音乐，从结果的 `albummid` 拼出 500×500 的专辑图 `https://y.gtimg.cn/music/photo_new/T002R500x500M000{albummid}.jpg`。
 
-**搜索接口不等封面**——先按音源原图把列表画出来，同一时间把这批歌丢给后台线程池（默认 8 路）并发查 QQ 封面并写进 Redis；已经查过的封面**直接写进搜索结果**，所以重复搜同一个词第一帧就是 QQ 封面。客户端渲染完再调 `POST /api/covers {"ids":[...]}`（`lib/state/cover_cache.dart`）：要么命中缓存，要么就等同一批已经在跑的请求，**同一首歌绝不会问两遍 QQ**；服务端还没拿到定论的 id 会缺席，客户端隔两秒再问（最多 3 轮），查到就换上去。所以补封面慢一点也不会拖慢搜索。
+**搜索接口不等封面**——先按音源原图把列表画出来，同一时间把这批歌丢给后台线程池（默认 8 路）并发查 QQ 封面并写进 Redis；已经查过的封面**直接写进搜索结果**，所以重复搜同一个词第一帧就是 QQ 封面。客户端渲染完再调 `POST /api/covers {"ids":[...]}`（`lib/shared/cover_cache.dart`）：要么命中缓存，要么就等同一批已经在跑的请求，**同一首歌绝不会问两遍 QQ**；服务端还没拿到定论的 id 会缺席，客户端隔两秒再问（最多 3 轮），查到就换上去。所以补封面慢一点也不会拖慢搜索。
 
 封面策略是「**先给能看的，再换成更好的**」：
 
@@ -308,7 +435,7 @@ caddy run --config deploy/Caddyfile     # https://106-35-196-104.nip.io
 | --- | --- |
 | `tonicuisc:song:<id>` / `tonicuisc:songs` | 搜到的歌曲元信息 + musicdl `SongInfo` 的 JSON（zset 按 last_seen 排序，方便裁剪） |
 | `tonicuisc:search:<n>` / `tonicuisc:searchrecent` | 搜索历史与当时的结果列表（默认保留最近 500 条） |
-| `tonicuisc:user:<id>` / `tonicuisc:username:<名字>` | 账户（PBKDF2 密码哈希；用户名索引不区分大小写） |
+| `tonicuisc:user:<id>` / `tonicuisc:username:<名字>` | 账户（PBKDF2 密码哈希 + 恢复码哈希；用户名索引不区分大小写） |
 | `tonicuisc:device:<id>` / `tonicuisc:devicehash:<哈希>` | 设备与 `sha256(api_key)`、绑定账户 |
 | `tonicuisc:dreq:<码>` | 设备码登录的中间状态（自带 TTL） |
 | `tonicuisc:lib:<用户>:<类型>` / `tonicuisc:libmeta:*` | 喜欢 / 收藏 / 播放历史 |
@@ -349,7 +476,7 @@ caddy run --config deploy/Caddyfile     # https://106-35-196-104.nip.io
 - **拆成并发请求**：`search_size_per_source = 要几条`、`search_size_per_page = ceil(要几条 / TONICUISC_SEARCH_THREADS)`，于是 musicdl 生成对应数量的 URL、用同样多的线程并发抓。**不要**把它压成 1 个请求：musicdl 一个请求内部是按结果**串行**解析的（酷我要逐首请求直链），实测「1 个请求拿 15 条」要 18~23s，拆开就好得多——**5 路（每页 3 条）3.6s、15 路（每页 1 条）2.0s**；上游抽风（单首要 4s）时 5 路会拖到 12.7s，15 路仍只要 ~5s。所以并发数是拿上游负载换稳定时延，默认 `10`（每页 2 条），需要更快就设 `15`。
 - **按音源分摊**：想要 15 条、开了 2 个音源 → 每个音源只拿 8 条（`ceil(15/2)`），不再各自都拉 15 条。`TONICUISC_SEARCH_SIZE`（默认 5）是下限。
 - **音源之间并行**：多个音源同时发，各自再铺满 `TONICUISC_SEARCH_THREADS` 个请求。
-- **搜索不等封面**：结果一出来就带**音源原图**返回，同一时间把这批歌丢给常驻的封面线程池（`TONICUISC_QQ_COVER_THREADS`，默认 8）在后台并发查 QQ 封面并写进 Redis。已经查过的封面会**直接写进搜索结果**，所以重复搜同一个词第一帧就是 QQ 封面。App 随后调 `POST /api/covers` 时，要么已命中缓存、要么就等**同一批正在跑的请求**（按歌曲 id 去重，绝不会问两遍 QQ）——`lib/state/cover_cache.dart` 不用改。
+- **搜索不等封面**：结果一出来就带**音源原图**返回，同一时间把这批歌丢给常驻的封面线程池（`TONICUISC_QQ_COVER_THREADS`，默认 8）在后台并发查 QQ 封面并写进 Redis。已经查过的封面会**直接写进搜索结果**，所以重复搜同一个词第一帧就是 QQ 封面。App 随后调 `POST /api/covers` 时，要么已命中缓存、要么就等**同一批正在跑的请求**（按歌曲 id 去重，绝不会问两遍 QQ）——`lib/shared/cover_cache.dart` 不用改。
 - **分页**：`GET /api/search?offset=&limit=` 返回一页 + `has_more`。App 滑到底自动再要 15 条，**按 id 去重**，不会出现重复的歌；同一关键词的结果在 Redis 里缓存 24 小时（`TONICUISC_SEARCH_TTL`），翻页和**重启服务**都不需要重新搜。客户端的 `offset` 按「服务端已经返回过多少条」推进，**不受去重影响**——去重只改显示条数，否则会反复要同一段、翻不动页。首页即使缓存里少几条也先给（后台补全），翻页时则必须凑够，不然那一页是空的。
 - **不打印进度条**：给 musicdl 传一个 `disable=True` 的 rich `Progress`，它就不再往控制台刷进度条。
 - **耗时可见**：服务端每个 `/api` 请求打一行 `[access] GET /api/search 200 5.482s`；`/api/search` 另外在响应里返回 `elapsed`（服务端耗时）。客户端自己再量一次总耗时（含网络往返），显示成「搜索完成 · 用时 5.5 秒（服务端 2.9 秒）· 共 20 首」。
@@ -374,26 +501,54 @@ caddy run --config deploy/Caddyfile     # https://106-35-196-104.nip.io
 
 ## 客户端界面
 
-- **登录页**（未登录时的首屏，`lib/pages/login_page.dart`）：进页面自动登记设备码，主按钮「打开登录页并复制设备码」弹出系统浏览器并把码放进剪贴板；后台每 2 秒轮询，批准后自动完成登录。连不上服务器时给人话提示（不是原始异常）。
-- **搜索 tab**（`lib/pages/search_page.dart`）：关键词搜索、音源勾选、显示「正在进行…」和用时、试听、下载、点红心加进「我喜欢」；**点歌手名进歌手主页**；**滑到底自动再加载 15 条**（按 id 去重，不会重复）。
-- **歌手主页**（`lib/pages/artist_page.dart`）：这个歌手能搜到的所有歌、「全部播放」、逐首点红心（完整度见上面的「歌手主页」一节）。
-- **列表 tab**（`lib/pages/library_page.dart`）：最上面是**播放列表**（显示正在播放的歌、队列长度、播放模式），下面是 **我喜欢 / 收藏 / 播放历史**，各自显示数量，点进去可播放、单条移除、清空。
-- **播放队列**（`lib/pages/queue_page.dart`）：全屏播放页点列表按钮弹出，或在「列表」tab 里整页打开。
+- **登录页**（未登录时的首屏，`lib/features/auth/login_page.dart`）：进页面自动登记设备码，主按钮「打开登录页并复制设备码」弹出系统浏览器并把码放进剪贴板；后台**自适应轮询**（1s→3s），批准后自动完成登录。连不上服务器、码过期、被拒绝、已经领过一次（`claimed`）都会给人话提示；**没登记成功的码不会摆给用户复制**（点了会先重试登记）。
+- **搜索 tab**（`lib/features/search/search_page.dart`）：关键词搜索、音源勾选、显示「正在进行…」和用时、试听、下载、点红心加进「我喜欢」；**点歌手名进歌手主页**；**滑到底自动再加载 15 条**（按 id 去重，不会重复）。
+- **歌手主页**（`lib/features/search/artist_page.dart`）：这个歌手能搜到的所有歌、「全部播放」、逐首点红心（完整度见上面的「歌手主页」一节）。
+- **列表 tab**（`lib/features/library/library_page.dart`）：最上面是**播放列表**（显示正在播放的歌、队列长度、播放模式），下面是 **我喜欢 / 收藏 / 播放历史**，各自显示数量，点进去可播放、单条移除、清空。
+- **播放队列**（`lib/features/player/queue_page.dart`）：全屏播放页点列表按钮弹出，或在「列表」tab 里整页打开。
 - **播放模式**：顺序播放 / 列表循环 / 单曲循环 / 随机播放，在播放页和队列页都能切；播完自动按模式走下一首（队列只有一首时随机播放也重头再来，顺序播放才停下）。快速连点「下一首」只会让最后一次点歌生效，不会被上一次没加载完的覆盖。
-- **我的 tab**（`lib/pages/profile_page.dart`）：账户名、本机设备名与设备 ID、服务器地址、重新登录、退出登录、版本号、已登录设备列表（可逐台吊销，删完即从列表消失）。
+- **我的 tab**（`lib/features/profile/profile_page.dart`）：账户名、本机设备名与设备 ID、重新登录、退出登录、版本号（**长按改服务器地址 + 允许自签证书**，入口平时隐藏）、已登录设备列表（可逐台吊销，删完即从列表消失）。
 - **底部播放条**：封面缩略图、播放/暂停、进度拖动；点一下展开全屏播放页。
-- **全屏播放页**（`lib/pages/now_playing_page.dart`）：大封面 + 喜欢/收藏 + 歌词跟随高亮（点歌词跳转）+ 进度条 + 上一首 / 播放暂停 / 下一首。**拖进度条时音频继续播，滑块跟手指走，松手才跳到那个位置**。
-- **封面**：所有列表都用搜到的 `cover_url`（`lib/widgets/song_avatar.dart`），QQ 补的封面到了会自动换上去；加载失败或没有封面才退回音源首字。
+- **全屏播放页**（`lib/features/player/now_playing_page.dart`）：大封面 + 喜欢/收藏 + 歌词跟随高亮（点歌词跳转）+ 进度条 + 上一首 / 播放暂停 / 下一首。**拖进度条时音频继续播，滑块跟手指走，松手才跳到那个位置**。
+- **封面**：所有列表都用搜到的 `cover_url`（`lib/shared/song_avatar.dart`），QQ 补的封面到了会自动换上去；加载失败或没有封面才退回音源首字。
 - **屏幕常亮**：App 在前台时不让系统自动息屏（`wakelock_plus`），切到后台自动放开，不会后台耗电。
 
 ## CI
 
-- **`server-ci.yml`**：安装依赖 → `compileall` → `pytest`（124 个用例，不联网、不需要 musicdl）。
+- **`server-ci.yml`**：安装依赖 → `compileall` → 模块 import 检查 → `pytest`（181 个用例，不联网、不需要 musicdl）。
 - **`build.yml`**：
   1. `静态检查` job 先跑 `flutter analyze` + `flutter test`；
-  2. `Windows / Linux / macOS / iOS` **`needs: analyze`**，静态检查过了才开始烧构建时间（出错 1 分钟就能拿到反馈，不会 4 个平台白跑）；
+  2. `Windows / Linux / iOS` **`needs: analyze`**，静态检查过了才开始烧构建时间（出错 1 分钟就能拿到反馈，不会几个平台白跑）；
   3. Flutter 版本固定在 `env.FLUTTER_VERSION`（固定版本缓存才会命中，否则每次都要重新保存 1GB+ 缓存）；
   4. 全部成功后由 `发布 Release` job 汇总产物上传到 GitHub Release。
+- **`macos.yml`**（macOS 单独构建）：见下。
+
+### 为什么 macOS 单独一个 workflow
+
+1. **架构**：GitHub 的 `macos-latest` 现在是 **Apple Silicon（arm64）**，只出 arm64 的话
+   **Intel Mac 根本跑不起来**。所以这里两个架构都出：
+   `macos-latest` → `tonicuisc-macos-arm64.zip`，`macos-13` → `tonicuisc-macos-x64.zip`
+   （Intel 那个标了 `continue-on-error`——`macos-13` GitHub 随时可能下线，挂了不该拖垮整个流程）。
+2. **成本**：macOS runner 计费是 Linux 的 10 倍，全平台 matrix 跑一次要 40 分钟。改客户端时
+   只想验证 macOS，用 `workflow_dispatch` 手动触发这个就够了。
+3. 产物用 **`ditto`** 打包而不是 `zip`：`.app` 里有符号链接，`ditto` 才能保住链接和签名；
+   构建完还会 `lipo -archs` 校验**产物名写的架构是不是真的在里面**。
+
+触发方式与产物：
+
+| 触发 | 行为 |
+| --- | --- |
+| 手动 `workflow_dispatch` | 只出 artifact；勾上 `publish` 才挂到 Release |
+| 推送 `v*` tag | 自动构建 + 挂到 Release |
+
+**未签名 + Gatekeeper**：产物没有开发者签名，用浏览器下载后 macOS 会拦（提示「已损坏，无法打开」）。
+装好后执行一次即可（workflow 的 Summary 里也会打印这段）：
+
+```bash
+xattr -dr com.apple.quarantine /Applications/tonicuisc.app
+```
+
+或者右键 App → 打开 → 弹窗里再点「打开」。要彻底不弹，得买 Apple Developer 账号做签名 + 公证。
 
 版本号：`tool/apply_version.py` 从 **tag 或提交标题**里取 `v0.0.7` / `v0.1.0` / `v1.0.0`，后面跟 `fix` 也认（`v0.0.7fix`），写两处：
 
@@ -404,20 +559,29 @@ caddy run --config deploy/Caddyfile     # https://106-35-196-104.nip.io
 
 Release 命名：**标题 = 提交标题**（`run-name` 也是），**标签 = 提交标题里的 `v0.0.x`**。没写版本号时依次回退：推送的 tag → 手动输入 → `app/pubspec.yaml`。重复同一版本会更新标题并覆盖同名产物，不需要手动打 tag。
 
-产物：`tonicuisc-windows-x64.zip`、`tonicuisc-linux-x64.tar.gz`、`tonicuisc-macos.zip`、`tonicuisc-ios-unsigned.ipa`。
+产物：`tonicuisc-windows-x64.zip`、`tonicuisc-linux-x64.tar.gz`、`tonicuisc-macos-arm64.zip`、`tonicuisc-macos-x64.zip`、`tonicuisc-ios-unsigned.ipa`。
+
+> `build.yml` 建 Release 时先挂 Windows / Linux / iOS 三个包，macOS 那两个由 `macos.yml`
+> 在自己跑完后补上去（workflow 之间不能互相 `needs`，所以两边都用了「没有就建、有就改」的幂等写法）。
 
 iOS 产物为未签名 `.ipa`，安装需要自行用 Xcode 重签。
 
 ## 本地自检
 
-改完代码推之前先跑这两条：
+改完代码推之前先跑这几条：
 
 ```bash
-# 服务端测试（124 个用例，秒级，不联网）
+# 服务端测试（166 个用例，秒级，不联网）
 cd server && python -m pytest -q
+
+# 包里每个模块都要能 import（compileall 只查语法，查不出「import 的模块被搬走了」）
+cd server && python scripts/check_imports.py
 
 # Dart 括号配平（CI 里的 analyze 只能等远端，这个本地就能查低级错误）
 python tool/check_dart_balance.py
+
+# Dart import 是否都指到真实文件（搬目录 / 重构后最容易踩的坑）
+python tool/check_dart_imports.py
 ```
 
 手动冒烟脚本（需要联网 + musicdl）：

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from tonicuisc_server.qqmusic import _is_same_song
+from tonicuisc_server.services.qqmusic import _is_same_song
 
 
 def _song(title: str, *singers: str, mid: str = "album123") -> dict:

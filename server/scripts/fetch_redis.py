@@ -22,8 +22,8 @@ from pathlib import Path
 # 允许从 server/ 目录直接 `python scripts/fetch_redis.py`
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from tonicuisc_server.config import SETTINGS  # noqa: E402
-from tonicuisc_server.redis_runtime import (  # noqa: E402
+from tonicuisc_server.core.config import SETTINGS  # noqa: E402
+from tonicuisc_server.storage.redis_runtime import (  # noqa: E402
     LINUX_DEB_URL,
     LINUX_SOURCE_URL,
     WINDOWS_ZIP_URL,

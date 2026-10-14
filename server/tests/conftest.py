@@ -10,11 +10,12 @@ from pathlib import Path
 import fakeredis
 import pytest
 
-import tonicuisc_server.artwork as artwork_module
-import tonicuisc_server.main as main_module
-import tonicuisc_server.service as service_module
+from tonicuisc_server.api import deps as deps_module
+from tonicuisc_server.api import limiters as limiters_module
 from tonicuisc_server.auth import AuthManager
-from tonicuisc_server.service import MusicService
+from tonicuisc_server.services import MusicService
+from tonicuisc_server.services import artwork as artwork_module
+from tonicuisc_server.services import service as service_module
 from tonicuisc_server.storage import Storage
 
 SCRATCH = Path(__file__).resolve().parent / "_scratch"
@@ -32,7 +33,7 @@ def _no_real_redis(monkeypatch):
     不然构造 MusicService 会去连（甚至拉起/下载）真的 Redis，CI 上必挂。
     用例自己注入的 Storage 不受影响。
     """
-    import tonicuisc_server.redis_runtime as redis_runtime
+    from tonicuisc_server.storage import redis_runtime
 
     fake = fakeredis.FakeStrictRedis(decode_responses=True)
     monkeypatch.setattr(redis_runtime, "ensure_redis_client", lambda: fake)
@@ -89,15 +90,15 @@ def app_env(redis_client):
     service.files_dir.mkdir(parents=True, exist_ok=True)
 
     auth = AuthManager(store, ttl=300)
-    main_module._service = service
-    main_module._auth = auth
-    main_module.reset_limiters()  # 每个用例都从干净的限速计数开始
+    deps_module._service = service
+    deps_module._auth = auth
+    limiters_module.reset_limiters()  # 每个用例都从干净的限速计数开始
     try:
         yield {"service": service, "auth": auth, "store": store, "root": root, "redis": redis_client}
     finally:
-        main_module._service = None
-        main_module._auth = None
-        main_module.reset_limiters()
+        deps_module._service = None
+        deps_module._auth = None
+        limiters_module.reset_limiters()
         store.close()
         shutil.rmtree(root, ignore_errors=True)
 

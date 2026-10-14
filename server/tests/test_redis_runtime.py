@@ -54,8 +54,8 @@ except ModuleNotFoundError:  # pragma: no cover - 只在没装 redis-py 时走�
     sys.modules["redis"] = _stub
     sys.modules["redis.exceptions"] = _stub_exceptions
 
-from tonicuisc_server import redis_runtime as rr  # noqa: E402
-from tonicuisc_server.config import SETTINGS  # noqa: E402
+from tonicuisc_server.storage import redis_runtime as rr  # noqa: E402
+from tonicuisc_server.core.config import SETTINGS  # noqa: E402
 
 SERVER_NAME = "redis-server.exe" if os.name == "nt" else "redis-server"
 

@@ -53,7 +53,8 @@ jobs:
 
   desktop:
     name: ${{ matrix.name }}
-    # 静态检查 + 单元测试先过，再开始烧 4 个平台的构建时间
+    # 静态检查 + 单元测试先过，再开始烧各平台的构建时间
+    # macOS 不在这里：它单独跑（见 macos.yml），那边出 arm64 + Intel 两个架构
     needs: analyze
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
@@ -71,11 +72,6 @@ jobs:
             platform: linux
             bundle: build/linux/x64/release/bundle
             artifact: tonicuisc-linux-x64
-          - name: macOS
-            os: macos-latest
-            platform: macos
-            bundle: build/macos/Build/Products/Release
-            artifact: tonicuisc-macos
     steps:
       - uses: actions/checkout@v5
 
@@ -84,14 +80,6 @@ jobs:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
           cache: true
-
-      - name: 缓存 CocoaPods
-        if: runner.os == 'macOS'
-        uses: actions/cache@v4
-        with:
-          path: ~/Library/Caches/CocoaPods
-          key: pods-${{ runner.os }}-${{ hashFiles('app/pubspec.yaml') }}
-          restore-keys: pods-${{ runner.os }}-
 
       - name: Linux 构建依赖
         if: matrix.platform == 'linux'
@@ -108,7 +96,7 @@ jobs:
         shell: pwsh
         run: ./tool/apply_patches.ps1
 
-      - name: 应用原生补丁（macOS / Linux）
+      - name: 应用原生补丁（Linux）
         if: runner.os != 'Windows'
         run: bash ./tool/apply_patches.sh
 
@@ -136,12 +124,6 @@ jobs:
       - name: 打包 (Linux)
         if: matrix.platform == 'linux'
         run: tar -C "app/$(dirname ${{ matrix.bundle }})" -czf tonicuisc-linux-x64.tar.gz "$(basename ${{ matrix.bundle }})"
-
-      - name: 打包 (macOS)
-        if: matrix.platform == 'macos'
-        run: |
-          cd "app/${{ matrix.bundle }}"
-          zip -qry "$GITHUB_WORKSPACE/tonicuisc-macos.zip" tonicuisc.app
 
       - uses: actions/upload-artifact@v5
         with:
@@ -206,6 +188,9 @@ jobs:
   release:
     name: 发布 Release
     needs: [analyze, desktop, ios]
+    # macOS 产物由 macos.yml 单独挂上去（workflow 之间不能互相 needs），
+    # 所以刚建好的 Release 里先只有 Windows / Linux / iOS 三个包，
+    # macOS 那两个（arm64 / x64）会在 macos.yml 跑完后补上。
     if: github.event_name == 'workflow_dispatch' || github.ref_type == 'tag' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     timeout-minutes: 15

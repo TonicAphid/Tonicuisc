@@ -1,0 +1,47 @@
+# Caddy 配置**模板** —— 真正跑的是按当前环境生成的那份（deploy/Caddyfile.generated）。
+#
+# 为什么要模板：正式（uisc）和测试（tuisc）域名不同，Caddy 必须按自己的域名去签证书。
+# 生成方式：
+#     python -m tonicuisc_server caddy --generate      # 只生成，打印路径
+#     python -m tonicuisc_server caddy --start         # 生成 + 校验 + 启动
+# 占位符：{DOMAIN} 对外域名、{UPSTREAM} 反代目标、{LOG} 日志文件。
+#
+# ── 拓扑（家里部署）──────────────────────────────────────────────────────
+#
+#   手机 / 浏览器 ──公网 v4 或 v6 : 443──► Caddy ──IPv4 127.0.0.1:8000──► tonicuisc_server
+#
+#   服务端只监听 IPv4 回环，外面只能从 Caddy 的 443 进来。
+#
+# ── 准备（详见 README「HTTPS」一节）──────────────────────────────────────
+#
+# 1) DNS（阿里云解析）：给 {DOMAIN} 配 **A + AAAA 两条**（双栈，只配一条会有
+#    一族网络连不上）。用 deploy/update_dns.py 探测该填什么（--update 直接改）。
+# 2) 放行入站 443（以及 80，Let's Encrypt 校验要用）——**两族都要放**：
+#      · 这台机器：pwsh -File deploy/open-firewall.ps1（管理员）
+#      · 路由器：IPv4 端口映射 + IPv6 防火墙放行 TCP 80/443
+# 3) 服务端 server/.env：TONICUISC_HOST=127.0.0.1
+# 4) 启动：python -m tonicuisc_server caddy --start
+#
+# ── 注意 ─────────────────────────────────────────────────────────────────
+# * 地址会变：IPv6 前缀重播就换、IPv4 也可能变 → 用 ddns 定时刷记录
+#   （python -m tonicuisc_server ddns install --every 10m）
+# * 住宅宽带 80/443 可能被封：那就用 DNS-01 签证书 + 换非标端口
+# * 两族都要放行：IPv4 靠端口映射、IPv6 靠防火墙，是两件事
+
+{DOMAIN} {
+	encode zstd gzip
+
+	# 反代到 IPv4 回环：服务端只在 127.0.0.1:8000 上，外界碰不到它
+	reverse_proxy {UPSTREAM} {
+		# 音频流可能比较大，别让反代提前断开
+		flush_interval -1
+	}
+
+	# Caddy 默认监听所有网卡（含 IPv6），双栈入口天然支持，不需要显式 bind。
+
+	log {
+		# 相对路径：Windows 上没有 /var/log/caddy
+		output file {LOG}
+		format console
+	}
+}

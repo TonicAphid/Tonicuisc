@@ -16,15 +16,16 @@ import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-import tonicuisc_server.artwork as artwork_module
-import tonicuisc_server.storage as storage_module
+from tonicuisc_server.services import artwork as artwork_module
+import tonicuisc_server.storage.search_cache as search_cache_module
 from conftest import make_storage
-from tonicuisc_server.config import resolve_sources
-from tonicuisc_server.items import song_to_item
-from tonicuisc_server.main import _parse_range, app
-from tonicuisc_server.qqmusic import CoverLookupError, _is_same_song
-from tonicuisc_server.ratelimit import SlidingWindowLimiter
-from tonicuisc_server.service import MusicService
+from tonicuisc_server.core.config import resolve_sources
+from tonicuisc_server.services import song_to_item
+from tonicuisc_server.api import app
+from tonicuisc_server.api.ranges import parse_range as _parse_range
+from tonicuisc_server.services.qqmusic import CoverLookupError, _is_same_song
+from tonicuisc_server.auth.ratelimit import SlidingWindowLimiter
+from tonicuisc_server.services import MusicService
 
 client = TestClient(app)
 
@@ -144,7 +145,7 @@ def test_library_add_unknown_song_is_404(app_env) -> None:
 def _register(code: str, username: str, secret: str) -> dict[str, str]:
     client.post("/api/device/start", json={"user_code": code, "poll_secret": secret, "name": "手机"})
     client.post("/login", data={"action": "register", "user_code": code, "username": username, "password": "hunter2x"})
-    key = client.get("/api/device/status", params={"user_code": code, "poll_secret": secret}).json()["api_key"]
+    key = client.post("/api/device/status", json={"user_code": code, "poll_secret": secret}).json()["api_key"]
     return {"X-API-Key": key}
 
 
@@ -264,7 +265,7 @@ def test_resolve_sources_accepts_class_names() -> None:
 # ------------------------------------------------------------- 缓存 TTL = 0
 def test_search_ttl_zero_means_no_cache(storage, monkeypatch) -> None:
     """TTL=0 是「不缓存」：以前会写成永不过期的键，结果被当成永远新鲜。"""
-    monkeypatch.setattr(storage_module, "SETTINGS", dataclasses.replace(storage_module.SETTINGS, search_ttl=0))
+    monkeypatch.setattr(search_cache_module, "SETTINGS", dataclasses.replace(search_cache_module.SETTINGS, search_ttl=0))
     key = ("词", ("MiguMusicClient",))
     storage.save_search_cache(key, [{"id": "a:b"}])
 

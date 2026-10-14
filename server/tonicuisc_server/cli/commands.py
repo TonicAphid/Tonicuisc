@@ -1,0 +1,372 @@
+"""本机管理命令（不需要 API Key）。
+
+能跑这些命令的人本来就能改 Redis / 证书目录，所以它们不做额外鉴权。
+
+    python -m tonicuisc_server devices            列出设备和账户
+    python -m tonicuisc_server revoke <device_id> 吊销某台设备
+    python -m tonicuisc_server set-password <user> 重置密码（不需要旧密码）
+    python -m tonicuisc_server recovery-code <user> 生成新的恢复码
+    python -m tonicuisc_server cleanup            清理无账户 / 已吊销的设备记录
+    python -m tonicuisc_server redis              看一眼 Redis 状态
+    python -m tonicuisc_server clear-cache        清掉搜索结果缓存
+    python -m tonicuisc_server cert <域名或IP>      生成自签证书（内网 HTTPS 用）
+"""
+
+from __future__ import annotations
+
+import getpass
+import time
+from pathlib import Path
+
+from ..auth import AuthManager
+from ..core.config import SETTINGS
+from ..core.tls import cert_paths, generate_self_signed
+from ..storage import Storage, redis_runtime
+
+#: 能直接从命令行派发的命令
+MANAGEMENT_COMMANDS = (
+    "devices",
+    "list",
+    "revoke",
+    "set-password",
+    "recovery-code",
+    "cleanup",
+    "redis",
+    "clear-cache",
+    "cert",
+    "env",
+    "caddy",
+    "ddns",
+)
+
+#: 需要参数的命令 → 用法串
+_USAGE = {
+    "revoke": "revoke <device_id>",
+    "set-password": "set-password <username>",
+    "recovery-code": "recovery-code <username>",
+    "cert": "cert <域名或IP>",
+    "env": "env [uisc|tuisc]        看 / 改当前环境",
+    "caddy": "caddy [--download|--start|--status]",
+    "ddns": "ddns [install|status|remove|run]",
+}
+
+
+def format_time(value: float | None) -> str:
+    if not value:
+        return "-"
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(value))
+
+
+def devices_command(store) -> int:
+    devices = store.list_devices(own_only=False)  # 本机管理命令：看全库，不按账户过滤
+    if not devices:
+        print("还没有已登录设备")
+    else:
+        print(f"{'设备 ID':<34}{'名称':<16}{'账户':<14}{'状态':<8}最后使用")
+        for device in devices:
+            state = "已吊销" if device.get("revoked") else "正常"
+            name = str(device.get("name") or "-")[:14]
+            user = str(device.get("username") or "-")[:12]
+            print(f"{device['id']:<34}{name:<16}{user:<14}{state:<8}{format_time(device.get('last_seen'))}")
+
+    users = store.list_users()
+    if users:
+        print("\n账户：")
+        for user in users:
+            print(
+                f"  {user['username']:<16}创建于 {format_time(user.get('created_at'))}"
+                f"  最后登录 {format_time(user.get('last_login_at'))}"
+            )
+    return 0
+
+
+def revoke_command(store, device_id: str) -> int:
+    """吊销设备；允许输唯一前缀——设备 ID 很长，控制台上敲全太费劲。"""
+    devices = store.list_devices(own_only=False)
+    hits = [d for d in devices if str(d.get("id")) == device_id]
+    if not hits:
+        hits = [d for d in devices if str(d.get("id")).startswith(device_id)]
+    if not hits:
+        print("没有这个设备")
+        return 1
+    if len(hits) > 1:
+        print(f"前缀 {device_id} 匹配到 {len(hits)} 台设备，输长一点：")
+        for device in hits:
+            print(f"  {device['id']}")
+        return 1
+    store.revoke_device(hits[0]["id"])
+    print("已吊销该设备")
+    return 0
+
+
+def account_command(store, mode: str, username: str) -> int:
+    """``set-password`` / ``recovery-code``：忘密码时的兜底入口。"""
+    auth = AuthManager(store)
+    if mode == "recovery-code":
+        code = auth.issue_recovery_code(username)
+        if code is None:
+            print(f"没有这个账户: {username}")
+            return 1
+        print(f"账户 {username} 的新恢复码（只显示这一次，抄下来；旧的已作废）：\n\n  {code}\n")
+        print("以后忘了密码，就在 /login 页面点「忘记密码」用它重置。")
+        return 0
+
+    if store.find_user(username) is None:
+        print(f"没有这个账户: {username}")
+        return 1
+    new = getpass.getpass("新密码（至少 6 位）: ")
+    if len(new) < 6:
+        print("密码太短，至少 6 位")
+        return 1
+    if new != getpass.getpass("再输一次: "):
+        print("两次输入不一致，没有改")
+        return 1
+    if auth.set_password(username, new) is None:
+        print("重置失败了")
+        return 1
+    print(f"已重置 {username} 的密码（恢复码没动，已登录的设备不用重新登录）")
+    return 0
+
+
+def cleanup_command(store) -> int:
+    # 只删「没有账户」和「已吊销」的记录，正常设备不动
+    orphans = store.delete_devices(without_user=True)
+    revoked = store.delete_devices(revoked=True)
+    expired = store.drop_expired_device_requests()
+    print(f"已删除无账户设备 {orphans} 条、已吊销设备 {revoked} 条、过期登录请求 {expired} 条")
+    return 0
+
+
+def clear_cache_command(store) -> int:
+    removed = store.drop_search_cache()
+    print(f"已清掉 {removed} 条搜索结果缓存")
+    return 0
+
+
+def redis_command() -> int:
+    client = redis_runtime.ensure_redis_client()
+    info = client.info() if hasattr(client, "info") else {}
+    version = info.get("redis_version") if isinstance(info, dict) else None
+    print(f"Redis 地址：{SETTINGS.redis_config()}")
+    print(f"版本：{version or '未知'}")
+    print(f"是否由本进程拉起：{'是（本进程退出时会自动关闭）' if redis_runtime.RUNTIME.started_by_us else '否（用现成的）'}")
+    if redis_runtime.RUNTIME.server_path:
+        print(f"redis-server：{redis_runtime.RUNTIME.server_path}")
+    print(f"数据目录：{SETTINGS.redis_data_dir}")
+    return 0
+
+
+def cert_command(name: str, out_dir: Path | None = None) -> int:
+    """生成自签证书，并把要设的环境变量直接打出来。"""
+    name = (name or "").strip()
+    if not name:
+        print(f"用法: python -m tonicuisc_server {_USAGE['cert']}")
+        return 2
+    out_dir = out_dir or (SETTINGS.cache_dir / "tls")
+    cert_path, key_path = cert_paths(out_dir, name)
+    try:
+        tool = generate_self_signed(name, cert_path, key_path)
+    except Exception as exc:  # 缺依赖 / openssl 报错，都别甩栈给用户
+        print(f"生成证书失败：{type(exc).__name__}: {exc}")
+        print("装一个 cryptography 再试：pip install cryptography")
+        return 1
+    print(f"已用 {tool} 生成自签证书（{DEFAULT_DAYS_HINT} 天）：")
+    print(f"  证书：{cert_path}")
+    print(f"  私钥：{key_path}")
+    print("\n在 server/.env 里加两行就能开 HTTPS：")
+    print(f"  TONICUISC_TLS_CERT={cert_path}")
+    print(f"  TONICUISC_TLS_KEY={key_path}")
+    print("\n手机 / 浏览器会提示「不受信任」：把上面这张证书装到设备上并手动信任，")
+    print("或者干脆用公网域名 + Caddy 自动签（见 deploy/Caddyfile）。")
+    return 0
+
+
+#: 自签有效期，和 core.tls.DEFAULT_DAYS 一致（这里只用于提示文案）
+DEFAULT_DAYS_HINT = 825
+
+
+def env_command(args: list[str]) -> int:
+    """看 / 改当前环境（uisc 正式、tuisc 测试）。"""
+    from ..core.environment import ENVIRONMENTS, ENV_PATH, apply_environment, get_environment
+
+    if not args:
+        current = get_environment()
+        print(f"当前环境：{current.key}  ——  {current.label}")
+        print(f"对外地址：{current.public_url}")
+        print(f"配置文件：{ENV_PATH}")
+        print()
+        print("可选环境：")
+        for key, env in ENVIRONMENTS.items():
+            mark = " ← 当前" if key == current.key else ""
+            print(f"  {key:<6} {env.label:<16} {env.public_url}{mark}")
+        print()
+        print("改：python -m tonicuisc_server env tuisc")
+        return 0
+
+    wanted = args[0].strip().lower()
+    if wanted not in ENVIRONMENTS:
+        print(f"不认识的环境：{wanted}（可选：{', '.join(ENVIRONMENTS)}）")
+        return 2
+
+    environment = ENVIRONMENTS[wanted]
+    path = apply_environment(environment, persist=True)
+    print(f"已切换到：{environment.key}  ——  {environment.label}")
+    print(f"对外地址：{environment.public_url}")
+    if path:
+        print(f"已写入：{path}")
+    print("\n重启服务后生效。")
+    return 0
+
+
+def caddy_command(args: list[str]) -> int:
+    """Caddy 的定位 / 下载 / 校验 / 启动。"""
+    from ..core import caddy as caddy_runtime
+
+    action = (args[0] if args else "--status").strip().lower()
+
+    if action in {"--status", "status"}:
+        from ..core.config import ENVIRONMENT
+
+        path = caddy_runtime.find_caddy(auto_download=False)
+        print(f"环境     ：{ENVIRONMENT.key}（{ENVIRONMENT.label}）")
+        if path is None:
+            print("caddy    ：没找到。可以：")
+            print(f"  · python -m tonicuisc_server caddy --download   （自动下到 {caddy_runtime.bin_dir()}）")
+            print(f"  · 手动下载：{caddy_runtime.DOWNLOAD_PAGE}")
+            print(f"  · 或把路径写进 .env：TONICUISC_CADDY_SERVER=<完整路径>")
+            return 1
+        version = caddy_runtime.caddy_version(path)
+        print(f"caddy    ：{path}")
+        print(f"版本     ：{version or '（跑 --version 没拿到）'}")
+        print(f"配置     ：{SETTINGS.caddy_config}（{'存在' if SETTINGS.caddy_config.exists() else '还没生成'}）")
+        print(f"自动启动 ：{'开' if SETTINGS.caddy_autostart else '关'}（TONICUISC_CADDY_AUTOSTART）")
+        return 0
+
+    if action in {"--download", "download"}:
+        try:
+            path = caddy_runtime.find_caddy(auto_download=True)
+        except RuntimeError as exc:
+            print(exc)
+            return 1
+        if path is None:
+            print("下载被关掉了（TONICUISC_CADDY_DOWNLOAD=0），而且本地也没有。")
+            return 1
+        print(f"已就绪：{path}")
+        return 0
+
+    if action in {"--generate", "generate"}:
+        try:
+            config = caddy_runtime.generate_config(force=True)
+        except RuntimeError as exc:
+            print(exc)
+            return 1
+        print(f"已生成：{config}")
+        return 0
+
+    if action in {"--validate", "validate"}:
+        path = caddy_runtime.find_caddy(auto_download=False)
+        if path is None:
+            print("没找到 caddy，先跑 caddy --download")
+            return 1
+        try:
+            config = caddy_runtime.generate_config()
+        except RuntimeError as exc:
+            print(exc)
+            return 1
+        ok, detail = caddy_runtime.validate_config(path, config)
+        print(("配置有效" if ok else "配置有问题") + f"：{detail}（{config}）")
+        return 0 if ok else 1
+
+    if action in {"--start", "start"}:
+        path = caddy_runtime.find_caddy(auto_download=True)
+        if path is None:
+            print("没找到 caddy，先跑 caddy --download")
+            return 1
+        try:
+            config = caddy_runtime.generate_config()
+            ok, detail = caddy_runtime.validate_config(path, config)
+            if not ok:
+                print(f"Caddyfile 有问题，先修一下：{detail}")
+                return 1
+            process = caddy_runtime.start_caddy(path, config)
+        except RuntimeError as exc:
+            print(exc)
+            return 1
+        print(f"Caddy 已在后台运行（pid {process.pid}）。停止：Ctrl+C 或结束该进程。")
+        try:
+            process.wait()
+        except KeyboardInterrupt:
+            print("\n正在停止 Caddy…")
+            process.terminate()
+        return 0
+
+    print(_USAGE["caddy"])
+    print("  --status    看环境、caddy 路径、版本、配置（默认）")
+    print("  --download  下载（Windows zip / Linux tar.gz，走 gh-proxy 镜像）")
+    print("  --generate  按当前环境生成 Caddyfile")
+    print("  --validate  生成 + 校验 Caddyfile 语法")
+    print("  --start     生成 + 校验 + 前台启动 Caddy")
+    return 2
+
+
+def ddns_command(args: list[str]) -> int:
+    """DDNS 定时更新：install / status / remove / run（跨平台）。"""
+    from ..core import ddns
+
+    action = (args[0] if args else "status").strip().lower()
+    rest = args[1:]
+
+    if action == "run":
+        return ddns.run_once()
+    if action == "install":
+        return ddns.install(rest)
+    if action == "remove":
+        return ddns.remove()
+    if action == "status":
+        return ddns.status()
+    print(_USAGE["ddns"])
+    print("  install [--every 10m] [--record uisc.tonicaphid.cn]  装定时任务")
+    print("  status                                                看装了没 / 上次结果")
+    print("  remove                                                卸掉")
+    print("  run                                                   立刻跑一次")
+    return 2
+
+
+def run_management_command(name: str, args: list[str]) -> int:
+    """跑一条管理命令并返回退出码（自己管 Storage 与托管 Redis 的生命周期）。"""
+    if name not in MANAGEMENT_COMMANDS:
+        print(f"未知命令: {name}")
+        return 2
+    # 只有**必须**带参数的命令才在这里拦；env / caddy / ddns 不带参数时各有默认动作
+    if name in {"revoke", "set-password", "recovery-code", "cert"} and not args:
+        print(f"用法: python -m tonicuisc_server {_USAGE[name]}")
+        return 2
+    if name == "cert":
+        return cert_command(args[0])
+    # 注意：args 里已经**不含**命令名本身了，别再切一刀
+    if name == "env":
+        return env_command(args)
+    if name == "caddy":
+        return caddy_command(args)
+    if name == "ddns":
+        return ddns_command(args)
+
+    store = Storage()
+    try:
+        if name in {"devices", "list"}:
+            return devices_command(store)
+        if name == "revoke":
+            return revoke_command(store, args[0])
+        if name == "redis":
+            return redis_command()
+        if name == "clear-cache":
+            return clear_cache_command(store)
+        if name == "cleanup":
+            return cleanup_command(store)
+        if name in {"set-password", "recovery-code"}:
+            return account_command(store, name, args[0])
+    finally:
+        store.close()
+        # 管理命令跑完就把我们拉起来的 Redis 收掉
+        redis_runtime.shutdown_redis()
+    return 2

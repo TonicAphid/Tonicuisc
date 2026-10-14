@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from conftest import make_storage
-from tonicuisc_server.service import SEARCH_RESIDUE_MAX_AGE, MusicService
+from tonicuisc_server.services import SEARCH_RESIDUE_MAX_AGE, MusicService
 
 
 @pytest.fixture()

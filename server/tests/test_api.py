@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
-from tonicuisc_server.main import app
+from tonicuisc_server.api import app
 
 client = TestClient(app)
 
@@ -17,7 +17,7 @@ def _start(code: str = CODE, secret: str = SECRET, name: str = "测试机"):
 
 
 def _status(code: str = CODE, secret: str = SECRET) -> dict:
-    resp = client.get("/api/device/status", params={"user_code": code, "poll_secret": secret})
+    resp = client.post("/api/device/status", json={"user_code": code, "poll_secret": secret})
     assert resp.status_code == 200, resp.text
     return resp.json()
 
@@ -103,7 +103,7 @@ def test_full_device_login_flow(app_env) -> None:
 
 def test_existing_account_flow(app_env) -> None:
     _login_via_web(username="aphid", password="hunter2x")
-    client.get("/api/device/status", params={"user_code": CODE, "poll_secret": SECRET})
+    client.post("/api/device/status", json={"user_code": CODE, "poll_secret": SECRET})
 
     second = "B2C2-D2E2"
     _start(code=second, name="第二台")
@@ -137,7 +137,7 @@ def test_password_bruteforce_is_rate_limited(app_env) -> None:
 
 
 def test_device_start_is_rate_limited(app_env) -> None:
-    from tonicuisc_server.main import device_start_limiter
+    from tonicuisc_server.api.limiters import device_start_limiter
 
     device_start_limiter.reset()
     for index in range(device_start_limiter.limit):

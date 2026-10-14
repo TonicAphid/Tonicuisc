@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import sys
 
-from tonicuisc_server.service import MusicService
+from tonicuisc_server.services import MusicService
 
 
 def main() -> int:

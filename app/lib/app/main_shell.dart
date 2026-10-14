@@ -1,0 +1,293 @@
+import 'dart:async';
+
+import 'package:flutter/material.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
+
+import '../core/api_client.dart';
+import '../core/credentials.dart';
+import '../core/self_signed.dart';
+import '../core/server_config.dart';
+import '../features/auth/device_login.dart';
+import '../features/auth/login_page.dart';
+import '../features/library/library_page.dart';
+import '../features/library/library_state.dart';
+import '../features/player/player_bar.dart';
+import '../features/player/player_controller.dart';
+import '../features/profile/profile_page.dart';
+import '../features/search/search_page.dart';
+import '../shared/cover_cache.dart';
+
+/// 应用外壳：底部三个 tab（搜索 / 列表 / 我的），未登录时直接显示设备码登录页。
+class MainShell extends StatefulWidget {
+  const MainShell({super.key});
+
+  @override
+  State<MainShell> createState() => _MainShellState();
+}
+
+class _MainShellState extends State<MainShell> with WidgetsBindingObserver {
+  final PlayerController _player = PlayerController();
+
+  ApiClient _api = ApiClient(defaultBaseUrl());
+  late LibraryState _library = LibraryState(_api);
+  String _baseUrl = defaultBaseUrl();
+  String? _apiKey;
+  String? _deviceName;
+  String? _username;
+  String? _notice;
+  bool _booted = false;
+  int _tab = 0;
+
+  bool get _loggedIn => _apiKey != null && _apiKey!.isNotEmpty;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    unawaited(_keepScreenAwake(true));
+    _bootstrap();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    unawaited(_keepScreenAwake(false));
+    _player.dispose();
+    super.dispose();
+  }
+
+  /// 前台不让屏幕自动息屏；切到后台就放开，别在后台耗电。
+  Future<void> _keepScreenAwake(bool enabled) async {
+    try {
+      await (enabled ? WakelockPlus.enable() : WakelockPlus.disable());
+    } catch (_) {
+      // 平台不支持就算了，不影响使用
+    }
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    unawaited(_keepScreenAwake(state == AppLifecycleState.resumed));
+  }
+
+  Future<void> _bootstrap() async {
+    // 四个读都是本地存储（SharedPreferences / 安全存储），并发读一次拿齐：
+    // 串行 await 的话启动要多花三个来回，桌面端安全存储偶发变慢时更明显。
+    final values = await Future.wait([
+      loadBaseUrl(),
+      Credentials.apiKey(),
+      Credentials.deviceName(),
+      Credentials.username(),
+    ]);
+    final url = values[0];
+    final key = values[1];
+    if (!mounted) return;
+    _adoptApi(ApiClient(url, apiKey: key));
+    setState(() {
+      _baseUrl = url;
+      _apiKey = key;
+      _deviceName = values[2];
+      _username = values[3];
+      _booted = true;
+    });
+    if (key != null && key.isNotEmpty) {
+      unawaited(_library.refresh());
+    }
+  }
+
+  /// 统一的「换 ApiClient」动作：重建 LibraryState + 让播放器跟着换。
+  ///
+  /// 换 key、换服务器、退出登录都必须走这里——漏掉播放器那一步就会出现
+  /// 「界面已经登出/换了地址，播放器还在拿旧 key 往旧地址发回退流和播放历史」。
+  void _adoptApi(ApiClient api) {
+    _api = api;
+    _library = LibraryState(api);
+    _player.updateApi(api);
+  }
+
+  /// 登录成功：把凭据（含**用户刚填的设备名**）存下来并切换 ApiClient。
+  Future<void> _handleLoggedIn(DeviceLoginResult result) async {
+    final deviceName = result.deviceName.isEmpty ? defaultDeviceName() : result.deviceName;
+    await Credentials.save(
+      apiKey: result.apiKey,
+      deviceId: result.deviceId,
+      deviceName: deviceName,
+      username: result.username,
+    );
+    if (!mounted) return;
+    _adoptApi(ApiClient(_baseUrl, apiKey: result.apiKey));
+    setState(() {
+      _apiKey = result.apiKey;
+      _deviceName = deviceName;
+      _username = result.username.isEmpty ? null : result.username;
+      _notice = null;
+      _tab = 0;
+    });
+    unawaited(_library.refresh());
+  }
+
+  Future<void> _handleUnauthorized(String message) async {
+    // 幂等：一次 401 会从好几个页面同时冒出来，只清一次凭据、只提示一次
+    if (!_loggedIn) return;
+    await Credentials.clear();
+    CoverCache.clear();
+    if (!mounted) return;
+    _apiKey = null;
+    _username = null;
+    _notice = message;
+    _adoptApi(ApiClient(_baseUrl));
+    setState(() {});
+  }
+
+  Future<void> _logout() async {
+    if (!_loggedIn) return;
+    await Credentials.clear();
+    CoverCache.clear();
+    if (!mounted) return;
+    _apiKey = null;
+    _username = null;
+    _notice = null;
+    _adoptApi(ApiClient(_baseUrl));
+    setState(() {});
+  }
+
+  /// 「我的」页长按版本号进来的隐藏入口：改服务器地址 + 自签证书开关。
+  Future<void> _editServerUrl() async {
+    final controller = TextEditingController(text: _baseUrl);
+    var allowSelfSigned = SelfSignedOverrides.allow;
+    final value = await showDialog<String>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('服务器地址'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: controller,
+                autofocus: true,
+                keyboardType: TextInputType.url,
+                decoration: const InputDecoration(hintText: kDefaultServerUrl),
+              ),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                value: allowSelfSigned,
+                title: const Text('允许自签证书'),
+                subtitle: const Text('内网 HTTPS 用；公网域名不需要开'),
+                onChanged: (next) => setDialogState(() => allowSelfSigned = next),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(context), child: const Text('取消')),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, controller.text.trim()),
+              child: const Text('保存'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (value == null || value.isEmpty) return;
+    final normalized = normalizeBaseUrl(value);
+    await saveBaseUrl(normalized);
+    await saveAllowSelfSigned(allowSelfSigned);
+    SelfSignedOverrides.allow = allowSelfSigned; // 立刻生效，不用重启 App
+    if (!mounted) return;
+    // 收藏列表、播放器的回退流都要跟着换到新地址（播放器里的旧 ApiClient 还指着旧主机）
+    _adoptApi(ApiClient(normalized, apiKey: _apiKey));
+    setState(() => _baseUrl = normalized);
+  }
+
+  static const List<String> _titles = ['Tonicuisc', '列表', '我的'];
+
+  @override
+  Widget build(BuildContext context) {
+    if (!_booted) {
+      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    }
+    if (!_loggedIn) {
+      return LoginPage(
+        key: ValueKey('login-$_baseUrl'),
+        baseUrl: _baseUrl,
+        initialDeviceName: _deviceName,
+        onLoggedIn: _handleLoggedIn,
+      );
+    }
+
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(_titles[_tab]),
+      ),
+      body: Column(
+        children: [
+          if (_notice != null)
+            Material(
+              color: Theme.of(context).colorScheme.errorContainer,
+              child: ListTile(
+                dense: true,
+                leading: const Icon(Icons.info_outline),
+                title: Text(_notice!),
+                trailing: IconButton(
+                  icon: const Icon(Icons.close),
+                  onPressed: () => setState(() => _notice = null),
+                ),
+              ),
+            ),
+          Expanded(
+            child: IndexedStack(
+              index: _tab,
+              children: [
+                SearchPage(
+                  api: _api,
+                  player: _player,
+                  library: _library,
+                  onUnauthorized: _handleUnauthorized,
+                ),
+                LibraryPage(
+                  api: _api,
+                  library: _library,
+                  player: _player,
+                  onUnauthorized: _handleUnauthorized,
+                ),
+                ProfilePage(
+                  api: _api,
+                  baseUrl: _baseUrl,
+                  deviceName: _deviceName,
+                  username: _username,
+                  onChangeServer: _editServerUrl,
+                  onRelogin: _logout,
+                  onLogout: _logout,
+                  onUnauthorized: _handleUnauthorized,
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+      bottomNavigationBar: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          PlayerBar(
+            controller: _player,
+            api: _api,
+            library: _library,
+            onUnauthorized: _handleUnauthorized,
+          ),
+          NavigationBar(
+            selectedIndex: _tab,
+            onDestinationSelected: (index) {
+              setState(() => _tab = index);
+              if (index == 1) unawaited(_library.refresh()); // 切到列表就刷新一次数字
+            },
+            destinations: const [
+              NavigationDestination(icon: Icon(Icons.search), label: '搜索'),
+              NavigationDestination(icon: Icon(Icons.library_music_outlined), label: '列表'),
+              NavigationDestination(icon: Icon(Icons.person_outline), label: '我的'),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}

@@ -3,3 +3,5 @@ uvicorn[standard]>=0.27
 requests>=2.31
 musicdl>=2.0.0
 redis>=5.0
+# 只为 `python -m tonicuisc_server cert` 生成自签证书；没装则退回调用 openssl
+cryptography>=42

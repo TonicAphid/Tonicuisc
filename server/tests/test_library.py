@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
-from tonicuisc_server.main import app
+from tonicuisc_server.api import app
 from tonicuisc_server.storage import Storage
 
 client = TestClient(app)
@@ -18,7 +18,7 @@ def _login(env, username: str = "aphid", password: str = "hunter2x") -> dict[str
     code = DEVICE
     client.post("/api/device/start", json={"user_code": code, "poll_secret": "library-secret-1", "name": "手机"})
     client.post("/login", data={"action": "register", "user_code": code, "username": username, "password": password})
-    key = client.get("/api/device/status", params={"user_code": code, "poll_secret": "library-secret-1"}).json()["api_key"]
+    key = client.post("/api/device/status", json={"user_code": code, "poll_secret": "library-secret-1"}).json()["api_key"]
     return {"X-API-Key": key}
 
 
@@ -130,7 +130,7 @@ def test_library_is_per_account(app_env) -> None:
     code = "F6F6-B6C6"
     client.post("/api/device/start", json={"user_code": code, "poll_secret": "library-secret-2", "name": "另一台"})
     client.post("/login", data={"action": "register", "user_code": code, "username": "someone", "password": "hunter2x"})
-    key_b = client.get("/api/device/status", params={"user_code": code, "poll_secret": "library-secret-2"}).json()["api_key"]
+    key_b = client.post("/api/device/status", json={"user_code": code, "poll_secret": "library-secret-2"}).json()["api_key"]
 
     summary_b = client.get("/api/library/summary", headers={"X-API-Key": key_b}).json()
     assert summary_b["counts"]["like"] == 0, "别人的喜欢不能串到我这里"

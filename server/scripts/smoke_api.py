@@ -17,8 +17,8 @@ os.environ.setdefault("TONICUISC_AUTH", "0")
 
 from fastapi.testclient import TestClient
 
-from tonicuisc_server.config import SETTINGS
-from tonicuisc_server.main import app
+from tonicuisc_server.core.config import SETTINGS
+from tonicuisc_server.api import app
 
 KEYWORD = sys.argv[1] if len(sys.argv) > 1 else "周杰伦"
 

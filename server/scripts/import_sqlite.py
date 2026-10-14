@@ -25,7 +25,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from tonicuisc_server.config import SETTINGS  # noqa: E402
+from tonicuisc_server.core.config import SETTINGS  # noqa: E402
 from tonicuisc_server.storage import MAX_SEARCH_HISTORY, Storage  # noqa: E402
 
 

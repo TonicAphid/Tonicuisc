@@ -1,0 +1,227 @@
+name: macOS Build
+
+# 单独的 macOS 构建。
+#
+# 为什么从 build.yml 里拆出来：
+#   1. macOS runner 计费是 Linux 的 10 倍，全平台 matrix 跑一次要 40 分钟，
+#      改客户端时想只验证 macOS，用这个 workflow_dispatch 手动触发就够了；
+#   2. **架构**：GitHub 的 macos-latest 现在是 Apple Silicon（arm64），
+#      只出 arm64 的话 Intel Mac 根本跑不起来——这里两个架构都出；
+#   3. 产物用 ditto 打包（保留符号链接与签名），并校验架构对不对。
+#
+# 发布：tag 推送（v*）时会把两个架构的产物挂到 Release；
+#       build.yml 负责 Windows / Linux / iOS，两边不会互相覆盖（文件名不同）。
+run-name: macOS · ${{ github.event.head_commit.message || github.ref_name }}
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: 构建完把产物挂到 Release
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # 必须和 build.yml 里的 FLUTTER_VERSION 保持一致：版本不同缓存对不上，产物也难复现
+  FLUTTER_VERSION: 3.47.5
+
+jobs:
+  build:
+    name: macOS ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    # Intel 用的 macos-13，GitHub 随时可能下线；它挂了不该拖垮整个流程
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Apple Silicon (arm64)
+            os: macos-latest
+            arch: arm64
+            asset: tonicuisc-macos-arm64.zip
+            artifact: tonicuisc-macos-arm64
+            experimental: false
+          - name: Intel (x86_64)
+            os: macos-13
+            arch: x64
+            asset: tonicuisc-macos-x64.zip
+            artifact: tonicuisc-macos-x64
+            experimental: true
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: 本地 Dart 自检
+        # 几秒钟的事，但能挡住「括号不配平 / import 指到不存在的文件」这类低级错误——
+        # 这些错让 flutter build 跑到十几分钟才炸，不如现在就炸。
+        # （真正的 flutter analyze / test 在 build.yml 的 analyze job 里，跑在 Linux 上）
+        run: |
+          python3 tool/check_dart_balance.py
+          python3 tool/check_dart_imports.py
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: 确认 runner
+        run: |
+          echo "runner 架构: $(uname -m)"
+          echo "macOS 版本 : $(sw_vers -productVersion)"
+          echo "本次目标   : ${{ matrix.arch }}"
+
+      - name: 缓存 CocoaPods
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/CocoaPods
+          key: pods-${{ matrix.os }}-${{ hashFiles('app/pubspec.yaml') }}
+          restore-keys: pods-${{ matrix.os }}-
+
+      - name: 生成 macOS 工程
+        working-directory: app
+        run: |
+          flutter config --enable-macos-desktop
+          flutter create --project-name tonicuisc --org com.tonicuisc --platforms=macos .
+
+      - name: 应用原生补丁
+        run: bash ./tool/apply_patches.sh
+
+      - name: 检查沙盒权限（少了就连不上后端）
+        run: |
+          # app 是沙盒里的：没有 network.client，出去的网络请求会被系统直接掐断；
+          # 没有 downloads 读写，下载的歌存不进「下载」目录。
+          for key in com.apple.security.network.client \
+                     com.apple.security.files.downloads.read-write \
+                     com.apple.security.files.user-selected.read-write; do
+            if grep -q "$key" app/macos/Runner/Release.entitlements; then
+              echo "OK   $key"
+            else
+              echo "缺失 $key —— 补丁没打上？"
+              exit 1
+            fi
+          done
+
+      - name: 写入版本号
+        env:
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+        run: python tool/apply_version.py "${{ github.ref_name }}" --build=${{ github.run_number }}
+
+      - name: 安装依赖
+        working-directory: app
+        run: flutter pub get
+
+      - name: 构建
+        working-directory: app
+        run: flutter build macos --release
+
+      - name: 校验产物
+        run: |
+          APP="app/build/macos/Build/Products/Release/tonicuisc.app"
+          BIN="$APP/Contents/MacOS/tonicuisc"
+          if [ ! -d "$APP" ]; then echo "没找到 $APP"; exit 1; fi
+          archs="$(lipo -archs "$BIN")"
+          echo "架构   : $archs"
+          echo "体积   : $(du -sh "$APP" | cut -f1)"
+          echo "签名   :"
+          codesign -dv --verbose=2 "$APP" 2>&1 | sed -n '1,6p' || true
+
+          # 产物名写了哪个架构，里面就必须真的有那个架构
+          case "${{ matrix.arch }}" in
+            arm64)
+              echo "$archs" | grep -q arm64 || { echo "期望 arm64，实际 $archs"; exit 1; } ;;
+            x64)
+              echo "$archs" | grep -q x86_64 || { echo "期望 x86_64，实际 $archs"; exit 1; } ;;
+          esac
+          echo "架构校验通过"
+
+      - name: 打包
+        run: |
+          cd app/build/macos/Build/Products/Release
+          # 用 ditto 而不是 zip：.app 里有符号链接，ditto 才能保住链接和签名
+          ditto -c -k --sequesterRsrc --keepParent tonicuisc.app "$GITHUB_WORKSPACE/${{ matrix.asset }}"
+          ls -lh "$GITHUB_WORKSPACE/${{ matrix.asset }}"
+
+      - name: 写使用说明
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+          ### 装到 Mac 上
+
+          产物是**未签名**的，用浏览器下载后 Gatekeeper 会拦（提示「已损坏，无法打开」）。
+          装好后执行一次就行：
+
+          ```bash
+          xattr -dr com.apple.quarantine /Applications/tonicuisc.app
+          ```
+
+          或者右键 App → 打开 → 在弹窗里再点「打开」。
+          EOF
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.asset }}
+          if-no-files-found: error
+
+  publish:
+    name: 挂到 Release
+    needs: build
+    # tag 推送时自动挂；手动触发要显式勾 publish
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.publish == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v5
+        with:
+          path: dist
+
+      - name: 列出产物
+        run: find dist -type f | sort
+
+      - name: 计算标签与标题
+        id: version
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          COMMIT_TITLE: ${{ github.event.head_commit.message }}
+        run: |
+          # 和 build.yml 保持同一套规则：提交标题里的 vX.Y.Z（可带 fix）优先，其次用 tag 名
+          title=$(printf '%s' "$COMMIT_TITLE" | head -n 1 | tr -d '\r' | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')
+          tag=$(printf '%s' "$COMMIT_TITLE" | grep -oiE 'v[0-9]+\.[0-9]+(\.[0-9]+)?(fix)?' | head -n 1 | tr 'A-Z' 'a-z')
+          [ -n "$tag" ] || tag="$REF_NAME"
+          [ -n "$title" ] || title="Tonicuisc $tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "title=$title" >> "$GITHUB_OUTPUT"
+          echo "Release 标签: $tag 标题: $title"
+
+      - name: 上传到 Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          TITLE: ${{ steps.version.outputs.title }}
+        run: |
+          # build.yml 的 Release job 可能同时在跑：谁先到谁建，另一个重试即可
+          for attempt in 1 2 3 4 5; do
+            if gh release view "$TAG" >/dev/null 2>&1; then
+              gh release edit "$TAG" --title "$TITLE" && break
+            elif gh release create "$TAG" --title "$TITLE" --generate-notes; then
+              break
+            fi
+            echo "第 $attempt 次没成，10 秒后重试…"
+            sleep 10
+          done
+
+          mapfile -d '' assets < <(find dist -type f -print0)
+          gh release upload "$TAG" "${assets[@]}" --clobber

@@ -12,11 +12,11 @@ from types import SimpleNamespace
 
 import pytest
 
-import tonicuisc_server.artwork as artwork_module
+from tonicuisc_server.services import artwork as artwork_module
 from conftest import make_storage
-from tonicuisc_server.config import SETTINGS
-from tonicuisc_server.items import song_to_item
-from tonicuisc_server.service import MusicService
+from tonicuisc_server.core.config import SETTINGS
+from tonicuisc_server.services import song_to_item
+from tonicuisc_server.services import MusicService
 
 
 def _wait_for(predicate, timeout: float = 5.0, interval: float = 0.01) -> bool:
