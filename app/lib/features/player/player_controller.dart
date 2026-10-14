@@ -245,7 +245,7 @@ class PlayerController extends ChangeNotifier {
   }
 
   PlayMode cycleMode() {
-    final values = PlayMode.values;
+    const values = PlayMode.values;
     setMode(values[(values.indexOf(_mode) + 1) % values.length]);
     return _mode;
   }

@@ -6,7 +6,6 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 import '../core/api_client.dart';
 import '../core/credentials.dart';
 import '../core/self_signed.dart';
-import '../core/server_config.dart';
 import '../features/auth/device_login.dart';
 import '../features/auth/login_page.dart';
 import '../features/library/library_page.dart';
@@ -71,23 +70,28 @@ class _MainShellState extends State<MainShell> with WidgetsBindingObserver {
   }
 
   Future<void> _bootstrap() async {
-    // 四个读都是本地存储（SharedPreferences / 安全存储），并发读一次拿齐：
-    // 串行 await 的话启动要多花三个来回，桌面端安全存储偶发变慢时更明显。
-    final values = await Future.wait([
-      loadBaseUrl(),
-      Credentials.apiKey(),
-      Credentials.deviceName(),
-      Credentials.username(),
-    ]);
-    final url = values[0];
-    final key = values[1];
+    // 四个读都是本地存储（SharedPreferences / 安全存储），**先全部发出去、再逐个 await**：
+    // 串行 await 要多花三个来回，桌面端安全存储偶发变慢时更明显。
+    //
+    // 这里不用 `Future.wait`：它是 `Future<String>` 和 `Future<String?>` 混在一起，
+    // 会被推成 `List<String?>`，于是 baseUrl 也成了可空类型（analyze 直接报错）。
+    // 分开 await 既保持了并发，类型也各是各的。
+    final urlFuture = loadBaseUrl();
+    final keyFuture = Credentials.apiKey();
+    final nameFuture = Credentials.deviceName();
+    final usernameFuture = Credentials.username();
+
+    final url = await urlFuture;
+    final key = await keyFuture;
+    final name = await nameFuture;
+    final username = await usernameFuture;
     if (!mounted) return;
     _adoptApi(ApiClient(url, apiKey: key));
     setState(() {
       _baseUrl = url;
       _apiKey = key;
-      _deviceName = values[2];
-      _username = values[3];
+      _deviceName = name;
+      _username = username;
       _booted = true;
     });
     if (key != null && key.isNotEmpty) {

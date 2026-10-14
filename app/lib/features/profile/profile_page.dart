@@ -199,7 +199,7 @@ class _ProfilePageState extends State<ProfilePage> {
           dense: true,
           leading: const Icon(Icons.info_outline),
           title: const Text('版本'),
-          subtitle: Text('$kAppVersion（build $kAppBuild）'),
+          subtitle: const Text('$kAppVersion（build $kAppBuild）'),
           onTap: _load,
           // 隐藏彩蛋：长按这行改服务器地址（有域名后默认地址写死，入口平时不可见）
           onLongPress: () async {
