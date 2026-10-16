@@ -19,6 +19,8 @@ deploy/Caddyfile
 # 自动下载的 caddy 二进制（Windows zip / Linux tar.gz 解出来的）
 deploy/win/
 deploy/linux/
+# Caddy 的状态：证书 / ACME 账号 / autosave.json（刻意放项目里，但不入库）
+deploy/.caddy/
 
 # ---- Flutter / 前端 ----
 app/.dart_tool/

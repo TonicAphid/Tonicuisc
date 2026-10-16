@@ -4,8 +4,10 @@
 
     h  帮助          l   看设备和账户        r <ID>  吊销设备（ID 可只输前几位）
     p <用户> 重置密码  c <用户> 生成恢复码    x   清理无主 / 已吊销的设备记录
-    rd  Redis 状态    cc  清搜索缓存          log off 关掉请求日志
-    q   停止服务
+    rd  Redis 状态    cc  清搜索缓存          env 看当前环境   acme 看证书状态
+    log off 关掉请求日志                      q   停止服务
+
+命令表就是本模块的 ``COMMANDS``（唯一出处，``h`` 直接遍历它打印）。
 """
 
 from __future__ import annotations
@@ -19,12 +21,48 @@ from . import commands
 
 PROMPT = "> "
 
+#: 擦掉当前行：回车 + 清到行尾。
+#: 日志来的时候要先把已经画出的 ``> `` 擦掉，否则会拼成 ``> [timing] ...``（实测踩过）。
+CLEAR_LINE = "\r\033[K"
+
+
+def enable_ansi(stream) -> bool:
+    """尽量让终端认 ANSI 转义序列；返回是否可用。
+
+    Windows 10+ 的 conhost / Windows Terminal 都支持，但**默认不一定开**
+    （``ENABLE_VIRTUAL_TERMINAL_PROCESSING``）。不开的话 ``\\033[K`` 会被原样打出来，
+    比不擦行还难看，所以要先探测、失败了就退回「只补画、不擦除」。
+    """
+    if not hasattr(stream, "isatty") or not stream.isatty():
+        return False
+    if not hasattr(stream, "fileno"):
+        return False
+    try:
+        if sys.platform != "win32":
+            return True
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        handle = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+        mode = ctypes.c_uint32()
+        if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            return False
+        if mode.value & 0x0004:  # 已经开了
+            return True
+        return bool(kernel32.SetConsoleMode(handle, mode.value | 0x0004))
+    except Exception:
+        return False
+
 
 class PromptingStdout:
     """包一层 ``sys.stdout``：控制台空闲时，任何输出之后把 ``>`` 补画回行尾。
 
     uvicorn 的 ``INFO:`` 行、应用自己 ``print`` 的 ``[access]`` / ``[timing]`` 都走这层；
     用户敲字的回显走控制台驱动、不经过这层，所以不会被打断。
+
+    **日志来时先把已画出的提示符擦掉**（``\\r`` + 清行），再写日志，最后重画 ``>``。
+    不擦的话日志会直接接在提示符后面，变成 ``> [timing] ...``——看着像提示符被吃掉了。
+
     补画时机：回到等输入时**立刻**画一个；等输入期间来了日志，则安静一小会儿（60ms）
     后补画——这样 ``h`` 那种一次打十来行的输出只在末尾补一个，连续几条日志也只补一次。
     **每次画完必须 flush**：提示符没有换行符，stdout 在终端是行缓冲的，不 flush 它会
@@ -41,6 +79,8 @@ class PromptingStdout:
         self._last_output = 0.0
         self._lock = threading.Lock()
         self._stop = threading.Event()
+        #: 能不能用 ANSI 擦行；不行就只补画（宁可多个 > 也不要打印出乱码）
+        self._ansi = enable_ansi(real)
         self._thread = threading.Thread(target=self._watch, daemon=True, name="console-prompt")
         self._thread.start()
 
@@ -51,6 +91,16 @@ class PromptingStdout:
     # ------------------------------------------------------------ sys.stdout 接口
     def write(self, text: str) -> int:
         with self._lock:
+            # 提示符已经画在行尾了：先把它「收掉」，日志才能独占一行。
+            # 不处理的话就是 `> [timing] ...`，看着像提示符被吃掉了（用户反馈过）。
+            #
+            # 两种收法：
+            #   · 支持 ANSI → 擦掉整行（最干净，提示符原地消失、日志顶上来）
+            #   · 不支持   → 先换行（会在上一行留一个 `> `，但日志至少是独立的行）
+            # 后者是保底：宁可留个孤零零的 `> `，也不要日志跟提示符糊在一起。
+            if self.enabled and self._drawn and text:
+                self.real.write(CLEAR_LINE if self._ansi else "\n")
+                self._drawn = False
             self.real.write(text)
             self.real.flush()  # 别让输出（尤其没换行的）在缓冲区里跟提示符换了位次
             if self.enabled:
@@ -111,6 +161,8 @@ COMMANDS: dict[str, tuple[tuple[str, ...], str, str]] = {
     "cleanup": (("x", "clean"), "", "清理无主 / 已吊销的设备记录"),
     "redis": (("rd",), "", "看 Redis 状态"),
     "clear": (("cc",), "", "清掉搜索结果缓存"),
+    "env": ((), "", "看当前环境（切环境要停服务后跑 env <uisc|tuisc>）"),
+    "acme": ((), "", "看证书状态（签发：acme --issue）"),
     "log": ((), "on|off", "开 / 关请求日志（关掉控制台更清净）"),
     "stop": (("q", "quit", "s"), "", "停止服务"),
 }
@@ -186,6 +238,11 @@ def console_command(line: str, server, store) -> bool:
         commands.redis_command()
     elif name == "clear":
         commands.clear_cache_command(store)
+    elif name == "env":
+        # 只读：切环境要写 .env 且重启才生效，在服务跑着的时候切很容易把人搞糊涂
+        commands.env_command([])
+    elif name == "acme":
+        commands.acme_command(["--status"])
     elif name == "log":
         set_access_log(args)
     elif name == "stop":

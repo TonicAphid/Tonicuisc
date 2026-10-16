@@ -35,6 +35,10 @@ on:
         description: 构建完把产物挂到 Release
         type: boolean
         default: false
+      intel:
+        description: 顺便构建 Intel (x86_64) 版（macos-13 排队很久，默认不跑）
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -50,12 +54,18 @@ env:
 jobs:
   build:
     name: macOS ${{ matrix.name }}
-    # workflow_run 触发时，只在被触发的那个 Build 成功时才接着干
-    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    # 两道条件：
+    #   1. workflow_run 触发时，只在被触发的那个 Build 成功时才接着干；
+    #   2. Intel 那条腿**默认不跑**——macos-13 容量紧张（实测排队 1 小时以上还没动），
+    #      而 `needs: build` 要等**全部**矩阵腿，它会把 publish 一起卡死。
+    #      要 Intel 就手动触发并勾上 intel。
+    if: >-
+      (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success')
+      && (matrix.optional != true || inputs.intel == true)
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
-    # Intel 用的 macos-13，GitHub 随时可能下线；它挂了不该拖垮整个流程
-    continue-on-error: ${{ matrix.experimental }}
+    # Intel 那条腿失败不该拖垮整个流程
+    continue-on-error: ${{ matrix.optional }}
     strategy:
       fail-fast: false
       matrix:
@@ -65,13 +75,14 @@ jobs:
             arch: arm64
             asset: tonicuisc-macos-arm64.zip
             artifact: tonicuisc-macos-arm64
-            experimental: false
+            optional: false
           - name: Intel (x86_64)
             os: macos-13
             arch: x64
             asset: tonicuisc-macos-x64.zip
             artifact: tonicuisc-macos-x64
-            experimental: true
+            # optional = 默认不跑 + 失败不算总失败（macos-13 容量紧张、随时可能下线）
+            optional: true
     steps:
       - uses: actions/checkout@v5
         with:

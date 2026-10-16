@@ -1,6 +1,7 @@
 import 'dart:async';
 
-import 'package:flutter/material.dart';
+import 'package:flutter/cupertino.dart';
+import 'package:flutter/services.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../core/api_client.dart';
@@ -15,8 +16,12 @@ import '../features/player/player_controller.dart';
 import '../features/profile/profile_page.dart';
 import '../features/search/search_page.dart';
 import '../shared/cover_cache.dart';
+import '../shared/dialogs.dart';
+import 'layout.dart';
+import 'nav_sidebar.dart';
 
-/// 应用外壳：底部三个 tab（搜索 / 列表 / 我的），未登录时直接显示设备码登录页。
+/// 应用外壳：窄屏底部三个 tab（搜索 / 列表 / 我的），宽屏左侧导航栏；
+/// 未登录时直接显示设备码登录页。
 class MainShell extends StatefulWidget {
   const MainShell({super.key});
 
@@ -159,32 +164,54 @@ class _MainShellState extends State<MainShell> with WidgetsBindingObserver {
   Future<void> _editServerUrl() async {
     final controller = TextEditingController(text: _baseUrl);
     var allowSelfSigned = SelfSignedOverrides.allow;
-    final value = await showDialog<String>(
+    final value = await showCupertinoDialog<String>(
       context: context,
       builder: (context) => StatefulBuilder(
-        builder: (context, setDialogState) => AlertDialog(
+        builder: (context, setDialogState) => CupertinoAlertDialog(
           title: const Text('服务器地址'),
           content: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              TextField(
+              const SizedBox(height: 14),
+              CupertinoTextField(
                 controller: controller,
                 autofocus: true,
                 keyboardType: TextInputType.url,
-                decoration: const InputDecoration(hintText: kDefaultServerUrl),
+                placeholder: kDefaultServerUrl,
+                textAlign: TextAlign.center,
               ),
-              SwitchListTile(
-                contentPadding: EdgeInsets.zero,
-                value: allowSelfSigned,
-                title: const Text('允许自签证书'),
-                subtitle: const Text('内网 HTTPS 用；公网域名不需要开'),
-                onChanged: (next) => setDialogState(() => allowSelfSigned = next),
+              const SizedBox(height: 16),
+              Row(
+                children: [
+                  const Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('允许自签证书', textAlign: TextAlign.left, style: TextStyle(fontSize: 15)),
+                        SizedBox(height: 2),
+                        Text(
+                          '内网 HTTPS 用；公网域名不需要开',
+                          textAlign: TextAlign.left,
+                          style: TextStyle(fontSize: 12, color: CupertinoColors.systemGrey),
+                        ),
+                      ],
+                    ),
+                  ),
+                  CupertinoSwitch(
+                    value: allowSelfSigned,
+                    onChanged: (next) => setDialogState(() => allowSelfSigned = next),
+                  ),
+                ],
               ),
             ],
           ),
           actions: [
-            TextButton(onPressed: () => Navigator.pop(context), child: const Text('取消')),
-            FilledButton(
+            CupertinoDialogAction(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('取消'),
+            ),
+            CupertinoDialogAction(
+              isDefaultAction: true,
               onPressed: () => Navigator.pop(context, controller.text.trim()),
               child: const Text('保存'),
             ),
@@ -205,10 +232,168 @@ class _MainShellState extends State<MainShell> with WidgetsBindingObserver {
 
   static const List<String> _titles = ['Tonicuisc', '列表', '我的'];
 
+  /// 宽屏左侧导航栏的三项（图标 + 选中态图标 + 文字）。
+  static const List<NavSidebarItem> _navItems = [
+    NavSidebarItem(
+      icon: CupertinoIcons.search,
+      selectedIcon: CupertinoIcons.search_circle_fill,
+      label: '搜索',
+    ),
+    NavSidebarItem(
+      icon: CupertinoIcons.music_albums,
+      selectedIcon: CupertinoIcons.music_albums_fill,
+      label: '列表',
+    ),
+    NavSidebarItem(
+      icon: CupertinoIcons.person,
+      selectedIcon: CupertinoIcons.person_fill,
+      label: '我的',
+    ),
+  ];
+
+  /// 三个 tab 的页面本体：**窄屏 / 宽屏共用同一份**，只换外面的壳。
+  ///
+  /// 用 `IndexedStack` 而不是每次重建：切 tab 不重来，搜索到一半的结果、
+  /// 翻到第几页都留着。窗口在断点两侧拖动时，外面那层是「同结构、换参数」
+  /// （见 `_content`），这棵子树原地复用，不会丢状态。
+  Widget _pages() {
+    return IndexedStack(
+      index: _tab,
+      children: [
+        SearchPage(
+          api: _api,
+          player: _player,
+          library: _library,
+          onUnauthorized: _handleUnauthorized,
+        ),
+        LibraryPage(
+          api: _api,
+          library: _library,
+          player: _player,
+          onUnauthorized: _handleUnauthorized,
+        ),
+        ProfilePage(
+          api: _api,
+          baseUrl: _baseUrl,
+          deviceName: _deviceName,
+          username: _username,
+          onChangeServer: _editServerUrl,
+          onRelogin: _logout,
+          onLogout: _logout,
+          onUnauthorized: _handleUnauthorized,
+        ),
+      ],
+    );
+  }
+
+  void _selectTab(int index) {
+    setState(() => _tab = index);
+    if (index == 1) unawaited(_library.refresh()); // 切到列表就刷新一次数字
+  }
+
+  /// 「掉线 / 被登出」的提示条：窄屏贴在顶栏下面，宽屏贴在内容区顶上。
+  Widget _noticeBanner(BuildContext context) {
+    final danger = CupertinoColors.systemRed.resolveFrom(context);
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: danger.withValues(alpha: 0.12),
+        border: Border(
+          bottom: BorderSide(color: CupertinoColors.separator.resolveFrom(context), width: 0.5),
+        ),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 8, 6, 8),
+        child: Row(
+          children: [
+            Icon(CupertinoIcons.info_circle, size: 18, color: danger),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                _notice!,
+                style: TextStyle(fontSize: 13, color: CupertinoColors.label.resolveFrom(context)),
+              ),
+            ),
+            CupertinoButton(
+              padding: const EdgeInsets.all(8),
+              pressedOpacity: 0.5,
+              onPressed: () => setState(() => _notice = null),
+              child: Icon(
+                CupertinoIcons.xmark,
+                size: 16,
+                color: CupertinoColors.secondaryLabel.resolveFrom(context),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _playerBar() {
+    return PlayerBar(
+      controller: _player,
+      api: _api,
+      library: _library,
+      onUnauthorized: _handleUnauthorized,
+    );
+  }
+
+  /// 窄屏底部 tab 栏（苹果那套）。底部安全区（home indicator）由
+  /// `CupertinoTabBar` 自己按 `viewPadding` 处理，所以播放条不要再加一层。
+  Widget _tabBar() {
+    return CupertinoTabBar(
+      currentIndex: _tab,
+      onTap: _selectTab,
+      items: const [
+        BottomNavigationBarItem(
+          icon: Icon(CupertinoIcons.search),
+          activeIcon: Icon(CupertinoIcons.search_circle_fill),
+          label: '搜索',
+        ),
+        BottomNavigationBarItem(
+          icon: Icon(CupertinoIcons.music_albums),
+          activeIcon: Icon(CupertinoIcons.music_albums_fill),
+          label: '列表',
+        ),
+        BottomNavigationBarItem(
+          icon: Icon(CupertinoIcons.person),
+          activeIcon: Icon(CupertinoIcons.person_fill),
+          label: '我的',
+        ),
+      ],
+    );
+  }
+
+  /// 内容区。
+  ///
+  /// 宽屏时两侧平分留白，把内容收在 `kDesktopMaxContentWidth` 以内——但**不改
+  /// 传给页面的约束**（用 `Padding` 而不是 `ConstrainedBox`），所以搜索列表、
+  /// 歌单这些页面一行都不用动。
+  ///
+  /// 结构在两种布局下完全一致（只换 padding 数值），这样在断点两侧拖动窗口时
+  /// `IndexedStack` 里那三页原地复用，不会重建。
+  Widget _content(bool desktop) {
+    final pages = Column(
+      children: [
+        if (_notice != null) _noticeBanner(context),
+        Expanded(child: _pages()),
+      ],
+    );
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final slack = desktop ? constraints.maxWidth - kDesktopMaxContentWidth : 0.0;
+        final pad = slack > 0 ? slack / 2 : 0.0;
+        return Padding(padding: EdgeInsets.symmetric(horizontal: pad), child: pages);
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     if (!_booted) {
-      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+      return CupertinoPageScaffold(
+        child: Center(child: CupertinoActivityIndicator()),
+      );
     }
     if (!_loggedIn) {
       return LoginPage(
@@ -219,77 +404,30 @@ class _MainShellState extends State<MainShell> with WidgetsBindingObserver {
       );
     }
 
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(_titles[_tab]),
-      ),
-      body: Column(
+    // 一份代码、两套布局：窗口够宽（且不是手机横屏那种「宽而扁」）就走桌面布局。
+    final desktop = useDesktopLayout(MediaQuery.sizeOf(context));
+
+    return CupertinoPageScaffold(
+      // 宽屏有左侧导航指路，不再占一条顶栏；窄屏沿用原来的顶栏标题
+      navigationBar: desktop ? null : CupertinoNavigationBar(middle: Text(_titles[_tab])),
+      child: Column(
         children: [
-          if (_notice != null)
-            Material(
-              color: Theme.of(context).colorScheme.errorContainer,
-              child: ListTile(
-                dense: true,
-                leading: const Icon(Icons.info_outline),
-                title: Text(_notice!),
-                trailing: IconButton(
-                  icon: const Icon(Icons.close),
-                  onPressed: () => setState(() => _notice = null),
-                ),
-              ),
-            ),
           Expanded(
-            child: IndexedStack(
-              index: _tab,
+            child: Row(
               children: [
-                SearchPage(
-                  api: _api,
-                  player: _player,
-                  library: _library,
-                  onUnauthorized: _handleUnauthorized,
-                ),
-                LibraryPage(
-                  api: _api,
-                  library: _library,
-                  player: _player,
-                  onUnauthorized: _handleUnauthorized,
-                ),
-                ProfilePage(
-                  api: _api,
-                  baseUrl: _baseUrl,
-                  deviceName: _deviceName,
-                  username: _username,
-                  onChangeServer: _editServerUrl,
-                  onRelogin: _logout,
-                  onLogout: _logout,
-                  onUnauthorized: _handleUnauthorized,
-                ),
+                if (desktop)
+                  NavSidebar(
+                    currentIndex: _tab,
+                    items: _navItems,
+                    onSelected: _selectTab,
+                  ),
+                Expanded(child: _content(desktop)),
               ],
             ),
           ),
-        ],
-      ),
-      bottomNavigationBar: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          PlayerBar(
-            controller: _player,
-            api: _api,
-            library: _library,
-            onUnauthorized: _handleUnauthorized,
-          ),
-          NavigationBar(
-            selectedIndex: _tab,
-            onDestinationSelected: (index) {
-              setState(() => _tab = index);
-              if (index == 1) unawaited(_library.refresh()); // 切到列表就刷新一次数字
-            },
-            destinations: const [
-              NavigationDestination(icon: Icon(Icons.search), label: '搜索'),
-              NavigationDestination(icon: Icon(Icons.library_music_outlined), label: '列表'),
-              NavigationDestination(icon: Icon(Icons.person_outline), label: '我的'),
-            ],
-          ),
+          // 播放条两种布局都在，而且**横跨整个窗口**（侧边栏下面也铺到）
+          _playerBar(),
+          if (!desktop) _tabBar(),
         ],
       ),
     );

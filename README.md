@@ -62,8 +62,12 @@ app/                               Flutter 客户端
   lib/
     main.dart                      入口：只做平台初始化（media_kit / 后台播放 / 自签开关）
     version.dart                   构建时由 tool/apply_version.py 写入
-    app/app.dart                   应用根 widget（主题）
-    app/main_shell.dart            三个 tab 的外壳 + 登录闸门 + 401 收口
+    app/app.dart                   应用根 widget（Cupertino 主题 + 中文本地化）
+    app/theme.dart                 iOS 系统蓝 + 浅色 / 深色两套 Cupertino 主题
+    app/main_shell.dart            外壳：手机 / 桌面两套布局 + 登录闸门 + 401 收口
+    app/layout.dart                响应式断点（窗口多宽算桌面）
+    app/nav_sidebar.dart           桌面左侧导航栏（苹果风「图标 + 文字」宽侧边栏）
+    app/legacy_material_host.dart  过渡壳：罩住还没迁到 Cupertino 的页面（迁完即删）
     core/api_client.dart           HTTP 客户端（接口方法、`X-API-Key`、下载）
     core/api_errors.dart           异常类型 + friendlyError（把报错翻成人话）
     core/server_config.dart        默认服务器地址 + 本机保存的地址
@@ -85,6 +89,8 @@ app/                               Flutter 客户端
     models/lyric.dart              LRC 解析
     shared/cover_cache.dart        QQ 封面缓存（按 id 批量问，同一首只问一次）
     shared/song_avatar.dart        封面（失败退回音源首字）
+    shared/toast.dart              苹果风轻提示（替代 Material 的 SnackBar）
+    shared/dialogs.dart            苹果风确认弹窗（showCupertinoDialog）
   test/                            纯 Dart 单测（歌词解析、模型、文件名过滤）
 
 tool/                              构建与自检脚本
@@ -98,8 +104,8 @@ tool/                              构建与自检脚本
 deploy/                            家里部署（外部 v4 + v6 双栈 → 内部 IPv4）
   Caddyfile.template               Caddy 配置模板（按当前环境生成实际配置）
   open-firewall.ps1                放行入站 80 / 443（管理员，可 -Remove 撤销）
-  update_dns.py                    维护 A / AAAA 记录（阿里云解析，--update 才真改）
-  .aliyun.env.example              AK 配置样例（真文件 .aliyun.env 已 gitignore）
+  update_dns.py                    维护 A / AAAA 记录（阿里云解析；--update 才真改，--check 只读）
+  .aliyun.env.example              AK 配置样例（真文件 .aliyun.env 已 gitignore，用 ddns set-key 填）
 .github/workflows/                 server-ci.yml（后端）/ build.yml（客户端）/ macos.yml（macOS 单独构建）
 ```
 
@@ -155,7 +161,8 @@ flutter build windows --release
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `TONICUISC_HOST` | `0.0.0.0` | 监听地址 |
+| `TONICUISC_HOST` | `127.0.0.1` | 监听地址。默认**只监听 IPv4 回环**——家里部署时由 Caddy 反代过来，服务端不该直接对外。想让局域网 / 外网直连（不装 Caddy）再显式改成 `0.0.0.0` |
+| `TONICUISC_ENV` | 空 | 当前环境（`uisc` 正式 / `tuisc` 测试）。决定对外域名、启动横幅、DDNS 目标；不填时**首次启动会问一次**并写进 `server/.env`。改：`python -m tonicuisc_server env tuisc`，或 `env --ask` 现场问一遍 |
 | `TONICUISC_PORT` | `8000` | 端口 |
 | `TONICUISC_SOURCES` | `migu,kuwo` | 启用音源 |
 | `TONICUISC_SEARCH_SIZE` | `5` | 每个音源的抓取下限（实际按「要几条 ÷ 音源数」分摊） |
@@ -246,17 +253,28 @@ App                         浏览器(/login)                 服务端
 - App 收到 401 自动清凭据并回到登录页——**搜索 / 翻页 / 列表增删 / 歌手页 / 播放页的红心 / 歌词 / 设备列表**每个入口都会走这条路（并发来好几个 401 也只清一次、只提示一次）；
 - **桌面端明文副本的取舍**：Windows / Linux 的安全存储偶发「这个进程写进去、下个进程读不回来」，会导致每次启动都得重新配对，所以 `credentials.dart` 读回校验失败会退回普通存储，并**在桌面端额外留一份明文副本**。代价是能读到 App 沙盒设置的人也能看到这把 key（`X-API-Key` 在 HTTP 明文链路上本来就能被抓走，见下面「这套东西的边界」）。「我的」页会在真退回普通存储时给出提示，安全存储恢复后提示自动消失。
 
-本机管理（不需要 key）：
+本机管理（不需要 key）。**完整清单看 `python -m tonicuisc_server --help`**：
 
 ```bash
-python -m tonicuisc_server devices            # 设备 + 账户列表
+# 设备 / 账户
+python -m tonicuisc_server devices            # 设备 + 账户列表（简写 list）
 python -m tonicuisc_server revoke <device_id> # 吊销某台设备（= 删记录）
 python -m tonicuisc_server set-password <用户名>   # 重置密码（不用问旧密码，交互输入两次）
 python -m tonicuisc_server recovery-code <用户名>  # 生成新的恢复码（旧的作废，明文只显示一次）
 python -m tonicuisc_server cleanup            # 清理无账户 / 已吊销的设备记录
+
+# 运行时
 python -m tonicuisc_server redis              # 看一眼 Redis（地址 / 版本 / 是不是托管实例）
 python -m tonicuisc_server clear-cache        # 清掉搜索结果缓存（下次搜索重新联网）
-python -m tonicuisc_server cert <域名或IP>      # 生成自签证书（内网 HTTPS 用）
+
+# 部署 / HTTPS（详见下面「HTTPS」一节）
+python -m tonicuisc_server env [uisc|tuisc]   # 看 / 改当前环境
+python -m tonicuisc_server caddy --status     # Caddy：--download / --generate / --validate
+                                              #         --start / --log
+python -m tonicuisc_server acme --status      # Let's Encrypt 证书：--issue / --force / --staging
+python -m tonicuisc_server ddns set-key       # 阿里云解析：set-key / check / run / install
+                                              #              / status / remove
+python -m tonicuisc_server cert <域名或IP>      # 生成**自签**证书（内网 HTTPS 用）
 ```
 
 启动后控制台底部会一直留一个 `>` 提示符（跟 MC 服务端那样），直接敲命令——简写、
@@ -301,7 +319,63 @@ q   停止服务（Ctrl+C 等价）
 ```
 
 **服务端自己只监听 IPv4 回环，永远不直接对外；外面只能从 Caddy 的 443 进来。**
-`deploy/Caddyfile` 已按这个拓扑写好。
+`deploy/Caddyfile` 由 `deploy/Caddyfile.template` 按当前环境生成。
+
+**Caddy 会跟着服务端一起启动**（`TONICUISC_CADDY_AUTOSTART`，默认开），不用再开第二个窗口：
+
+```bash
+python -m tonicuisc_server            # 起服务端，顺手把 Caddy 也拉起来
+python -m tonicuisc_server caddy --start   # 或者单独起 Caddy（前台，日志更直观）
+```
+
+起不来**不影响服务端**，只打印原因（端口被占 / 入站没放行都能边跑边修）；
+服务端退出时会把 Caddy 一起收摊。只想局域网直连、不挂 HTTPS 就设 `TONICUISC_CADDY_AUTOSTART=0`。
+
+> **证书存在项目里**（`deploy/.caddy/`，已 gitignore），不是 `%AppData%\Caddy`。
+> 这是刻意的：受限环境下 `%AppData%` 建不了目录，Caddy 会**直接放弃申请证书**——
+> 表现是 443 握不了手、浏览器报 `ERR_SSL_PROTOCOL_ERROR`，看着像「证书不行」，其实压根没申请。
+> 放在项目里还能顺带让备份 / 搬机器 / 删干净都只动一个目录。
+
+### 证书：Let's Encrypt 签发，但走 DNS-01（不需要入站端口）
+
+**区别只在「怎么向 Let's Encrypt 证明域名是你的」**，证书本身都是 Let's Encrypt 签的：
+
+| 验证方式 | 谁来做 | 要求 |
+| --- | --- | --- |
+| HTTP-01 / TLS-ALPN-01 | Caddy 自带 | **外网必须能连到 80 / 443**（要端口映射 + 运营商没封） |
+| **DNS-01**（默认） | lego（ACME 客户端） | 只要能往解析里写 TXT 记录——**有阿里云 AK 就行，零入站要求** |
+
+大陆家用宽带经常封 80/443，所以默认走 DNS-01：
+
+```bash
+python -m tonicuisc_server acme --status                   # 看证书 / lego / AK 状态
+python -m tonicuisc_server acme --issue                    # 签发（复用 deploy/.aliyun.env 的 AK）
+python -m tonicuisc_server acme --issue --force --staging   # 先用测试环境试流程
+```
+
+签好后 Caddy 只终止 TLS（Caddyfile 里写 `tls <crt> <key>`），**Caddy 不再自己跑 ACME**——
+顺带的好处是它那串 `challenge failed` + 几十行 Go 调用栈的日志彻底消失
+（另外 Caddyfile 里也加了 `stacktrace delete`，把这类噪音统一掐掉）。
+
+> **为什么不让 Caddy 直接做 DNS-01**：Caddy 官方发行版**不含任何 DNS 模块**
+> （`caddy list-modules` 里 `dns.providers` 是 0），要做就得自己编译一个。
+> **lego 不是 CA**，它只是 ACME 客户端（相当于 certbot 那个角色），
+> 证书仍然是 Let's Encrypt 签发的。
+
+### Caddy 的日志去哪了
+
+**默认写文件**（`deploy/.caddy/runtime.log`），不刷控制台——启动时会打十几行 INFO，
+最前面还有两行 `maxprocs` / `GOMEMLIMIT`，混在服务端横幅里很乱。
+
+```bash
+python -m tonicuisc_server caddy --log      # 看运行时日志最后 40 行
+python -m tonicuisc_server caddy --start    # 前台启动（默认显示日志；加 --quiet 只写文件）
+```
+
+> 那两行 Go 运行时信息是**运行时直接写 stderr 的**，不经过 Caddy 的日志系统，
+> 所以只调 Caddyfile 里的日志级别**掐不掉**，必须重定向子进程的输出。
+> 想让后台启动也实时刷屏：设 `TONICUISC_CADDY_LOG=console`。
+> 起不来时会把日志尾部直接附在错误信息里，不用自己去翻文件。
 
 ### 两个域名
 
@@ -350,9 +424,23 @@ python deploy/update_dns.py --only v6                         # 只维护 AAAA
 uisc 在部署机跑、tuisc 在这台测试机跑——两台机器的 IPv6 后缀不同（可能共用同一个 IPv4），
 在一台上跑另一个域名的更新会把记录写成那台机器的地址。
 
-阿里云 AK 放在 `deploy/.aliyun.env`（照 `deploy/.aliyun.env.example` 填，已 gitignore），
-或设环境变量 `ALIYUN_ACCESS_KEY_ID` / `ALIYUN_ACCESS_KEY_SECRET`。
+阿里云 AK 放在 `deploy/.aliyun.env`（已 gitignore）。**一条命令填好并当场验证**：
+
+```bash
+python -m tonicuisc_server ddns set-key     # 交互输入 AK ID / Secret（Secret 不回显）
+python -m tonicuisc_server ddns check       # 只读：看这个域名现有记录（验证 AK + 权限）
+```
+
+`set-key` 写完会立刻用只读接口试一次，所以两类常见问题当场就能分清：
+`InvalidAccessKeyId` = ID/Secret 抄错了；`Forbidden` = 用户没给解析权限。
+
+去哪拿 AK：**RAM 控制台 → 用户 → 点你的用户 → 认证管理 → 创建 AccessKey**
+（Secret 只显示一次）；再去 **权限管理 → 新增授权 → 搜 `AliyunDNSFullAccess`**。
 建议用 **RAM 子账号**、权限只给云解析 DNS。脚本用阿里云 DNS API 的 HMAC-SHA1 签名，不需要装 SDK。
+
+> **定时任务必须用文件里的 AK**：Windows 计划任务 / systemd / cron 都看不到你 shell 里
+> 临时设的环境变量，所以 `ddns install` 会检查文件。密钥也不会被抄进计划任务定义或
+> crontab 里（脚本自己读文件），换 AK 不用重装任务。
 
 **⚠ 稳定地址 vs 临时地址（最容易填错的地方）**：Windows 开了隐私扩展后网卡上有两个全局 IPv6——
 **稳定地址**（`SuffixOrigin=Link`，如 `...:fe45:2163:abb8:c9c0`）接口标识固定，**对外服务要用它**；
@@ -501,6 +589,8 @@ python -m tonicuisc_server                        # 现在直接是 https://192.
 
 ## 客户端界面
 
+- **苹果风（Cupertino）外观，全平台统一**：整个界面用 Cupertino 控件（`lib/app/theme.dart` 里是 iOS 系统蓝 `#007AFF` + 浅色 / 深色两套主题），Windows / Linux 上也一样——页面转场、返回手势、开关 / 滑块 / 分段控件、弹出层都是苹果那套原生动画。`CupertinoApp` 没有 `darkTheme` 参数，深色模式在 `app.dart` 的 `builder` 里按系统亮度自己挑一套 `CupertinoTheme`。**迁移是逐页做的**：还没迁到 Cupertino 的页面暂时被 `lib/app/legacy_material_host.dart` 罩在一层 Material 环境里（否则 `TextField` / `ListTile` / `ScaffoldMessenger` 找不到祖先会直接抛断言）；全部迁完后这个文件和 `app.dart` 里的 `builder` 一起删。
+- **两套布局（一套代码）**：窗口宽度 ≥ `840` **且**短边 ≥ `480` 时切**桌面布局**——左侧苹果风宽侧边栏（`lib/app/nav_sidebar.dart`，图标 + 文字，208px，悬停 / 选中都有过渡）+ 宽内容区 + **横跨整个窗口**的底部播放条（`lib/app/layout.dart` 里的 `useDesktopLayout`）；否则是**手机布局**——`CupertinoNavigationBar` 顶栏 + 底部 `CupertinoTabBar`。宽屏下内容两侧平分留白、收在 1200 逻辑像素内（只加 `Padding`，不改页面拿到的约束，所以各页面一行都不用动）。窗口在断点两侧拖动时 `IndexedStack` 里那三页**原地复用**，搜索到一半的结果不会丢。
 - **登录页**（未登录时的首屏，`lib/features/auth/login_page.dart`）：进页面自动登记设备码，主按钮「打开登录页并复制设备码」弹出系统浏览器并把码放进剪贴板；后台**自适应轮询**（1s→3s），批准后自动完成登录。连不上服务器、码过期、被拒绝、已经领过一次（`claimed`）都会给人话提示；**没登记成功的码不会摆给用户复制**（点了会先重试登记）。
 - **搜索 tab**（`lib/features/search/search_page.dart`）：关键词搜索、音源勾选、显示「正在进行…」和用时、试听、下载、点红心加进「我喜欢」；**点歌手名进歌手主页**；**滑到底自动再加载 15 条**（按 id 去重，不会重复）。
 - **歌手主页**（`lib/features/search/artist_page.dart`）：这个歌手能搜到的所有歌、「全部播放」、逐首点红心（完整度见上面的「歌手主页」一节）。
@@ -526,9 +616,11 @@ python -m tonicuisc_server                        # 现在直接是 https://192.
 ### 为什么 macOS 单独一个 workflow
 
 1. **架构**：GitHub 的 `macos-latest` 现在是 **Apple Silicon（arm64）**，只出 arm64 的话
-   **Intel Mac 根本跑不起来**。所以这里两个架构都出：
-   `macos-latest` → `tonicuisc-macos-arm64.zip`，`macos-13` → `tonicuisc-macos-x64.zip`
-   （Intel 那个标了 `continue-on-error`——`macos-13` GitHub 随时可能下线，挂了不该拖垮整个流程）。
+   **Intel Mac 跑不起来**。所以支持两个架构：`macos-latest` → `tonicuisc-macos-arm64.zip`，
+   `macos-13` → `tonicuisc-macos-x64.zip`。
+   **Intel 那条默认不跑**（手动触发时勾 `intel` 才跑）：`macos-13` 容量紧张——实测排了一个多小时
+   还在队列里，而 `needs: build` 要等**全部**矩阵腿，它会把挂包那步一起卡死。
+   勾了 intel 就接受「挂包要等它」这个代价。
 2. **成本**：macOS runner 计费是 Linux 的 10 倍，全平台 matrix 跑一次要 40 分钟。改客户端时
    只想验证 macOS，用 `workflow_dispatch` 手动触发这个就够了。
 3. 产物用 **`ditto`** 打包而不是 `zip`：`.app` 里有符号链接，`ditto` 才能保住链接和签名；
@@ -538,8 +630,14 @@ python -m tonicuisc_server                        # 现在直接是 https://192.
 
 | 触发 | 行为 |
 | --- | --- |
-| 手动 `workflow_dispatch` | 只出 artifact；勾上 `publish` 才挂到 Release |
+| `Build` 成功之后（`workflow_run`） | 自动接上：构建 arm64 并**挂到 Release** |
+| 手动 `workflow_dispatch` | 只出 artifact；勾 `publish` 才挂 Release，勾 `intel` 才出 x64 |
 | 推送 `v*` tag | 自动构建 + 挂到 Release |
+
+> 为什么用 `workflow_run` 而不是 `push: tags`：Release 是 `build.yml` 用 **GITHUB_TOKEN**
+> 建的 tag，GitHub 规定「GITHUB_TOKEN 触发的事件不会再触发别的 workflow」，
+> 所以 `push: tags` **根本不会响**（实测：一次都没被触发）。`workflow_run` 不受这条限制，
+> 而且它在 `Build` **完全跑完**后才启动，天然不会和建 Release 抢。
 
 **未签名 + Gatekeeper**：产物没有开发者签名，用浏览器下载后 macOS 会拦（提示「已损坏，无法打开」）。
 装好后执行一次即可（workflow 的 Summary 里也会打印这段）：

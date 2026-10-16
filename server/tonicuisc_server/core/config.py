@@ -9,6 +9,7 @@ for local development and for a container deployment.
 
 from __future__ import annotations
 
+import dataclasses
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -80,7 +81,10 @@ def resolve_sources(aliases: list[str]) -> list[str]:
 
 @dataclass(frozen=True)
 class Settings:
-    host: str = os.getenv("TONICUISC_HOST", "0.0.0.0")
+    #: 监听地址。默认 **127.0.0.1**：家里部署时 Caddy 反代到回环，
+    #: 服务端不该直接对外（0.0.0.0 会让外网绕过 Caddy 的 TLS 和鉴权链）。
+    #: 想让局域网 / 外网直连（不装 Caddy）时再显式改成 0.0.0.0 或 ::。
+    host: str = os.getenv("TONICUISC_HOST", "127.0.0.1")
     port: int = int(os.getenv("TONICUISC_PORT", "8000"))
     #: 对外地址，用来在启动横幅里打印登录链接，例如 https://106-35-196-104.nip.io
     public_url: str = os.getenv("TONICUISC_PUBLIC_URL", "").strip()
@@ -154,12 +158,32 @@ class Settings:
     caddy_server: str = os.getenv("TONICUISC_CADDY_SERVER", "").strip()
     #: 找不到 caddy 时自动下载（0 = 只找不下载）
     caddy_download: bool = os.getenv("TONICUISC_CADDY_DOWNLOAD", "1").lower() not in {"0", "false", "no", "off"}
-    #: 启动服务时顺手把 Caddy 也拉起来（1 = 一起起，省得开两个窗口）
-    caddy_autostart: bool = os.getenv("TONICUISC_CADDY_AUTOSTART", "0").lower() not in {"0", "false", "no", "off"}
+    #: 启动服务时顺手把 Caddy 也拉起来（**默认开**：家里部署本来就两个进程，
+    #: 少开一个窗口；设 0 关掉，比如只想在局域网直连、不挂 HTTPS 的时候）
+    caddy_autostart: bool = os.getenv("TONICUISC_CADDY_AUTOSTART", "1").lower() not in {"0", "false", "no", "off"}
+    #: Caddy 的运行时日志往哪写。
+    #: 默认 ``file``（写进 deploy/.caddy/caddy.log）——Caddy 启动会吐十几行
+    #: INFO + Go 运行时信息，混在服务端横幅里很乱；出问题时我们会自动把文件尾部打出来。
+    #: 想看实时刷屏就设 ``console``（或跑 caddy --start --verbose）。
+    caddy_log_console: bool = os.getenv("TONICUISC_CADDY_LOG", "file").strip().lower() in {
+        "console",
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
     #: Caddy 二进制 / 配置的目录（配置就是仓库里的 deploy/）
     caddy_dir: Path = field(
         default_factory=lambda: Path(os.getenv("TONICUISC_CADDY_DIR", SERVER_DIR.parent / "deploy")).resolve()
     )
+    # -------------------------------------------------------------------- ACME
+    #: 用 lego + **DNS-01**（阿里云解析）向 Let's Encrypt 签证书：不需要入站 80/443。
+    #: 默认开——大陆家用宽带常封 80/443，Caddy 自带的 HTTP-01 / TLS-ALPN-01 根本签不下来。
+    acme_dns01: bool = os.getenv("TONICUISC_ACME_DNS01", "1").lower() not in {"0", "false", "no", "off"}
+    #: 证书联系邮箱（Let's Encrypt 用它发到期提醒，可留空）
+    acme_email: str = os.getenv("TONICUISC_ACME_EMAIL", "").strip()
+    #: ACME 服务器；调试时填 staging 可避免撞生产环境的签发限额
+    acme_ca: str = os.getenv("TONICUISC_ACME_CA", "").strip()
 
     @property
     def caddy_config(self) -> Path:
@@ -203,4 +227,33 @@ class Settings:
         return {"host": self.redis_host, "port": self.redis_port, "db": self.redis_db}
 
 
+def display_host(host: str) -> str:
+    """把**监听地址**换成**能点的地址**。
+
+    ``0.0.0.0`` / ``::`` 是「所有网卡」的意思，拿去当 URL 主机名是没用的
+    （横幅会打出 ``http://0.0.0.0:8000/login`` 这种点不开的链接）。
+    """
+    value = (host or "").strip()
+    if value in {"0.0.0.0", "::", "[::]", "*", ""}:
+        return "127.0.0.1"
+    return value
+
+
 SETTINGS = Settings()
+
+
+def apply_runtime_env() -> Settings:
+    """把「刚选好的环境」反映到 :data:`SETTINGS` / :data:`ENVIRONMENT` 上（同进程内）。
+
+    为什么需要它：``Settings`` 的默认值是**类定义时**读环境变量的（``= os.getenv(...)``
+    只在类体执行那一次求值），所以启动时选完环境再往 ``os.environ`` 里写值，
+    ``SETTINGS.public_url`` 还是空的——横幅、登录页链接就会退回 ``http://127.0.0.1:8000``。
+
+    这里显式重建受影响的那几个字段。只影响 ``public_url``（环境选择唯一会改的东西）；
+    ``api.app`` 是在 uvicorn 启动时才 import 的，所以它能拿到重置后的对象。
+    """
+    global SETTINGS, ENVIRONMENT
+
+    ENVIRONMENT = get_environment()
+    SETTINGS = dataclasses.replace(SETTINGS, public_url=os.getenv("TONICUISC_PUBLIC_URL", "").strip())
+    return SETTINGS

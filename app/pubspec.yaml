@@ -9,6 +9,11 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  # Cupertino 自带的「拷贝 / 粘贴 / 取消」等文案：不接这一层就只有英文
+  flutter_localizations:
+    sdk: flutter
+  # CupertinoIcons 字体（苹果风图标）
+  cupertino_icons: ^1.0.8
   http: ^1.2.0
   just_audio: ^0.9.40
   # 手机端锁屏 / 控制中心控制（仅 Android / iOS 生效）

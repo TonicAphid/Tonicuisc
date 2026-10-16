@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from ..core.config import SETTINGS
+from ..core.config import SETTINGS, display_host
 from ..core.runtime import configure_thread_pool, shutdown_thread_pool
 from ..storage import redis_runtime
 from . import middleware as mw
@@ -26,7 +26,9 @@ def login_banner(settings, enabled: bool = True) -> str:
             "  警告：API Key 校验已关闭 (TONICUISC_AUTH=0)\n"
             "  任何人都能调用本服务的接口\n" + "=" * 56
         )
-    base = settings.public_url or f"{settings.scheme}://{settings.host}:{settings.port}"
+    # 没配 PUBLIC_URL 时就地拼一个，但**别把 0.0.0.0 当主机名**——那是「所有网卡」，
+    # 打出来的链接点不开（家里部署时应该配 PUBLIC_URL，指向域名）
+    base = settings.public_url or f"{settings.scheme}://{display_host(settings.host)}:{settings.port}"
     return (
         "\n" + "=" * 56 + "\n"
         "  Tonicuisc 服务已启动\n"

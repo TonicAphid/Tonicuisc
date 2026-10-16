@@ -119,6 +119,75 @@ def test_log_toggle(server) -> None:
         access.setLevel(original)
 
 
+def test_console_env_and_acme_are_readonly(server, capsys) -> None:
+    """控制台里的 env / acme 只给「看」，不能在服务跑着的时候把环境切了。
+
+    切环境要写 .env 且重启才生效，服务跑着的时候切很容易把人搞糊涂
+    （横幅、登录链接、DDNS 目标都还是旧的）。
+    """
+    import os
+
+    from tonicuisc_server.core import environment as env_mod
+
+    before = os.environ.get(env_mod.ENV_KEY)
+    assert _console_command("env", server, None) is False
+    out = capsys.readouterr().out
+    assert "当前环境" in out, out
+    assert os.environ.get(env_mod.ENV_KEY) == before, "不该改动环境"
+
+    assert _console_command("acme", server, None) is False
+    assert "证书" in capsys.readouterr().out
+
+
+def test_console_help_lists_all_commands(capsys) -> None:
+    """h 的帮助要覆盖命令表里的每一条（别再漏 env / acme）。"""
+    cli.print_help()
+    out = capsys.readouterr().out
+    for name in cli.COMMANDS:
+        assert name in out, f"帮助里漏了 {name}"
+
+
+# ------------------------------------------------------------------ 命令行 --help
+def test_cli_help_lists_every_management_command(capsys) -> None:
+    """`--help` 必须列全 MANAGEMENT_COMMANDS。
+
+    以前 `__main__.py` 里手写了一份列表，结果 env / caddy / ddns / acme
+    四个命令压根没出现过，用户根本不知道有这些功能。
+    """
+    cli_commands.print_commands()
+    out = capsys.readouterr().out
+    for name in cli_commands.MANAGEMENT_COMMANDS:
+        assert name in out, f"--help 里漏了 {name}"
+
+
+def test_cli_main_help_does_not_start_server(monkeypatch, capsys) -> None:
+    """`--help` 绝不能掉进「启动服务」那条路（会顺手拉起 Redis/Caddy）。"""
+    from tonicuisc_server import cli as cli_pkg
+
+    started: list[bool] = []
+    monkeypatch.setattr(cli_pkg, "run_server", lambda **kw: started.append(True))
+
+    for flag in ("--help", "-h", "help", "?"):
+        cli_pkg.main([flag])
+        assert started == [], f"{flag} 不该启动服务"
+    assert "用法" in capsys.readouterr().out
+
+
+def test_cli_main_rejects_unknown_command(monkeypatch, capsys) -> None:
+    """敲错命令要给提示，而不是默默去起服务。"""
+    from tonicuisc_server import cli as cli_pkg
+
+    started: list[bool] = []
+    monkeypatch.setattr(cli_pkg, "run_server", lambda **kw: started.append(True))
+
+    with pytest.raises(SystemExit) as info:
+        cli_pkg.main(["devics"])  # 拼错了
+    assert info.value.code == 2
+    assert started == [], "不该启动服务"
+    out = capsys.readouterr().out
+    assert "不认识这个命令" in out and "devices" in out, out
+
+
 # ------------------------------------------------------------------ 循环
 def test_console_loop_runs_until_stop(monkeypatch, capsys) -> None:
     import builtins
@@ -216,6 +285,57 @@ class _RecordingStream(io.StringIO):
     def flush(self) -> None:
         self.flushes += 1
         super().flush()
+
+
+def test_log_does_not_glue_onto_prompt() -> None:
+    """日志来了要**先把 ``> `` 擦掉**，不能拼成 ``> [timing] ...``。
+
+    用户反馈的原话：「这里 > 有的会直接放到 > [] 这样了」——
+    异步日志直接接在已画出的提示符后面，看着像提示符被吃掉了。
+    """
+    real = io.StringIO()
+    out = cli.PromptingStdout(real)
+    try:
+        out._ansi = True  # StringIO 不是终端，手动开成「支持擦行」来验逻辑
+        out.enabled = True
+        out.begin_wait()
+        assert real.getvalue() == cli.PROMPT
+
+        out.write("[timing] 音源搜索: 每源 5 条\n")
+        text = real.getvalue()
+        assert cli.CLEAR_LINE in text, "写日志前要先擦掉提示符那一行"
+        assert f"{cli.PROMPT}[timing]" not in text, f"日志不该拼在提示符后面：{text!r}"
+        # 擦除后紧接着写日志，所以擦除标记后面应该直接跟日志内容
+        assert text.endswith("[timing] 音源搜索: 每源 5 条\n") or text.endswith(cli.PROMPT)
+    finally:
+        out.close()
+
+
+def test_no_ansi_falls_back_to_newline() -> None:
+    """终端不支持 ANSI 时不能把 ``\\033[K`` 原样打出来；改用换行保底。
+
+    宁可上一行留个孤零零的 ``> ``，也不要日志跟提示符糊成 ``> [timing] ...``。
+    """
+    real = io.StringIO()
+    out = cli.PromptingStdout(real)
+    try:
+        out._ansi = False
+        out.enabled = True
+        out.begin_wait()
+        out.write("一行日志\n")
+        text = real.getvalue()
+        assert "\033" not in text, f"不支持 ANSI 时不该出现转义序列：{text!r}"
+        assert f"{cli.PROMPT}[timing]" not in text and f"{cli.PROMPT}一行日志" not in text, (
+            f"日志不该拼在提示符后面：{text!r}"
+        )
+        assert "\n一行日志\n" in text, f"要换行后再写日志：{text!r}"
+    finally:
+        out.close()
+
+
+def test_ansi_probe_is_false_for_non_tty() -> None:
+    """StringIO 不是终端 → 探测结果必须是 False（沙盒 / 管道场景）。"""
+    assert cli.enable_ansi(io.StringIO()) is False
 
 
 def test_prompt_is_drawn_immediately_and_flushed() -> None:

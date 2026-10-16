@@ -53,6 +53,108 @@ def record_for_environment() -> str:
     return ENVIRONMENT.domain
 
 
+def key_file() -> Path:
+    """AK 文件的位置（和 ``deploy/update_dns.py`` 读的是同一个）。"""
+    return SETTINGS.caddy_dir / ".aliyun.env"
+
+
+def _run_script(extra_args: list[str], *, record: str | None = None) -> tuple[int, str]:
+    """跑一次 ``update_dns.py``，返回 (退出码, 输出)。
+
+    **不往子进程里塞 AK**：脚本自己会读 ``deploy/.aliyun.env``。
+    塞进去反而会让脚本分不清「AK 来自环境变量还是文件」，验证时报错信息会误导
+    （实测踩过：文件里的 AK 被报成「来自环境变量」）。
+    """
+    script = script_path()
+    if not script.exists():
+        return 1, f"找不到 {script}"
+    cmd = [python_path(), str(script), "--record", record or record_for_environment(), *extra_args]
+    result = subprocess.run(
+        cmd,
+        cwd=str(SETTINGS.caddy_dir),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    output = ((result.stdout or "") + (result.stderr or "")).strip()
+    return result.returncode, output
+
+
+def set_key(_args: list[str] | None = None) -> int:
+    """交互式把 RAM 的 AccessKey 写进 ``deploy/.aliyun.env``，并读回验证。
+
+    比手写文件强的地方：Secret 用 ``getpass`` 输入（**不回显、不进历史记录**），
+    写完立刻用只读接口试一次——AK 错和权限没给是两种不同的报错，当场就能看清。
+    """
+    import getpass
+
+    path = key_file()
+    existing = _load_aliyun_env()
+    current_id = existing.get("ALIYUN_ACCESS_KEY_ID", "")
+
+    print("阿里云 RAM 的 AccessKey 要填进：")
+    print(f"  {path}（已 gitignore，不会提交）")
+    print()
+    print("去哪拿：RAM 控制台 → 用户 → 点你的用户 → 认证管理 → 创建 AccessKey")
+    print("        **Secret 只显示一次**，关掉就再也看不到（只能重建）")
+    print("还要给权限：同一个用户 → 权限管理 → 新增授权 → 搜 AliyunDNSFullAccess")
+    print()
+    if current_id:
+        print(f"注意：已经有一份 AK（{current_id[:8]}…），继续会覆盖它。")
+        print()
+
+    try:
+        access_key_id = input("AccessKey ID（留空取消）: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print("\n取消。")
+        return 2
+    if not access_key_id:
+        print("没输入，取消。")
+        return 2
+
+    try:
+        secret = getpass.getpass("AccessKey Secret（输入不回显）: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print("\n取消。")
+        return 2
+    if not secret:
+        print("没输入，取消。")
+        return 2
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "# 阿里云 RAM 的 AccessKey —— 给 deploy/update_dns.py 用（刷新 A / AAAA）。\n"
+        "# 这个文件已 gitignore，别提交；建议用 RAM 子账号，权限只给云解析 DNS。\n"
+        f"ALIYUN_ACCESS_KEY_ID={access_key_id}\n"
+        f"ALIYUN_ACCESS_KEY_SECRET={secret}\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    print(f"\n已写入 {path}")
+    print("（Secret 没有回显、也不会被打印出来）")
+
+    # 立刻只读验证一次：AK 对不对、权限给没给，这里就能看出来
+    print("\n正在验证（只读，不改任何记录）…")
+    code, output = _run_script(["--check"])
+    print(output)
+    if code != 0:
+        print("\n验证没通过——上面那行是阿里云给的原因。常见两种：")
+        print("  · InvalidAccessKeyId  → ID / Secret 抄错了（Secret 只能重建）")
+        print("  · Forbidden           → 没给这个用户解析权限（挂 AliyunDNSFullAccess）")
+        return code
+    print("AK 能用 ✓")
+    return 0
+
+
+def check(_args: list[str] | None = None) -> int:
+    """只读检查：列出当前环境下这个域名现有的 A / AAAA 记录。"""
+    print(f"环境    ：{ENVIRONMENT.key}（{ENVIRONMENT.label}）")
+    code, output = _run_script(["--check"])
+    print(output)
+    return code
+
+
 def _load_aliyun_env() -> dict[str, str]:
     """从 ``deploy/.aliyun.env`` 读 AK（给计划任务用——它不会继承你的 shell 环境）。"""
     env_file = SETTINGS.caddy_dir / ".aliyun.env"
@@ -85,8 +187,28 @@ def _every_to_minutes(every: str) -> int:
     return minutes
 
 
+def _only_args(only: str) -> list[str]:
+    """``--only`` 的附加参数（``both`` 为空，保持旧行为）。"""
+    return [] if only == "both" else ["--only", only]
+
+
+def _only_suffix(only: str) -> str:
+    """给 unit / .cmd / cron 拼的命令尾巴（``both`` 为空）。"""
+    return "".join(f" {part}" for part in _only_args(only))
+
+
+def _only_from(args: list[str] | None, default: str = "both") -> str:
+    """从命令行参数里挑 ``--only``（不合法就回退默认）。"""
+    items = args or []
+    for index, token in enumerate(items):
+        if token == "--only" and index + 1 < len(items):
+            value = items[index + 1].strip().lower()
+            return value if value in {"both", "v4", "v6"} else default
+    return default
+
+
 # ------------------------------------------------------------------ Windows
-def _install_windows(minutes: int, record: str) -> int:
+def _install_windows(minutes: int, record: str, only: str = "both") -> int:
     script = script_path()
     if not script.exists():
         print(f"找不到 {script}")
@@ -94,11 +216,13 @@ def _install_windows(minutes: int, record: str) -> int:
     # schtasks 的 /TR 里带引号很麻烦，所以写一个 .cmd 包一层
     cmd_path = SERVER_DIR / ".cache" / f"{TASK_NAME}.cmd"
     cmd_path.parent.mkdir(parents=True, exist_ok=True)
-    aliyun = _load_aliyun_env()
-    lines = ["@echo off", f'cd /d "{SETTINGS.caddy_dir}"']
-    for key, value in aliyun.items():
-        lines.append(f'set "{key}={value}"')
-    lines.append(f'"{python_path()}" "{script}" --record {record} --update >> "{_log_path()}" 2>&1')
+    # **不把 AK 写进这个 .cmd**：脚本自己会读 deploy/.aliyun.env。
+    # 写进去等于把 Secret 又抄了一份到计划任务里（管理员可见），而且换 AK 还得重装任务。
+    lines = [
+        "@echo off",
+        f'cd /d "{SETTINGS.caddy_dir}"',
+        f'"{python_path()}" "{script}" --record {record} --update{_only_suffix(only)} >> "{_log_path()}" 2>&1',
+    ]
     cmd_path.write_text("\r\n".join(lines) + "\r\n", encoding="utf-8")
 
     result = subprocess.run(
@@ -117,7 +241,7 @@ def _install_windows(minutes: int, record: str) -> int:
         print(f"创建计划任务失败：{(result.stderr or result.stdout or '').strip()}")
         print("（试试用管理员 PowerShell 跑这条命令）")
         return 1
-    print(f"已装计划任务「{TASK_NAME}」：每 {minutes} 分钟更新 {record} 的 A/AAAA")
+    print(f"已装计划任务「{TASK_NAME}」：每 {minutes} 分钟更新 {record}（{only}）")
     print(f"  包装脚本：{cmd_path}")
     print(f"  日志    ：{_log_path()}")
     print("  立即跑一次：python -m tonicuisc_server ddns run")
@@ -161,13 +285,13 @@ def _systemd_dir() -> Path:
     return Path.home() / ".config" / "systemd" / "user"
 
 
-def _install_linux(minutes: int, record: str) -> int:
+def _install_linux(minutes: int, record: str, only: str = "both") -> int:
     script = script_path()
     if not script.exists():
         print(f"找不到 {script}")
         return 1
-    aliyun = _load_aliyun_env()
-    env_lines = "\n".join(f'Environment="{key}={value}"' for key, value in aliyun.items())
+    # 不把 AK 塞进 unit：脚本自己会读 deploy/.aliyun.env
+    # （写进 unit 等于把 Secret 又抄一份到 systemd 配置里，换 AK 还得重装）
     log = _log_path()
     log.parent.mkdir(parents=True, exist_ok=True)
 
@@ -176,8 +300,7 @@ Description=Tonicuisc DDNS update ({record})
 
 [Service]
 Type=oneshot
-{env_lines}
-ExecStart={python_path()} {script} --record {record} --update
+ExecStart={python_path()} {script} --record {record} --update{_only_suffix(only)}
 StandardOutput=append:{log}
 StandardError=append:{log}
 """
@@ -208,17 +331,14 @@ WantedBy=timers.target
             print(f"启用 timer 失败：{(result.stderr or '').strip()}")
             print("（有些系统需要先开 user 级 lingering：sudo loginctl enable-linger $USER）")
             return 1
-        print(f"已装 systemd user timer「{TASK_NAME}」：每 {minutes} 分钟更新 {record}")
+        print(f"已装 systemd user timer「{TASK_NAME}」：每 {minutes} 分钟更新 {record}（{only}）")
         print(f"  看状态：systemctl --user status {TASK_NAME}.timer")
         print(f"  看日志：{log}")
         return 0
 
     # 没有 systemd：退回 cron
-    cron_line = (
-        f"*/{minutes} * * * * cd {SETTINGS.caddy_dir} && "
-        + " ".join(f"{key}={value}" for key, value in aliyun.items())
-        + f" {python_path()} {script} --record {record} --update >> {log} 2>&1"
-    )
+    # 同样不把 AK 写进 crontab（crontab 是明文文件，谁都能 crontab -l 看到）
+    cron_line = f"*/{minutes} * * * * cd {SETTINGS.caddy_dir} && {python_path()} {script} --record {record} --update{_only_suffix(only)} >> {log} 2>&1"
     existing = subprocess.run(["crontab", "-l"], capture_output=True, text=True).stdout or ""
     lines = [line for line in existing.splitlines() if TASK_NAME not in line]
     lines.append(f"# {TASK_NAME}")
@@ -227,7 +347,7 @@ WantedBy=timers.target
     if result.returncode != 0:
         print("写 crontab 失败")
         return 1
-    print(f"已装 cron 任务：每 {minutes} 分钟更新 {record}")
+    print(f"已装 cron 任务：每 {minutes} 分钟更新 {record}（{only}）")
     print(f"  日志：{log}")
     return 0
 
@@ -276,6 +396,7 @@ def _status_linux() -> int:
 def install(args: list[str]) -> int:
     every = DEFAULT_EVERY
     record = record_for_environment()
+    only = "both"
     index = 0
     while index < len(args):
         token = args[index]
@@ -287,19 +408,30 @@ def install(args: list[str]) -> int:
             record = args[index + 1]
             index += 2
             continue
+        if token == "--only" and index + 1 < len(args):
+            only = args[index + 1].strip().lower()
+            index += 2
+            continue
         print(f"不认识的参数：{token}")
+        return 2
+    if only not in {"both", "v4", "v6"}:
+        print(f"--only 只认 both / v4 / v6，不认识：{only}")
         return 2
     minutes = _every_to_minutes(every)
 
-    if not _load_aliyun_env() and not os.getenv("ALIYUN_ACCESS_KEY_ID"):
-        print(f"还没配阿里云 AK：往 {SETTINGS.caddy_dir / '.aliyun.env'} 里填")
-        print("（照 .aliyun.env.example 抄两行即可；计划任务不会继承你 shell 里的环境变量，")
-        print("  所以放在文件里最稳）")
+    # 定时任务**必须**用文件里的 AK：Windows 计划任务 / systemd / cron 都看不到你
+    # shell 里临时设的环境变量，写在文件里最稳（而且换 AK 不用重装任务）。
+    if not _load_aliyun_env().get("ALIYUN_ACCESS_KEY_ID"):
+        print(f"还没配阿里云 AK：{key_file()}")
+        if os.getenv("ALIYUN_ACCESS_KEY_ID"):
+            print("（检测到你 shell 里有 ALIYUN_ACCESS_KEY_ID，但定时任务看不到它，")
+            print("  所以还是要写进文件）")
+        print("一条命令搞定：python -m tonicuisc_server ddns set-key")
         return 2
 
     if platform.system() == "Windows":
-        return _install_windows(minutes, record)
-    return _install_linux(minutes, record)
+        return _install_windows(minutes, record, only)
+    return _install_linux(minutes, record, only)
 
 
 def remove() -> int:
@@ -321,31 +453,24 @@ def status() -> int:
     return code
 
 
-def run_once() -> int:
-    """立刻跑一次 ``update_dns.py``（把当前环境的域名刷一遍）。"""
-    script = script_path()
-    if not script.exists():
-        print(f"找不到 {script}")
-        return 1
-    aliyun = _load_aliyun_env()
-    env = dict(os.environ)
-    env.update(aliyun)
+def run_once(args: list[str] | None = None) -> int:
+    """立刻跑一次 ``update_dns.py``（把当前环境的域名刷一遍）。
+
+    家里没公网 v4 时可以 ``ddns run --only v6``：只刷 AAAA、不碰 A。
+    """
+    only = _only_from(args)
     record = record_for_environment()
-    print(f"更新 {record} …")
-    result = subprocess.run(
-        [python_path(), str(script), "--record", record, "--update"],
-        cwd=str(SETTINGS.caddy_dir),
-        env=env,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
-    output = ((result.stdout or "") + (result.stderr or "")).strip()
+    print(f"更新 {record}（{only}）…")
+    code, output = _run_script(["--update", *_only_args(only)], record=record)
     print(output)
+
+    # 记下上次结果，`ddns status` 会显示（计划任务跑的时候没人盯着终端）
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     import time
 
     stamp = time.strftime("%Y-%m-%d %H:%M:%S")
-    STATE_FILE.write_text(f"{stamp}  退出码 {result.returncode}\n{output}\n", encoding="utf-8")
-    return result.returncode
+    try:
+        STATE_FILE.write_text(f"{stamp}  退出码 {code}\n{output}\n", encoding="utf-8")
+    except OSError:
+        pass  # 写不进状态文件不影响这次更新
+    return code

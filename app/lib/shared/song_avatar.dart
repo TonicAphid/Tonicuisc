@@ -1,4 +1,4 @@
-import 'package:flutter/material.dart';
+import 'package:flutter/cupertino.dart';
 
 import '../models/song.dart';
 import 'cover_cache.dart';
@@ -35,15 +35,17 @@ class SongAvatar extends StatelessWidget {
   }
 
   Widget _build(BuildContext context, String coverUrl) {
-    final scheme = Theme.of(context).colorScheme;
     final fallback = Container(
       width: size,
       height: size,
-      color: scheme.surfaceContainerHighest,
+      color: CupertinoColors.tertiarySystemFill.resolveFrom(context),
       alignment: Alignment.center,
       child: Text(
         song.sourceLabel.isEmpty ? '♪' : song.sourceLabel.substring(0, 1),
-        style: TextStyle(fontSize: size * 0.4, color: scheme.onSurfaceVariant),
+        style: TextStyle(
+          fontSize: size * 0.4,
+          color: CupertinoColors.secondaryLabel.resolveFrom(context),
+        ),
       ),
     );
 
@@ -63,7 +65,7 @@ class SongAvatar extends StatelessWidget {
       height: size,
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(radius),
-        border: highlight ? Border.all(color: scheme.primary, width: 2) : null,
+        border: highlight ? Border.all(color: CupertinoTheme.of(context).primaryColor, width: 2) : null,
       ),
       child: ClipRRect(
         borderRadius: BorderRadius.circular(radius - (highlight ? 2 : 0)),

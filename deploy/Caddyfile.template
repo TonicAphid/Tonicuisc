@@ -1,11 +1,35 @@
-# Caddy 配置**模板** —— 真正跑的是按当前环境生成的那份（deploy/Caddyfile.generated）。
+# Caddy 配置**模板** —— 真正跑的是按当前环境生成的那份（deploy/Caddyfile，已 gitignore）。
 #
 # 为什么要模板：正式（uisc）和测试（tuisc）域名不同，Caddy 必须按自己的域名去签证书。
 # 生成方式：
 #     python -m tonicuisc_server caddy --generate      # 只生成，打印路径
 #     python -m tonicuisc_server caddy --start         # 生成 + 校验 + 启动
-# 占位符：{DOMAIN} 对外域名、{UPSTREAM} 反代目标、{LOG} 日志文件。
+# 占位符（生成时会被替换）：DOMAIN 对外域名、UPSTREAM 反代目标、LOG 日志文件、
+# STORAGE 证书目录、TLS 证书指令（用 lego 签好证书时才非空）。
 #
+# 注意：这里**不要写出带花括号的占位符原文**——替换是纯文本的，
+# 连注释里的也会被换掉，把注释行拆坏（实测踩过：校验报
+# "Did you mean to define a second site?"）。
+
+# ── 全局 ────────────────────────────────────────────────────────────────
+# storage：证书 / ACME 账号放哪。**必须显式指定**——Caddy 默认去
+#   %AppData%\Caddy（Linux 是 ~/.local/share/caddy），而受限环境下那个目录建不了，
+#   Caddy 会直接放弃申请证书（表现是 443 握不了手、浏览器 ERR_SSL_PROTOCOL_ERROR，
+#   看着像「证书不行」，其实压根没申请）。
+# log：把 Go 的 stacktrace 字段**删掉**。Caddy 出错时会甩几十行
+#   `github.com/mholt/acmez/...` 调用栈，全是内部实现细节，对排查没帮助，
+#   只会把真正有用的那行（比如 "Timeout during connect"）淹掉。
+{
+	storage file_system {STORAGE}
+
+	log {
+		format filter {
+			wrap console
+			stacktrace delete
+		}
+	}
+}
+
 # ── 拓扑（家里部署）──────────────────────────────────────────────────────
 #
 #   手机 / 浏览器 ──公网 v4 或 v6 : 443──► Caddy ──IPv4 127.0.0.1:8000──► tonicuisc_server
@@ -31,6 +55,9 @@
 {DOMAIN} {
 	encode zstd gzip
 
+	# 证书：有 lego 签好的 Let's Encrypt 证书时由生成脚本填进来
+	# （走 DNS-01，**不需要入站 80/443**；没有这行时 Caddy 会自己申请，那就要入站）
+{TLS}
 	# 反代到 IPv4 回环：服务端只在 127.0.0.1:8000 上，外界碰不到它
 	reverse_proxy {UPSTREAM} {
 		# 音频流可能比较大，别让反代提前断开
