@@ -114,8 +114,8 @@ class PlayerBar extends StatelessWidget {
                       ),
                     ),
                     if (controller.loading)
-                      Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 14),
+                      const Padding(
+                        padding: EdgeInsets.symmetric(horizontal: 14),
                         child: CupertinoActivityIndicator(),
                       )
                     else

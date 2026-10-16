@@ -18,7 +18,11 @@ class Toast {
     final overlay = Overlay.maybeOf(context, rootOverlay: true);
     if (overlay == null) return;
     dismiss();
-    final entry = OverlayEntry(
+    // `late final` 先声明、后赋值：`onDismissed` 里要引用 entry 自己，
+    // 写成 `final entry = OverlayEntry(... entry ...)` 会报
+    // "referenced before declaration"（闭包在初始化表达式里引用了自己）。
+    late final OverlayEntry entry;
+    entry = OverlayEntry(
       builder: (_) => _ToastView(
         message: message,
         hold: duration,

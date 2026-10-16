@@ -1,7 +1,6 @@
 import 'dart:async';
 
 import 'package:flutter/cupertino.dart';
-import 'package:flutter/services.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../core/api_client.dart';
@@ -16,7 +15,6 @@ import '../features/player/player_controller.dart';
 import '../features/profile/profile_page.dart';
 import '../features/search/search_page.dart';
 import '../shared/cover_cache.dart';
-import '../shared/dialogs.dart';
 import 'layout.dart';
 import 'nav_sidebar.dart';
 
@@ -391,7 +389,7 @@ class _MainShellState extends State<MainShell> with WidgetsBindingObserver {
   @override
   Widget build(BuildContext context) {
     if (!_booted) {
-      return CupertinoPageScaffold(
+      return const CupertinoPageScaffold(
         child: Center(child: CupertinoActivityIndicator()),
       );
     }
