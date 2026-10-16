@@ -16,6 +16,7 @@ import '../features/profile/profile_page.dart';
 import '../features/search/search_page.dart';
 import '../shared/cover_cache.dart';
 import 'layout.dart';
+import 'legacy_material_host.dart';
 import 'nav_sidebar.dart';
 
 /// 应用外壳：窄屏底部三个 tab（搜索 / 列表 / 我的），宽屏左侧导航栏；
@@ -255,32 +256,36 @@ class _MainShellState extends State<MainShell> with WidgetsBindingObserver {
   /// 翻到第几页都留着。窗口在断点两侧拖动时，外面那层是「同结构、换参数」
   /// （见 `_content`），这棵子树原地复用，不会丢状态。
   Widget _pages() {
-    return IndexedStack(
-      index: _tab,
-      children: [
-        SearchPage(
-          api: _api,
-          player: _player,
-          library: _library,
-          onUnauthorized: _handleUnauthorized,
-        ),
-        LibraryPage(
-          api: _api,
-          library: _library,
-          player: _player,
-          onUnauthorized: _handleUnauthorized,
-        ),
-        ProfilePage(
-          api: _api,
-          baseUrl: _baseUrl,
-          deviceName: _deviceName,
-          username: _username,
-          onChangeServer: _editServerUrl,
-          onRelogin: _logout,
-          onLogout: _logout,
-          onUnauthorized: _handleUnauthorized,
-        ),
-      ],
+    // `LegacyMaterialSurface` 把 Material 祖先放在 `CupertinoPageScaffold` 的底色
+    // **里面**，否则 ListTile 会报「底色/水波纹可能看不见」（见该类的注释）。
+    return LegacyMaterialSurface(
+      child: IndexedStack(
+        index: _tab,
+        children: [
+          SearchPage(
+            api: _api,
+            player: _player,
+            library: _library,
+            onUnauthorized: _handleUnauthorized,
+          ),
+          LibraryPage(
+            api: _api,
+            library: _library,
+            player: _player,
+            onUnauthorized: _handleUnauthorized,
+          ),
+          ProfilePage(
+            api: _api,
+            baseUrl: _baseUrl,
+            deviceName: _deviceName,
+            username: _username,
+            onChangeServer: _editServerUrl,
+            onRelogin: _logout,
+            onLogout: _logout,
+            onUnauthorized: _handleUnauthorized,
+          ),
+        ],
+      ),
     );
   }
 

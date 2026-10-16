@@ -44,12 +44,16 @@ class NavSidebar extends StatelessWidget {
               children: [
                 Icon(CupertinoIcons.music_note, size: 19, color: accent),
                 const SizedBox(width: 8),
-                Text(
-                  title,
-                  style: TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w600,
-                    color: CupertinoColors.label.resolveFrom(context),
+                // Expanded + ellipsis：标题长了、或者系统字体调大，也不会撑破侧边栏
+                Expanded(
+                  child: Text(
+                    title,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w600,
+                      color: CupertinoColors.label.resolveFrom(context),
+                    ),
                   ),
                 ),
               ],
@@ -112,12 +116,15 @@ class _SidebarTileState extends State<_SidebarTile> {
                   color: widget.selected ? accent : label,
                 ),
                 const SizedBox(width: 10),
-                Text(
-                  widget.item.label,
-                  style: TextStyle(
-                    fontSize: 14,
-                    fontWeight: widget.selected ? FontWeight.w600 : FontWeight.w400,
-                    color: widget.selected ? accent : label,
+                Expanded(
+                  child: Text(
+                    widget.item.label,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: widget.selected ? FontWeight.w600 : FontWeight.w400,
+                      color: widget.selected ? accent : label,
+                    ),
                   ),
                 ),
               ],

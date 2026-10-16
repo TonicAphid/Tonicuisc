@@ -91,7 +91,7 @@ app/                               Flutter 客户端
     shared/song_avatar.dart        封面（失败退回音源首字）
     shared/toast.dart              苹果风轻提示（替代 Material 的 SnackBar）
     shared/dialogs.dart            苹果风确认弹窗（showCupertinoDialog）
-  test/                            纯 Dart 单测（歌词解析、模型、文件名过滤）
+  test/                            单测：歌词解析、模型、文件名过滤；layout_test / shell_test 测响应式布局与外壳
 
 tool/                              构建与自检脚本
   bootstrap_platforms.ps1/.sh      生成各平台原生工程 + 打补丁 + pub get
