@@ -2,7 +2,10 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:tonicuisc/app/app.dart';
+import 'package:tonicuisc/app/glass_tab_bar.dart';
 import 'package:tonicuisc/app/nav_sidebar.dart';
+import 'package:tonicuisc/app/theme.dart';
+import 'package:tonicuisc/shared/glass.dart';
 
 /// 外壳「真跑一遍」的测试。
 ///
@@ -49,8 +52,52 @@ void main() {
     await pumpApp(tester, const Size(800, 600));
 
     expect(find.byType(CupertinoNavigationBar), findsOneWidget);
-    expect(find.byType(CupertinoTabBar), findsOneWidget);
+    expect(find.byType(GlassTabBar), findsOneWidget);
     expect(find.byType(NavSidebar), findsNothing);
+  });
+
+  testWidgets('窄屏：底部 tab 栏是悬浮胶囊（不贴边、有玻璃材质），点一下能切 tab', (tester) async {
+    SharedPreferences.setMockInitialValues(loggedIn());
+    await pumpApp(tester, const Size(800, 600));
+
+    final capsule = tester.getRect(find.byType(GlassTabBar));
+    // 左右各留出 kFloatingTabBarMargin 的边距 —— 贴边就不叫「悬浮」了
+    expect(capsule.left, greaterThanOrEqualTo(kFloatingTabBarMargin.left));
+    expect(capsule.right, lessThanOrEqualTo(800 - kFloatingTabBarMargin.right));
+    // 也没贴到窗口最底下（下面还要给 home indicator 留位置）
+    expect(capsule.bottom, lessThan(600));
+    // 材质是玻璃，不是一块纯色
+    expect(
+      find.descendant(of: find.byType(GlassTabBar), matching: find.byType(GlassSurface)),
+      findsOneWidget,
+    );
+
+    // 一开始停在「搜索」
+    expect(tester.widget<IndexedStack>(find.byType(IndexedStack).first).index, 0);
+
+    // 点胶囊里的「列表」（限定在 GlassTabBar 里找，免得撞上页面内的同名文字）
+    await tester.tap(
+      find.descendant(of: find.byType(GlassTabBar), matching: find.text('列表')),
+    );
+    await tester.pump(const Duration(milliseconds: 250));
+
+    expect(tester.widget<IndexedStack>(find.byType(IndexedStack).first).index, 1);
+  });
+
+  // 这条是回归测试：`barBackgroundColor` 一旦变成半透明，`CupertinoPageScaffold`
+  // 就会把内容画到顶栏**后面**，页面顶部被盖住、往下滑还会弹回去。
+  test('顶栏底色必须不透明，否则内容会藏到顶栏后面', () {
+    expect(AppTheme.light.barBackgroundColor, kContentLight);
+    expect(AppTheme.dark.barBackgroundColor, kContentDark);
+  });
+
+  testWidgets('窄屏：页面内容排在顶栏下面，不被顶栏盖住', (tester) async {
+    SharedPreferences.setMockInitialValues(loggedIn());
+    await pumpApp(tester, const Size(800, 600));
+
+    final navBottom = tester.getRect(find.byType(CupertinoNavigationBar)).bottom;
+    final contentTop = tester.getRect(find.byType(IndexedStack).first).top;
+    expect(contentTop, greaterThanOrEqualTo(navBottom));
   });
 
   testWidgets('宽屏（1400×900）：左侧侧边栏，没有顶栏 / 底部 tab 栏', (tester) async {
@@ -59,7 +106,7 @@ void main() {
 
     expect(find.byType(NavSidebar), findsOneWidget);
     expect(find.byType(CupertinoNavigationBar), findsNothing);
-    expect(find.byType(CupertinoTabBar), findsNothing);
+    expect(find.byType(GlassTabBar), findsNothing);
   });
 
   testWidgets('宽屏侧边栏点一下能切 tab', (tester) async {
@@ -83,7 +130,7 @@ void main() {
     await pumpApp(tester, const Size(844, 390));
 
     expect(find.byType(NavSidebar), findsNothing);
-    expect(find.byType(CupertinoTabBar), findsOneWidget);
+    expect(find.byType(GlassTabBar), findsOneWidget);
   });
 
   testWidgets('未登录：进登录页，不出现外壳（顺带验证过渡壳罩得住 Material 页面）',
@@ -92,6 +139,6 @@ void main() {
     await pumpApp(tester, const Size(800, 600));
 
     expect(find.byType(NavSidebar), findsNothing);
-    expect(find.byType(CupertinoTabBar), findsNothing);
+    expect(find.byType(GlassTabBar), findsNothing);
   });
 }

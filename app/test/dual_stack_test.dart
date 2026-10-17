@@ -1,0 +1,154 @@
+import 'dart:async';
+import 'dart:io';
+
+import 'package:flutter_test/flutter_test.dart';
+import 'package:tonicuisc/core/dual_stack.dart';
+
+/// 假 socket：只用到 `destroy()`，其余成员靠 noSuchMethod 兜住。
+class _FakeSocket implements Socket {
+  bool destroyed = false;
+
+  @override
+  void destroy() {
+    destroyed = true;
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+InternetAddress _v6() => InternetAddress('240e:1:2:3::1');
+InternetAddress _v4() => InternetAddress('1.2.3.4');
+
+/// 立刻连上的假连接。
+Future<ConnectionTask<Socket>> _connected(Socket socket) async =>
+    ConnectionTask.fromSocket(Future<Socket>.value(socket), () {});
+
+/// 永远连不上的假连接（用来模拟 v6 黑洞）。
+Future<ConnectionTask<Socket>> _hang() async =>
+    ConnectionTask.fromSocket(Completer<Socket>().future, () {});
+
+void main() {
+  group('orderAddresses', () {
+    test('IPv6 排到前面，同族内保持原顺序', () {
+      final v4a = InternetAddress('1.1.1.1');
+      final v4b = InternetAddress('2.2.2.2');
+      final v6a = InternetAddress('240e::1');
+      final v6b = InternetAddress('240e::2');
+      expect(
+        orderAddresses([v4a, v6a, v4b, v6b]).map((e) => e.address).toList(),
+        [v6a.address, v6b.address, v4a.address, v4b.address],
+      );
+    });
+
+    test('只有一族时原样返回', () {
+      final v4 = [InternetAddress('1.1.1.1'), InternetAddress('2.2.2.2')];
+      expect(orderAddresses(v4), v4);
+      expect(orderAddresses(const []), isEmpty);
+    });
+  });
+
+  group('raceConnections（Happy Eyeballs）', () {
+    test('v6 先连上：不会再去动 v4', () async {
+      final v6 = _v6();
+      final v4 = _v4();
+      final socket = _FakeSocket();
+      final tried = <String>[];
+
+      final winner = await raceConnections(
+        [v6, v4],
+        8443,
+        stagger: const Duration(milliseconds: 20),
+        connector: (host, port) async {
+          tried.add('$host');
+          return '$host' == '$v6' ? _connected(socket) : _hang();
+        },
+      );
+
+      expect(winner, same(socket));
+      expect(tried, ['$v6']); // v4 根本没被连过
+    });
+
+    test('v6 卡住：头筹时间一到 v4 接上', () async {
+      final v6 = _v6();
+      final v4 = _v4();
+      final socket = _FakeSocket();
+      final tried = <String>[];
+
+      final winner = await raceConnections(
+        [v6, v4],
+        8443,
+        stagger: const Duration(milliseconds: 20),
+        connector: (host, port) async {
+          tried.add('$host');
+          return '$host' == '$v6' ? _hang() : _connected(socket);
+        },
+      );
+
+      expect(winner, same(socket));
+      expect(tried, ['$v6', '$v4']);
+    });
+
+    test('v6 立刻报错：不等头筹时间，直接试 v4', () async {
+      final v6 = _v6();
+      final v4 = _v4();
+      final socket = _FakeSocket();
+      final watch = Stopwatch()..start();
+
+      final winner = await raceConnections(
+        [v6, v4],
+        8443,
+        // 头筹给到 5 秒：真要是等了，这个测试会明显变慢
+        stagger: const Duration(seconds: 5),
+        connector: (host, port) async {
+          if ('$host' == '$v6') throw const SocketException('no route to host');
+          return _connected(socket);
+        },
+      );
+      watch.stop();
+
+      expect(winner, same(socket));
+      expect(watch.elapsed, lessThan(const Duration(seconds: 1)));
+    });
+
+    test('所有地址都连不上：把错误抛出去', () async {
+      await expectLater(
+        raceConnections(
+          [_v6(), _v4()],
+          8443,
+          stagger: const Duration(milliseconds: 20),
+          connector: (host, port) async => throw SocketException('连不上 $host'),
+        ),
+        throwsA(isA<SocketException>()),
+      );
+    });
+
+    test('落选的连接会被取消，赢家不会被取消', () async {
+      final v6 = _v6();
+      final v4 = _v4();
+      final socket = _FakeSocket();
+      var v6Cancelled = false;
+      var winnerCancelled = false;
+      final hang = Completer<Socket>();
+
+      final winner = await raceConnections(
+        [v6, v4],
+        8443,
+        stagger: const Duration(milliseconds: 20),
+        connector: (host, port) async {
+          if ('$host' == '$v6') {
+            return ConnectionTask.fromSocket(hang.future, () => v6Cancelled = true);
+          }
+          return ConnectionTask.fromSocket(
+            Future<Socket>.value(socket),
+            () => winnerCancelled = true,
+          );
+        },
+      );
+
+      expect(winner, same(socket));
+      expect(v6Cancelled, isTrue); // 黑洞那条被掐掉了
+      expect(winnerCancelled, isFalse); // 赢家要留给 HttpClient 用
+    });
+  });
+}

@@ -67,12 +67,14 @@ app/                               Flutter 客户端
     app/main_shell.dart            外壳：手机 / 桌面两套布局 + 登录闸门 + 401 收口
     app/layout.dart                响应式断点（窗口多宽算桌面）
     app/nav_sidebar.dart           桌面左侧导航栏（苹果风「图标 + 文字」宽侧边栏）
+    app/glass_tab_bar.dart         手机底部「悬浮胶囊」tab 栏（iOS 26 风）
     app/legacy_material_host.dart  过渡壳：罩住还没迁到 Cupertino 的页面（迁完即删）
     core/api_client.dart           HTTP 客户端（接口方法、`X-API-Key`、下载）
     core/api_errors.dart           异常类型 + friendlyError（把报错翻成人话）
     core/server_config.dart        默认服务器地址 + 本机保存的地址
     core/credentials.dart          设备凭据（系统安全存储 + 桌面端兜底）
-    core/self_signed.dart          自签证书开关（内网 HTTPS）
+    core/self_signed.dart          自签证书开关（内网 HTTPS）+ 给 HttpClient 装双栈策略
+    core/dual_stack.dart           双栈连接：IPv6 优先、v6 不通 250ms 内回落 IPv4
     features/auth/device_login.dart      设备码登录协议 + 轮询节奏
     features/auth/login_page.dart        登录页
     features/search/search_page.dart     搜索 tab
@@ -91,6 +93,7 @@ app/                               Flutter 客户端
     shared/song_avatar.dart        封面（失败退回音源首字）
     shared/toast.dart              苹果风轻提示（替代 Material 的 SnackBar）
     shared/dialogs.dart            苹果风确认弹窗（showCupertinoDialog）
+    shared/glass.dart              「液态玻璃」材质（模糊 + 半透明 + 高光描边 + 投影）
   test/                            单测：歌词解析、模型、文件名过滤；layout_test / shell_test 测响应式布局与外壳
 
 tool/                              构建与自检脚本
@@ -146,7 +149,24 @@ flutter run -d windows     # 或 linux / macos
 flutter build windows --release
 ```
 
-**默认服务器地址是 `https://uisc.tonicaphid.cn`**，定义在 `app/lib/core/server_config.dart` 的 `kDefaultServerUrl`——要换服务器改这一行即可。用户在本机改过之后会存在本地设置里，不会再回到默认值；改地址的入口是「我的」页**长按版本号**（平时隐藏，App 不再要求用户填 IP）。同一个弹窗里还有「**允许自签证书**」开关，内网自签 HTTPS 时才需要打开。
+**默认服务器地址是 `https://uisc.tonicaphid.cn`（不带端口）**，定义在 `app/lib/core/server_config.dart` 的 `kDefaultServerUrl`——要换服务器改这一行即可。用户在本机改过之后会存在本地设置里，不会再回到默认值；改地址的入口是「我的」页**长按版本号**（平时隐藏，App 不再要求用户填 IP）。同一个弹窗里还有「**允许自签证书**」开关，内网自签 HTTPS 时才需要打开。
+
+> **为什么不带端口**：`uisc` 现在走 frp 隧道（`CNAME → xg-2.frp.one`），隧道映射的是 **443**。
+> 「家里直连 + 8443」那套**还没启用**——真要切过去，**必须先把 DNS / DDNS / 路由器 / 防火墙 / 部署机
+> `.env` 五处都改好，再改这一行**；只改客户端那一行会导致 App **连不上**
+> （隧道节点的 8443 是关的，实测过）。详见下面「HTTPS → 家里的两个坑」。
+>
+> `app/lib/core/dual_stack.dart`（v6 优先、250ms 回落 v4）是**为直连双栈准备的**，走隧道时用不上。
+
+### Windows 本机第一次跑（三个坑 + 一个噪音）
+
+全新机器上 `flutter run -d windows` 必踩三个坑，**都跟 App 代码无关**：
+
+1. **Visual Studio 组件**：要「使用 C++ 的桌面开发」工作负载，而且**必须勾上 ATL**（单个组件里的「适用于最新 v143 生成工具的 C++ ATL (x86 和 x64)」）。工程里 8 个 Windows 插件只有 `flutter_secure_storage_windows` 需要它，缺了会在 `flutter_secure_storage_windows_plugin.cpp` 报 `C1083: 无法打开包括文件: "atlstr.h"`。
+2. **mpv 下载**：`media_kit_libs_windows_audio` 的 CMake 会从 GitHub 拉 `mpv-dev-x86_64-*.7z`（国内直连必失败）。手动把文件放进 `app/build/windows/x64/` 就能跳过——CMake **只校验 MD5 == `cd738e16e2a19626d7cfa48801524f8c`**，对上就不下载。镜像用 `https://gh-proxy.com/`（`ghproxy.net` 不行）。**别 `flutter clean`**，会把它删掉。
+3. **CMake 脏缓存（最阴的一个）**：`windows/CMakeLists.txt` 里修 `CMAKE_INSTALL_PREFIX` 的那段用 `if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)` 包着——这个条件**只在第一次 configure 为真**，而那段又排在 `include(flutter/generated_plugins.cmake)`（第 58 行）**后面**。所以只要第一次 configure 因为上面第 2 条失败过，缓存里就永久留下默认前缀 `C:/Program Files/<工程名>`，之后每次 INSTALL 都往那儿拷 → `error MSB3073`。修法：删掉 `app/build/windows/x64/CMakeCache.txt` 重新 configure。
+
+另外一个**不用管**的噪音：控制台刷 `[ERROR:flutter/shell/platform/common/accessibility_bridge.cc(114)] Failed to update ui::AXTree, error: N will not be in the tree and is not the new root`。这是 Flutter 引擎在 Windows 上的已知 bug（[#98099](https://github.com/flutter/flutter/issues/98099)、[#182444](https://github.com/flutter/flutter/issues/182444)，后者给的复现条件是 **`ListView` + Material `Tooltip`**），**只是 debug 控制台的日志**，界面和功能都不受影响，release 版没有控制台。仓库里的 `Tooltip` 全部来自还没迁到 Cupertino 的 `IconButton(tooltip: ...)`，**逐页迁移做完它自然就没了**。
 
 ### 第一次登录
 
@@ -379,21 +399,28 @@ python -m tonicuisc_server caddy --start    # 前台启动（默认显示日志�
 
 ### 两个域名
 
-| 域名 | 用途 | 绑哪台机器 | 记录 |
+| 域名 | 用途 | 绑哪台机器 | 记录（**2026-10-17 实测**） |
 | --- | --- | --- | --- |
-| `uisc.tonicaphid.cn` | **正式**，App 全部访问走它 | 部署机（清凉那台） | **A + AAAA 双栈** |
-| `tuisc.tonicaphid.cn` | **测试**，自己调试用 | 这台测试机 | **A + AAAA 双栈** |
+| `uisc.tonicaphid.cn` | **正式**，App 全部访问走它 | 部署机（清凉那台） | **CNAME → `xg-2.frp.one`**（走 frp 隧道，映射 443） |
+| `tuisc.tonicaphid.cn` | **测试**，自己调试用 | 这台测试机 | **目前一条记录都没有**（要用得先加 A / AAAA） |
 
-两边都是双栈：**别只加 AAAA 而漏了 A**（或反过来），否则另一族网络下的客户端会白等一轮超时。
-App 只需要认 `uisc`——先 v4 还是先 v6 由系统按 RFC 6724 自己挑，客户端不用管。
+> `uisc` **不是** A + AAAA 直连：为了让「家里 443 被运营商封」这件事绕过去，它现在指着 frp 隧道。
+> 隧道那条路映射的是 **443**，所以客户端地址**不带端口**。
+> 想改成直连（A + AAAA + 非标端口 8443）见下面「家里的两个坑」——**那是待办，不是现状**。
+>
+> 走隧道时客户端只认 `uisc` 这一个名字（节点只给 A），先 v4 还是先 v6 由系统按 RFC 6724 自己挑；
+> `app/lib/core/dual_stack.dart` 那套「v6 优先、v6 不通回落 v4」是**为直连双栈准备的**，
+> 现在这条路用不上，但留着不碍事。
 
 ### 一次性准备
 
 1. **DNS（阿里云解析）**：`tonicaphid.cn` 的 NS 是 `dns13/dns14.hichina.com`，记录在**阿里云云解析 DNS** 里改。
-   给两个域名各配 **A + AAAA** 两条，值用脚本探测（见下）。
+   走隧道时给 `uisc` 配 **CNAME**（指向节点）；走直连时给两个域名各配 **A + AAAA** 两条，
+   值用脚本探测（见下）。**CNAME 和 A/AAAA 不能共存**，切换时先删掉一种。
 2. **放行入站 443（和 80）**：
    - Windows 防火墙：`pwsh -File deploy/open-firewall.ps1`（管理员），只加两条具名规则，可 `-Remove` 撤销；
    - 光猫 / 路由器：**IPv4 端口映射**（外网 443 → 部署机 443）+ **IPv6 防火墙放行** TCP 80/443。
+   - （走隧道时这一条不需要——隧道是家里**主动连出去**的，不依赖入站。）
      两族都要放行——只放 v6 的话，纯 IPv4 网络就连不上。
 3. **服务端 `server/.env`**：
    ```
@@ -450,8 +477,54 @@ python -m tonicuisc_server ddns check       # 只读：看这个域名现有记�
 
 ### 家里的两个坑
 
-- **80 / 443 入站可能被封**：部分地区运营商封住宅宽带的 80/443。封了有两条路——用 DNS-01 签证书并改用
-  非标端口（比如 8443），或者套一层 CDN 代理。
+- **80 / 443 入站被运营商封**：住宅宽带很常见（工信部政策——家宽开 443 得企业专线 + 备案，办不下来）。
+
+  **⚠️ 现状先说清楚（2026-10-17 实测）**：`uisc` 现在走的是 **frp 隧道**
+  （`CNAME → xg-2.frp.one`，隧道映射 **443**），**不是**下面这套非标端口。
+  部署机只监听 80 / 443，没有任何 8443 配置；客户端默认地址也**不带端口**。
+  **所以下面六步是「待办方案」，不是现状**——别以为已经切过去了。
+
+  三条路可选：**继续用隧道**（零改动，延迟看节点）/ **换非标端口 8443**（下面这套）/ **套 CDN 代理**。
+  要切 8443，整套六步**缺一不可**：
+
+  1. `server/.env` 里加两行。**证书不用重签**——lego 走 DNS-01，跟端口无关：
+     ```
+     TONICUISC_HTTPS_PORT=8443
+     TONICUISC_PUBLIC_URL=https://uisc.tonicaphid.cn:8443
+     ```
+  2. 重新生成 + 重启 Caddy（站点地址会变成 `uisc.tonicaphid.cn:8443`）：
+     ```
+     python -m tonicuisc_server caddy --generate    # 先看一眼生成的 deploy/Caddyfile
+     python -m tonicuisc_server caddy --start
+     ```
+  3. **路由器 / 光猫：两件事，缺一不可**
+     - **IPv4**：端口映射（有的叫「虚拟服务器」）——`外部端口 8443` → `192.168.5.43` + `内部端口 8443`，
+       协议 **TCP**。只填 IP 不填端口不算数。
+     - **IPv6**：**不需要端口映射**（IPv6 没有 NAT，端到端直连），只要在路由器的 **IPv6 防火墙**里
+       放行**入站 TCP 8443** 到部署机那个 IPv6 地址。
+  4. **DNS 改成直连**：`uisc` 现在指的是 frp 节点的 **CNAME**，而 CNAME **不能和 A / AAAA 共存**，
+     所以要**先在阿里云控制台手删掉那条 CNAME**，再在部署机跑：
+     ```
+     python deploy/update_dns.py --update --only both   # 写 A（家里公网 v4）+ AAAA（家里稳定 v6）
+     ```
+     （不加 `--update` 只打印。删 CNAME 这步脚本不管——`sync_record` 只按同类型查重，不会动 CNAME。）
+     > 之前为了走隧道，家里的 DDNS 定时器大概率被 `ddns remove` 停掉了（CNAME 和 A/AAAA 不能共存）。
+     > **改回直连必须把它装回来**，否则家里的公网地址一变就再也连不上：
+     > `python -m tonicuisc_server ddns install`（`ddns status` 确认）。
+  5. **改客户端默认地址**：`app/lib/core/server_config.dart` 的 `kDefaultServerUrl` 改成
+     `https://uisc.tonicaphid.cn:8443`，重新发版（App 里临时改：我的 → 长按版本号 → 服务器地址）。
+  6. **从手机走流量验证**（别连家里 Wi-Fi，不然测的是内网）：`https://uisc.tonicaphid.cn:8443/api/health`。
+
+  > ⚠️ **顺序别搞反**：前 1–4 步没做完，**不要**先改客户端地址——隧道节点的 8443 是关的，
+  > 改了就是 App 全连不上（实测 `23.147.68.16:8443` 拒绝连接）。
+
+  > ⚠️ **前提是有公网 IPv4**。路由器 WAN 口 IP 若落在 `100.64.x.x`（CGNAT）/ `10.x` /
+  > `172.16–31.x` / `192.168.x`，就是没有公网地址 —— 端口映射做了也没用，得先打客服要
+  > （说「家里装了监控 / NAS，要远程访问」，**别说建网站**，说了会直接进备案流程被拒）。
+  > 注意这跟云服务器上的「未备案域名拦截」不是一回事：那是云厂商自己的防火墙做的域名比对，
+  > 家里是 ISP 的 IP，ISP 只封端口、不做域名比对。
+  > 另外**走直连之后 frp 隧道那条路就不在域名上了**（域名只能指一个地方）。要回滚就把 CNAME 改回
+  > `sz.frp.one` / `xg-2.frp.one`；隧道本身留着当备用，用 `curl --resolve` 单独测它。
 - **纯 IPv4 或纯 IPv6 的网络**：双栈记录本身覆盖了两族，但如果你只放行了其中一族，另一族就连不上
   （IPv4 需要路由器端口映射，IPv6 需要防火墙放行，两件事都要做）。
 
@@ -590,7 +663,13 @@ python -m tonicuisc_server                        # 现在直接是 https://192.
 ## 客户端界面
 
 - **苹果风（Cupertino）外观，全平台统一**：整个界面用 Cupertino 控件（`lib/app/theme.dart` 里是 iOS 系统蓝 `#007AFF` + 浅色 / 深色两套主题），Windows / Linux 上也一样——页面转场、返回手势、开关 / 滑块 / 分段控件、弹出层都是苹果那套原生动画。`CupertinoApp` 没有 `darkTheme` 参数，深色模式在 `app.dart` 的 `builder` 里按系统亮度自己挑一套 `CupertinoTheme`。**迁移是逐页做的**：还没迁到 Cupertino 的页面暂时被 `lib/app/legacy_material_host.dart` 罩在一层 Material 环境里（否则 `TextField` / `ListTile` / `ScaffoldMessenger` 找不到祖先会直接抛断言）；全部迁完后这个文件和 `app.dart` 里的 `builder` 一起删。
-- **两套布局（一套代码）**：窗口宽度 ≥ `840` **且**短边 ≥ `480` 时切**桌面布局**——左侧苹果风宽侧边栏（`lib/app/nav_sidebar.dart`，图标 + 文字，208px，悬停 / 选中都有过渡）+ 宽内容区 + **横跨整个窗口**的底部播放条（`lib/app/layout.dart` 里的 `useDesktopLayout`）；否则是**手机布局**——`CupertinoNavigationBar` 顶栏 + 底部 `CupertinoTabBar`。宽屏下内容两侧平分留白、收在 1200 逻辑像素内（只加 `Padding`，不改页面拿到的约束，所以各页面一行都不用动）。窗口在断点两侧拖动时 `IndexedStack` 里那三页**原地复用**，搜索到一半的结果不会丢。
+  - **已迁**：外壳（含悬浮胶囊 tab 栏）、底部播放条、**搜索页**。
+  - **待迁**：列表 / 我的 / 全屏播放 / 播放队列 / 歌手主页 / 登录页。
+  - 迁完的页面顺带消掉一类噪音：Material 的 `IconButton(tooltip: ...)` 在 Windows 上会触发引擎的 AXTree 报错刷屏（见上面「Windows 本机第一次跑」）。
+- **iOS 26「液态玻璃」（Liquid Glass）**：`lib/shared/glass.dart` 里的 `GlassSurface` 是这套材质的底座 —— `BackdropFilter` 模糊 + 半透明底色 + 0.5px 高光描边 + 淡投影（少了描边就像一块塑料板）。iOS 26 最有辨识度的**悬浮胶囊 tab 栏**已经落地（见下）。
+  > ⚠️ **「内容从玻璃栏下穿过」这一半还没做**：Flutter 的 `ListView` 只在 `padding == null` 时才自动吃 `MediaQuery.padding`，而现有页面都写了显式 `padding`，所以内容暂时还不会滑到玻璃底下去。要做成完全体得按顺序来：**① 先逐页迁移**，让每个页面的滚动容器把 `MediaQuery.paddingOf(context)` 加进自己的 padding；**② 再把外壳改成 `Stack`**，让顶栏 / 侧边栏 / tab 栏**叠在**内容上面（现在它们和内容是 `Column` 里的兄弟节点，根本压不到一起）。顺序反了会「内容被玻璃栏盖住」——那正是当初 `barBackgroundColor` 必须不透明的原因。
+- **双栈连接（IPv6 优先）**：域名同时有 `AAAA` / `A` 时，客户端**先连 IPv6**；250ms 还没连上就把 IPv4 也发出去，谁先连上算谁（`lib/core/dual_stack.dart`，RFC 8305 Happy Eyeballs 的最小实现，挂在唯一的 `HttpClient` 工厂上所以全 App 生效）。自己接管这一步是因为 `dart:io` 默认把整个地址列表交给系统排序，而且**一个地址连不通时是干等超时**，不会立刻换下一个——手机从 WiFi 切到只有 v4 的网络时最能感觉到。
+- **两套布局（一套代码）**：窗口宽度 ≥ `840` **且**短边 ≥ `480` 时切**桌面布局**——左侧苹果风宽侧边栏（`lib/app/nav_sidebar.dart`，图标 + 文字，208px，悬停 / 选中都有过渡）+ 宽内容区 + **横跨整个窗口**的底部播放条（`lib/app/layout.dart` 里的 `useDesktopLayout`）；否则是**手机布局**——`CupertinoNavigationBar` 顶栏 + 底部**悬浮胶囊 tab 栏**（`lib/app/glass_tab_bar.dart`，iOS 26 那种：不贴边、圆角胶囊、玻璃材质、选中项背后一块淡底色；底部 home indicator 的安全区由外壳补，胶囊自己不吃，否则会被撑高）。宽屏下内容两侧平分留白、收在 1200 逻辑像素内（只加 `Padding`，不改页面拿到的约束，所以各页面一行都不用动）。窗口在断点两侧拖动时 `IndexedStack` 里那三页**原地复用**，搜索到一半的结果不会丢。
 - **登录页**（未登录时的首屏，`lib/features/auth/login_page.dart`）：进页面自动登记设备码，主按钮「打开登录页并复制设备码」弹出系统浏览器并把码放进剪贴板；后台**自适应轮询**（1s→3s），批准后自动完成登录。连不上服务器、码过期、被拒绝、已经领过一次（`claimed`）都会给人话提示；**没登记成功的码不会摆给用户复制**（点了会先重试登记）。
 - **搜索 tab**（`lib/features/search/search_page.dart`）：关键词搜索、音源勾选、显示「正在进行…」和用时、试听、下载、点红心加进「我喜欢」；**点歌手名进歌手主页**；**滑到底自动再加载 15 条**（按 id 去重，不会重复）。
 - **歌手主页**（`lib/features/search/artist_page.dart`）：这个歌手能搜到的所有歌、「全部播放」、逐首点红心（完整度见上面的「歌手主页」一节）。
@@ -605,7 +684,7 @@ python -m tonicuisc_server                        # 现在直接是 https://192.
 
 ## CI
 
-- **`server-ci.yml`**：安装依赖 → `compileall` → 模块 import 检查 → `pytest`（181 个用例，不联网、不需要 musicdl）。
+- **`server-ci.yml`**：安装依赖 → `compileall` → 模块 import 检查 → `pytest`（232 个用例，不联网、不需要 musicdl）。
 - **`build.yml`**：
   1. `静态检查` job 先跑 `flutter analyze` + `flutter test`；
   2. `Windows / Linux / iOS` **`needs: analyze`**，静态检查过了才开始烧构建时间（出错 1 分钟就能拿到反馈，不会几个平台白跑）；
@@ -669,8 +748,11 @@ iOS 产物为未签名 `.ipa`，安装需要自行用 Xcode 重签。
 改完代码推之前先跑这几条：
 
 ```bash
-# 服务端测试（166 个用例，秒级，不联网）
+# 服务端测试（232 个用例，秒级，不联网）
 cd server && python -m pytest -q
+
+# 客户端：静态检查 + 测试（34 个用例：歌词解析、模型、文件名过滤、响应式布局、外壳、双栈连接）
+cd app && flutter analyze && flutter test
 
 # 包里每个模块都要能 import（compileall 只查语法，查不出「import 的模块被搬走了」）
 cd server && python scripts/check_imports.py

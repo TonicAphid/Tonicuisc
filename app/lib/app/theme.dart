@@ -39,11 +39,19 @@ class AppTheme {
     brightness: Brightness.light,
     primaryColor: kAccentLight,
     scaffoldBackgroundColor: kContentLight,
+    // **必须是不透明色**：`CupertinoPageScaffold` 靠 `barBackgroundColor.alpha == 0xFF`
+    // 判断顶栏是不是「完全遮挡」。半透明时它会把内容画到顶栏**后面**（只把顶栏高度
+    // 当提示塞进 MediaQuery.padding.top），而各页面还是按老 Material `AppBar` 的规矩
+    // 排版 → 内容顶部被顶栏盖住、往下滑还会弹回去。
+    // 要做 iOS 26 那种「内容从毛玻璃顶栏下穿过」，得先让每个页面自己吃下这个顶部
+    // 内边距，见 README「客户端界面」。
+    barBackgroundColor: kContentLight,
   );
 
   static const CupertinoThemeData dark = CupertinoThemeData(
     brightness: Brightness.dark,
     primaryColor: kAccentDark,
     scaffoldBackgroundColor: kContentDark,
+    barBackgroundColor: kContentDark,
   );
 }

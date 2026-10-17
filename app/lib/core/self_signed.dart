@@ -2,6 +2,8 @@ import 'dart:io';
 
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'dual_stack.dart';
+
 /// 自签证书支持（内网 HTTPS 用）。
 ///
 /// 公网域名走 Let's Encrypt，证书本来就受信任；但内网自签（
@@ -17,6 +19,9 @@ class SelfSignedOverrides extends HttpOverrides {
     final client = super.createHttpClient(context);
     // 注意：回调**总是**装上，只在里面读开关——这样用户中途改开关不用重建连接池。
     client.badCertificateCallback = (cert, host, port) => allow;
+    // 全 App 只有这一个 HttpClient 工厂（`main.dart` 里装了 HttpOverrides.global），
+    // 双栈策略（IPv6 优先）挂在这里就等于全 App 生效，不用每个请求各管各的。
+    installDualStack(client);
     return client;
   }
 }

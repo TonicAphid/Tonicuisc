@@ -28,8 +28,15 @@ def _pem(label: str) -> str:
     return f"-----BEGIN CERTIFICATE-----\n{label}\n-----END CERTIFICATE-----\n"
 
 
-def _fake_settings(root: Path, *, host: str = "0.0.0.0", port: int = 8000, acme_dns01: bool = False):
-    """一个够用的假 Settings：caddy_dir / caddy_config / host / port / acme_*。"""
+def _fake_settings(
+    root: Path,
+    *,
+    host: str = "0.0.0.0",
+    port: int = 8000,
+    acme_dns01: bool = False,
+    https_port: int = 443,
+):
+    """一个够用的假 Settings：caddy_dir / caddy_config / host / port / https_port / acme_*。"""
     from types import SimpleNamespace
 
     return SimpleNamespace(
@@ -42,6 +49,7 @@ def _fake_settings(root: Path, *, host: str = "0.0.0.0", port: int = 8000, acme_
         acme_ca="",
         host=host,
         port=port,
+        https_port=https_port,
     )
 
 
@@ -195,6 +203,35 @@ def test_generate_config_uses_environment_domain() -> None:
             before = generated.stat().st_mtime_ns
             caddy.generate_config()
             assert generated.stat().st_mtime_ns == before
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_generate_config_uses_nonstandard_https_port() -> None:
+    """住宅宽带 443 被运营商封了就换非标端口：站点地址要变成「域名:8443」。"""
+    import shutil
+
+    root = _scratch_dir()
+    try:
+        (root / "Caddyfile.template").write_text(
+            "{SITE} {\n\treverse_proxy {UPSTREAM}\n}\n",
+            encoding="utf-8",
+        )
+
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(caddy, "SETTINGS", _fake_settings(root, https_port=8443))
+            patch.setattr(caddy, "ENVIRONMENT", env_mod.ENVIRONMENTS["tuisc"])
+            text = caddy.generate_config().read_text(encoding="utf-8")
+            assert "tuisc.tonicaphid.cn:8443 {" in text
+            assert "tuisc.tonicaphid.cn {" not in text
+
+        # 默认 443 时不带端口（换了端口值要能重新生成）
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(caddy, "SETTINGS", _fake_settings(root, https_port=443))
+            patch.setattr(caddy, "ENVIRONMENT", env_mod.ENVIRONMENTS["tuisc"])
+            text = caddy.generate_config().read_text(encoding="utf-8")
+            assert "tuisc.tonicaphid.cn {" in text
+            assert ":8443" not in text
     finally:
         shutil.rmtree(root, ignore_errors=True)
 

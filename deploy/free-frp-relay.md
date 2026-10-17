@@ -297,13 +297,61 @@ python -m tonicuisc_server acme --status
 ## 本次实际部署（2026-10）
 
 - **服务商**：ChmlFrp（免费用户，**未实名**）
-- **主用节点**：`北京多线`（`vip.bj.frp.one`，**家里 ping 实测 26 ms**，目前最快）
-  - ⚠️ **北京是「中国境内节点」** —— ChmlFrp 规则：境内节点建站需域名已备案。本域名**未备案**，实测暂时没被拦，但**随时可能失效**（甚至封号风险）。
-  - 因此**保留香港-2 作热备**：另起一个 frpc 实例常连 `xg-2.frp.one`，北京被掐时把 CNAME 记录值改回 `xg-2.frp.one` 即可，**1 分钟回滚**。
+- **节点沿革（2026-10-16 实测）**
+  - ❌ `vip.bj.frp.one` → `82.156.215.91`（北京 / 腾讯云）：**被腾讯云备案拦截，弃用。**
+    证据：向 `82.156.215.91:443` 发明文 `GET /api/health`，回的是
+    ```
+    HTTP/1.1 302 OK
+    Location: https://dnspod.qcloud.com/static/webblock.html?d=uisc.tonicaphid.cn
+    ```
+    即腾讯云（DNSPod）把**未备案域名** `uisc.tonicaphid.cn` 拦了，而且在 **443 端口上回明文 HTTP**
+    → 客户端 TLS 握手看到非 TLS 响应，报 `HandshakeException: WRONG_VERSION_NUMBER(tls_record.cc:127)`。
+    正是当初预判的「境内节点 + 未备案，随时可能掐」，**已兑现**。
+  - ❌ `sz.frp.one` → `47.107.155.180`（深圳 / 腾讯云）：**已挂**。2026-10-16 实测
+    `curl: (35) Recv failure: Connection was reset`。它当初是通的（`Server: uvicorn` +
+    `Via: 1.1 Caddy` + `200`），**没撑多久就没了** —— 再次印证「境内节点 + 未备案 = 随时掐」。
+  - ✅ **现役 `xg-2.frp.one` → `23.147.68.16`（香港-2，境外免备案）**：CNAME 已切到它。
+    2026-10-16 实测（**别只看 ping，必须 `curl --resolve`**）：
+    ```
+    curl -s --resolve uisc.tonicaphid.cn:443:23.147.68.16 https://uisc.tonicaphid.cn/api/health
+    # → 200 {"status":"ok","sources":[...],"auth":"enabled"}
+    ```
+    **隧道活着，路径通。**
+- **现役路线 = 隧道**（2026-10-17 实测复核）：`uisc` 的 DNS 是 `CNAME → xg-2.frp.one`，
+  隧道活着、`/api/health` 返回 `200`，证书是**你自己那张 Let's Encrypt**（端到端，中转方看不到明文）。
+- **「家里直连 + 8443」并没有启用**（2026-10-17 核过，和之前这里写的不一样）：
+  - DNS 仍是 CNAME，**没有** A / AAAA；
+  - 部署机 `ss -tlnp` 只有 **80 / 443**，没有任何 8443 配置；
+  - 部署机 `.env` 和 systemd unit 里都搜不到 `8443`；
+  - 客户端默认地址（`app/lib/core/server_config.dart`）**不带端口**。
+
+  **⚠️ 别只改客户端那一行就以为切过去了**：隧道节点的 8443 是**关的**
+  （实测 `23.147.68.16:8443 → 拒绝`），只改地址会让 App 直接连不上。
+  完整六步见 README「HTTPS → 家里的两个坑」——那是**待办清单，不是现状**。
+  真要切，下面这些**缺一不可**：删 CNAME 换 A/AAAA → 装回 DDNS 定时器 →
+  路由器映射 8443 → 防火墙放行 8443 → 部署机 `.env` 加 `TONICUISC_HTTPS_PORT=8443` 并重启。
+- **回滚方式**：因为现役就是隧道，所以**回滚 = 什么都不用做**；反过来哪天切到直连后想退回隧道，
+  把 CNAME 改回 `xg-2.frp.one` 即可（隧道本身一直留着当备用）。
 - **隧道**：`tonicuisc`，本地 `127.0.0.1:443`（HTTPS 类型），连接地址 `uisc.tonicaphid.cn`
-- **CNAME 目标**：`vip.bj.frp.one`（北京）；热备 `xg-2.frp.one`（香港-2）
+- **CNAME 目标**：`xg-2.frp.one`（香港-2，**TTL 600**）；`vip.bj.frp.one`（北京）被拦、`sz.frp.one`（深圳）已挂，都不再使用
+- **⚠️ 排查网络问题的坑**：CNAME 换过之后，**公共 DNS（如 223.5.5.5）在 TTL 内仍会返回旧节点的 IP**
+  `vip.bj.frp.one` → `82.156.215.91`**（缓存残留）。App 里出现 TLS 报错时，先确认解析到的是哪个 IP：
+  ```
+  Resolve-DnsName uisc.tonicaphid.cn -Server 223.5.5.5 -Type A -DnsOnly
+  ```
+  手机上同理 —— **开关一次飞行模式 / 重连 WiFi** 清掉系统 DNS 缓存即可。
 - **续签**：✅ 已实测 —— `uisc` 转 CNAME 后，`_acme-challenge.uisc` 仍能被公网解析器查到（见第四节），DNS-01 续签正常，不需要通配符
-- **待做**：手机蜂窝端到端验证
+- **证书现状**（2026-10-17 实测）：现役 `uisc` 证书 `issuer=CN=YE2`（Let's Encrypt 生产），
+  SAN 只有 `uisc.tonicaphid.cn`，**2027-01-14 到期**（当时剩 89 天）——自动续签由部署机上的
+  `acme` 流程负责（`python -m tonicuisc_server acme --status` 可看）。
+  同目录下还留着一张 `tuisc.tonicaphid.cn.crt`（已不用，无害）。
+- **部署机**（2026-10-17 核）：`/opt/Tonicuisc`，systemd `tonicuisc.service`（enabled + active，
+  venv Python 3.13.5）+ `chmlfrp.service`（隧道）。**它不是 git 仓库、也没装 git**，
+  所以更新代码靠**拷文件**，别指望 `git pull`。
+- **家宽公网 IPv4 会变**：2026-10-17 实测已从 `106.35.198.214` 变成 **`106.35.197.238`**。
+  走 CNAME 时 DNS 不引用它，所以**当前无害**；但这也说明「地址会变」——
+  哪天切直连，**必须先把 DDNS 定时器装回来**（现在是停的），否则一变就失联。
+- **待做**：家里直连（8443）的六步切换 + 端到端验证（**当前未启用**，见上）。
 
 > 节点实测（**家里电信** ping 节点）：**北京 26 ms** ≪ **香港-2 197 ms** ≈ **伦敦 254 ms**。
 > 三个节点的教训：**延迟取决于该节点对电信的线路质量，不是「香港就一定快」**。
@@ -314,7 +362,8 @@ python -m tonicuisc_server acme --status
 
 - `deploy/vps-relay.md` —— 甲骨文 + 自建 frp（要有 Visa）
 - `deploy/cloudflare-tunnel.md` —— Cloudflare Tunnel（要换 NS）
-- `server/tonicuisc_server/core/ddns.py` —— `ddns remove`（**这次必须停**）
+- `server/tonicuisc_server/core/ddns.py` —— `ddns remove`（走隧道时**必须停**：CNAME 和 A/AAAA 不能共存）
+  / `ddns install`（改回家里直连时**必须装回来**，否则地址一变就再也连不上）
 - `server/tonicuisc_server/core/acme.py` —— lego DNS-01（第四节续签问题在这里）
 - `deploy/Caddyfile.template` —— 第五节 PROXY protocol 改这里
 - 官方文档：[ChmlFrp 映射教程](https://docs.chmlfrp.net/docs/use/mapping)、[ChmlFrp 自启](https://docs.chmlfrp.net/docs/use/autostart)、

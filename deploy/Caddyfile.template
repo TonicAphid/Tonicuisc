@@ -4,8 +4,9 @@
 # 生成方式：
 #     python -m tonicuisc_server caddy --generate      # 只生成，打印路径
 #     python -m tonicuisc_server caddy --start         # 生成 + 校验 + 启动
-# 占位符（生成时会被替换）：DOMAIN 对外域名、UPSTREAM 反代目标、LOG 日志文件、
-# STORAGE 证书目录、TLS 证书指令（用 lego 签好证书时才非空）。
+# 占位符（生成时会被替换）：DOMAIN 对外域名、SITE 站点地址（带非标端口时是
+# 「域名:端口」，默认就是域名）、UPSTREAM 反代目标、LOG 日志文件、STORAGE 证书目录、
+# TLS 证书指令（用 lego 签好证书时才非空）。
 #
 # 注意：这里**不要写出带花括号的占位符原文**——替换是纯文本的，
 # 连注释里的也会被换掉，把注释行拆坏（实测踩过：校验报
@@ -32,7 +33,7 @@
 
 # ── 拓扑（家里部署）──────────────────────────────────────────────────────
 #
-#   手机 / 浏览器 ──公网 v4 或 v6 : 443──► Caddy ──IPv4 127.0.0.1:8000──► tonicuisc_server
+#   手机 / 浏览器 ──公网 v4 或 v6 : 443（或非标端口）──► Caddy ──IPv4 127.0.0.1:8000──► tonicuisc_server
 #
 #   服务端只监听 IPv4 回环，外面只能从 Caddy 的 443 进来。
 #
@@ -50,9 +51,11 @@
 # * 地址会变：IPv6 前缀重播就换、IPv4 也可能变 → 用 ddns 定时刷记录
 #   （python -m tonicuisc_server ddns install --every 10m）
 # * 住宅宽带 80/443 可能被封：那就用 DNS-01 签证书 + 换非标端口
+#   （设 TONICUISC_HTTPS_PORT=8443，下面的站点地址会变成 {DOMAIN}:8443，
+#   客户端也要用 https://{DOMAIN}:8443；证书不用重签）
 # * 两族都要放行：IPv4 靠端口映射、IPv6 靠防火墙，是两件事
 
-{DOMAIN} {
+{SITE} {
 	encode zstd gzip
 
 	# 证书：有 lego 签好的 Let's Encrypt 证书时由生成脚本填进来

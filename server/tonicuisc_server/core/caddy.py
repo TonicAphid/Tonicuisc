@@ -226,6 +226,13 @@ def generate_config(*, force: bool = False) -> Path:
     # 避免两处各写一份、日后漂移）。
     upstream = f"{display_host(SETTINGS.host)}:{SETTINGS.port}"
 
+    # 站点地址：默认就是裸域名（Caddy 按 443 处理）。住宅宽带 80/443 常被运营商
+    # 封掉，被封时设 TONICUISC_HTTPS_PORT=8443 —— 站点地址就变成
+    # uisc.tonicaphid.cn:8443，客户端也要用 https://uisc.tonicaphid.cn:8443。
+    # 证书跟端口无关（lego 走 DNS-01），所以换端口不用重新签。
+    https_port = SETTINGS.https_port
+    site = ENVIRONMENT.domain if https_port == 443 else f"{ENVIRONMENT.domain}:{https_port}"
+
     # 有 lego 签好的 Let's Encrypt 证书就用它：Caddy 只终止 TLS，不再自己跑 ACME。
     # 好处：证书走 DNS-01 签（不需要入站 80/443），而且 Caddy 那串
     # 「challenge failed + 一大坨 Go 栈」的刷屏日志会**彻底消失**。
@@ -242,6 +249,7 @@ def generate_config(*, force: bool = False) -> Path:
 
     rendered = (
         template.replace("{DOMAIN}", ENVIRONMENT.domain)
+        .replace("{SITE}", site)
         .replace("{UPSTREAM}", upstream)
         .replace("{LOG}", "caddy.log")
         .replace("{TLS}", tls_block)
@@ -258,7 +266,7 @@ def generate_config(*, force: bool = False) -> Path:
             pass
 
     target.write_text(rendered, encoding="utf-8", newline="\n")
-    _log(f"已生成配置：{target}（域名 {ENVIRONMENT.domain} → {upstream}；{tls_note}）")
+    _log(f"已生成配置：{target}（站点 {site} → {upstream}；{tls_note}）")
     return target
 
 

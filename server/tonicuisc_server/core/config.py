@@ -88,6 +88,10 @@ class Settings:
     port: int = int(os.getenv("TONICUISC_PORT", "8000"))
     #: 对外地址，用来在启动横幅里打印登录链接，例如 https://106-35-196-104.nip.io
     public_url: str = os.getenv("TONICUISC_PUBLIC_URL", "").strip()
+    #: Caddy 对外监听的 HTTPS 端口。住宅宽带常被运营商封掉 80/443 —— 被封时改成
+    #: 非标端口（比如 8443），Caddy 站点地址会变成 ``域名:8443``，客户端地址也要
+    #: 跟着带上端口。证书跟端口无关（lego 走 DNS-01），换端口不用重新签。
+    https_port: int = int(os.getenv("TONICUISC_HTTPS_PORT", "443"))
     reload: bool = os.getenv("TONICUISC_RELOAD", "0") in {"1", "true", "yes"}
     sources: list[str] = field(default_factory=lambda: _env_list("TONICUISC_SOURCES", ["migu", "kuwo"]))
     #: 每个音源的抓取下限（真正抓多少按「这次要几条 ÷ 音源数」分摊）

@@ -1,6 +1,6 @@
 import 'dart:async';
 
-import 'package:flutter/material.dart';
+import 'package:flutter/cupertino.dart';
 
 import '../../core/api_client.dart';
 import '../../models/song.dart';
@@ -8,9 +8,14 @@ import '../player/player_controller.dart';
 import '../../shared/cover_cache.dart';
 import '../library/library_state.dart';
 import '../../shared/song_avatar.dart';
+import '../../shared/toast.dart';
 import 'artist_page.dart';
 
 /// 搜索页（首页 tab）：搜索、试听、下载、点红心。
+///
+/// 全 Cupertino：搜索框用 `CupertinoSearchTextField`（自带放大镜 + 清除按钮，
+/// 键盘确认键也固定是「搜索」），音源是多选胶囊，列表行自己画（`ListTile`
+/// 那套 Material 的选中态 / 水波纹在这里不合适）。
 class SearchPage extends StatefulWidget {
   const SearchPage({
     super.key,
@@ -32,6 +37,9 @@ class SearchPage extends StatefulWidget {
 class _SearchPageState extends State<SearchPage> {
   /// 一次要多少条；滑到底再要同样多（服务端会去重，不会给重复的）。
   static const int _pageSize = 15;
+
+  /// 音源别名 → 显示名。**顺序就是界面上从左到右的顺序**（Map 保序）。
+  static const Map<String, String> _sourceLabels = {'migu': '咪咕', 'kuwo': '酷我'};
 
   final TextEditingController _keyword = TextEditingController();
   final Set<String> _sources = <String>{'migu', 'kuwo'};
@@ -159,36 +167,39 @@ class _SearchPageState extends State<SearchPage> {
   }
 
   Future<void> _download(Song song) async {
-    final messenger = ScaffoldMessenger.of(context);
-    messenger.showSnackBar(SnackBar(content: Text('正在下载 ${song.name} …')));
+    Toast.show(context, '正在下载 ${song.name} …');
     try {
       final dir = await ApiClient.downloadDirectory();
       final path = await widget.api.downloadTo(song, dir);
-      messenger.showSnackBar(SnackBar(content: Text('已保存到 $path')));
+      if (!mounted) return;
+      Toast.show(context, '已保存到 $path');
     } catch (err) {
       if (err is UnauthorizedException) {
         await widget.onUnauthorized('$err');
         return;
       }
-      messenger.showSnackBar(SnackBar(content: Text('下载失败：$err')));
+      if (!mounted) return;
+      Toast.show(context, '下载失败：$err');
     }
   }
 
   Future<void> _toggleLike(Song song) async {
-    final messenger = ScaffoldMessenger.of(context);
     try {
       final wasLiked = widget.library.liked(song.id);
       await widget.library.toggle('like', song.id);
-      messenger.showSnackBar(SnackBar(
-        content: Text(wasLiked ? '已取消喜欢 ${song.name}' : '已加入我喜欢 ${song.name}'),
+      if (!mounted) return;
+      Toast.show(
+        context,
+        wasLiked ? '已取消喜欢 ${song.name}' : '已加入我喜欢 ${song.name}',
         duration: const Duration(seconds: 1),
-      ));
+      );
     } catch (err) {
       if (err is UnauthorizedException) {
         await widget.onUnauthorized('$err');
         return;
       }
-      if (mounted) messenger.showSnackBar(SnackBar(content: Text('操作失败：$err')));
+      if (!mounted) return;
+      Toast.show(context, '操作失败：$err');
     }
   }
 
@@ -197,181 +208,174 @@ class _SearchPageState extends State<SearchPage> {
     return AnimatedBuilder(
       animation: widget.library,
       builder: (context, _) => Column(
-      children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(12, 12, 12, 4),
-          child: Row(
-            children: [
-              Expanded(
-                child: TextField(
-                  controller: _keyword,
-                  textInputAction: TextInputAction.search,
-                  onSubmitted: (_) => _search(),
-                  decoration: const InputDecoration(
-                    prefixIcon: Icon(Icons.search),
-                    hintText: '搜索歌曲 / 歌手',
-                    border: OutlineInputBorder(),
-                    isDense: true,
-                  ),
+        children: [
+          _searchRow(context),
+          _sourceRow(context),
+          _statusRow(context),
+          if (_error != null)
+            Padding(
+              padding: const EdgeInsets.all(16),
+              child: Text(
+                _error!,
+                style: TextStyle(
+                  fontSize: 13,
+                  color: CupertinoColors.systemRed.resolveFrom(context),
                 ),
               ),
-              const SizedBox(width: 8),
-              FilledButton(onPressed: _searching ? null : _search, child: const Text('搜索')),
-            ],
+            ),
+          Expanded(child: _body(context)),
+        ],
+      ),
+    );
+  }
+
+  /// 搜索框 + 搜索按钮。
+  Widget _searchRow(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 12, 12, 4),
+      child: Row(
+        children: [
+          Expanded(
+            child: CupertinoSearchTextField(
+              controller: _keyword,
+              placeholder: '搜索歌曲 / 歌手',
+              onSubmitted: (_) => _search(),
+            ),
           ),
-        ),
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12),
-          child: Row(
-            children: [
-              const Text('音源：'),
-              for (final entry in const {'migu': '咪咕', 'kuwo': '酷我'}.entries)
-                FilterChip(
-                  label: Text(entry.value),
-                  selected: _sources.contains(entry.key),
-                  onSelected: (selected) => setState(() {
-                    selected ? _sources.add(entry.key) : _sources.remove(entry.key);
-                  }),
-                ),
-            ],
-          ),
-        ),
-        Padding(
-          padding: const EdgeInsets.fromLTRB(16, 2, 16, 6),
-          child: Row(
-            children: [
-              if (_searching) ...[
-                const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2)),
-                const SizedBox(width: 10),
-                const Text('正在进行…'),
-              ] else if (_elapsed != null)
-                Expanded(
-                  child: Text(
-                    '搜索完成 · 用时 ${_elapsed!.toStringAsFixed(1)} 秒'
-                    '${_serverElapsed == null ? '' : '（服务端 ${_serverElapsed!.toStringAsFixed(1)} 秒）'}'
-                    ' · 共 ${_results.length} 首',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.bodySmall,
-                  ),
-                ),
-            ],
-          ),
-        ),
-        if (_error != null)
-          Padding(
-            padding: const EdgeInsets.all(16),
-            child: Text(_error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
-          ),
-        Expanded(
-          child: _results.isEmpty
-              ? Center(
-                  child: Text(
-                    _searching ? '正在进行…' : '输入关键词开始搜索',
-                    style: Theme.of(context).textTheme.bodyMedium,
-                  ),
-                )
-              : ListView.separated(
-                  controller: _scroll,
-                  // 最后多一格：加载中 / 没有更多了
-                  itemCount: _results.length + 1,
-                  separatorBuilder: (_, __) => const Divider(height: 1),
-                  itemBuilder: (context, index) {
-                    if (index >= _results.length) return _footer(context);
-                    final song = _results[index];
-                    final isCurrent = widget.player.current?.id == song.id;
-                    return ListTile(
-                      leading: SongAvatar(song: song, highlight: isCurrent),
-                      title: Text(song.name, maxLines: 1, overflow: TextOverflow.ellipsis),
-                      subtitle: Row(
-                        children: [
-                          // 点歌手名进歌手主页
-                          Flexible(
-                            child: InkWell(
-                              onTap: song.singers.isEmpty
-                                  ? null
-                                  : () => ArtistPage.open(
-                                        context,
-                                        name: song.singers,
-                                        api: widget.api,
-                                        player: widget.player,
-                                        library: widget.library,
-                                        sources: _sources.toList(),
-                                        onUnauthorized: widget.onUnauthorized,
-                                      ),
-                              child: Text(
-                                song.singers,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: TextStyle(
-                                  color: Theme.of(context).colorScheme.primary,
-                                  decoration: TextDecoration.underline,
-                                ),
-                              ),
-                            ),
-                          ),
-                          if (song.subtitleTail.isNotEmpty)
-                            Flexible(
-                              child: Text(
-                                ' · ${song.subtitleTail}',
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: Theme.of(context).textTheme.bodySmall,
-                              ),
-                            ),
-                        ],
-                      ),
-                      trailing: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Text(song.ext.toUpperCase(), style: Theme.of(context).textTheme.labelSmall),
-                          IconButton(
-                            tooltip: widget.library.liked(song.id) ? '取消喜欢' : '喜欢',
-                            icon: Icon(
-                              widget.library.liked(song.id) ? Icons.favorite : Icons.favorite_border,
-                              color: widget.library.liked(song.id) ? Colors.redAccent : null,
-                            ),
-                            onPressed: () => _toggleLike(song),
-                          ),
-                          IconButton(
-                            tooltip: '下载',
-                            icon: const Icon(Icons.download_outlined),
-                            onPressed: () => _download(song),
-                          ),
-                        ],
-                      ),
-                      selected: isCurrent,
-                      onTap: () => widget.player.playQueue(_results, index, widget.api),
-                    );
-                  },
-                ),
+          const SizedBox(width: 8),
+          CupertinoButton.filled(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            borderRadius: BorderRadius.circular(20),
+            onPressed: _searching ? null : _search,
+            child: const Text('搜索'),
           ),
         ],
       ),
     );
   }
 
+  /// 音源多选。Cupertino 没有多选的分段控件（`CupertinoSegmentedControl` 是单选），
+  /// 所以自己画胶囊——和底部 tab 栏一个路数，观感统一。
+  Widget _sourceRow(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 12),
+      child: Row(
+        children: [
+          Text(
+            '音源：',
+            style: TextStyle(
+              fontSize: 13,
+              color: CupertinoColors.secondaryLabel.resolveFrom(context),
+            ),
+          ),
+          const SizedBox(width: 4),
+          for (final entry in _sourceLabels.entries) ...[
+            _SourcePill(
+              label: entry.value,
+              selected: _sources.contains(entry.key),
+              onTap: () => setState(() {
+                _sources.contains(entry.key) ? _sources.remove(entry.key) : _sources.add(entry.key);
+              }),
+            ),
+            const SizedBox(width: 6),
+          ],
+        ],
+      ),
+    );
+  }
+
+  /// 「正在进行…」/「搜索完成 · 用时 …」。
+  Widget _statusRow(BuildContext context) {
+    final secondary = CupertinoColors.secondaryLabel.resolveFrom(context);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 2, 16, 6),
+      child: Row(
+        children: [
+          if (_searching) ...[
+            const CupertinoActivityIndicator(radius: 7),
+            const SizedBox(width: 10),
+            Text('正在进行…', style: TextStyle(fontSize: 13, color: secondary)),
+          ] else if (_elapsed != null)
+            Expanded(
+              child: Text(
+                '搜索完成 · 用时 ${_elapsed!.toStringAsFixed(1)} 秒'
+                '${_serverElapsed == null ? '' : '（服务端 ${_serverElapsed!.toStringAsFixed(1)} 秒）'}'
+                ' · 共 ${_results.length} 首',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontSize: 12, color: secondary),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _body(BuildContext context) {
+    if (_results.isEmpty) {
+      return Center(
+        child: Text(
+          _searching ? '正在进行…' : '输入关键词开始搜索',
+          style: TextStyle(
+            fontSize: 14,
+            color: CupertinoColors.secondaryLabel.resolveFrom(context),
+          ),
+        ),
+      );
+    }
+    return ListView.separated(
+      controller: _scroll,
+      // 最后多一格：加载中 / 没有更多了
+      itemCount: _results.length + 1,
+      separatorBuilder: (_, __) => const _Hairline(),
+      itemBuilder: (context, index) {
+        if (index >= _results.length) return _footer(context);
+        final song = _results[index];
+        return _SongRow(
+          song: song,
+          current: widget.player.current?.id == song.id,
+          liked: widget.library.liked(song.id),
+          onTap: () => widget.player.playQueue(_results, index, widget.api),
+          onSinger: song.singers.isEmpty
+              ? null
+              : () => ArtistPage.open(
+                    context,
+                    name: song.singers,
+                    api: widget.api,
+                    player: widget.player,
+                    library: widget.library,
+                    sources: _sources.toList(),
+                    onUnauthorized: widget.onUnauthorized,
+                  ),
+          onLike: () => _toggleLike(song),
+          onDownload: () => _download(song),
+        );
+      },
+    );
+  }
+
   /// 列表底部：还有就自动加载，没有就说一声。
   Widget _footer(BuildContext context) {
-    final theme = Theme.of(context);
+    final secondary = CupertinoColors.secondaryLabel.resolveFrom(context);
     if (_loadingMore) {
-      return const Padding(
-        padding: EdgeInsets.symmetric(vertical: 20),
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 20),
         child: Row(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
-            SizedBox(width: 10),
-            Text('正在加载更多…'),
+            const CupertinoActivityIndicator(radius: 8),
+            const SizedBox(width: 10),
+            Text('正在加载更多…', style: TextStyle(fontSize: 13, color: secondary)),
           ],
         ),
       );
     }
     if (_hasMore) {
       return Padding(
-        padding: const EdgeInsets.symmetric(vertical: 12),
+        padding: const EdgeInsets.symmetric(vertical: 8),
         child: Center(
-          child: TextButton(
+          child: CupertinoButton(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
             onPressed: _loadMore,
             child: const Text('加载更多'),
           ),
@@ -381,8 +385,171 @@ class _SearchPageState extends State<SearchPage> {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 16),
       child: Center(
-        child: Text('共 ${_results.length} 首', style: theme.textTheme.labelSmall),
+        child: Text('共 ${_results.length} 首', style: TextStyle(fontSize: 11, color: secondary)),
       ),
     );
   }
+}
+
+/// 音源胶囊（多选）。
+class _SourcePill extends StatelessWidget {
+  const _SourcePill({required this.label, required this.selected, required this.onTap});
+
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final accent = CupertinoTheme.of(context).primaryColor;
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 160),
+        curve: Curves.easeOut,
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+        decoration: BoxDecoration(
+          color: selected
+              ? accent.withValues(alpha: 0.14)
+              : CupertinoColors.tertiarySystemFill.resolveFrom(context),
+          borderRadius: BorderRadius.circular(14),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            fontSize: 13,
+            fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
+            color: selected ? accent : CupertinoColors.label.resolveFrom(context),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 列表里的一行歌：封面 + 曲名 + 歌手（可点）+ 格式 + 喜欢 / 下载。
+///
+/// 没用 `CupertinoListTile`：它自带一条底边线（和 `separated` 的分隔线会重），
+/// 而且没有「当前播放」这种选中态。
+class _SongRow extends StatelessWidget {
+  const _SongRow({
+    required this.song,
+    required this.current,
+    required this.liked,
+    required this.onTap,
+    required this.onSinger,
+    required this.onLike,
+    required this.onDownload,
+  });
+
+  final Song song;
+  final bool current;
+  final bool liked;
+  final VoidCallback onTap;
+  final VoidCallback? onSinger;
+  final VoidCallback onLike;
+  final VoidCallback onDownload;
+
+  @override
+  Widget build(BuildContext context) {
+    final accent = CupertinoTheme.of(context).primaryColor;
+    final label = CupertinoColors.label.resolveFrom(context);
+    final secondary = CupertinoColors.secondaryLabel.resolveFrom(context);
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: onTap,
+      child: Container(
+        // 正在播放的那首淡淡铺一层主色（Material 的 ListTile 用 selected 也是这个意思）
+        color: current ? accent.withValues(alpha: 0.10) : null,
+        padding: const EdgeInsets.fromLTRB(12, 8, 4, 8),
+        child: Row(
+          children: [
+            SongAvatar(song: song, highlight: current),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    song.name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 15,
+                      fontWeight: current ? FontWeight.w600 : FontWeight.w400,
+                      color: label,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Row(
+                    children: [
+                      // 点歌手名进歌手主页
+                      Flexible(
+                        child: GestureDetector(
+                          onTap: onSinger,
+                          child: Text(
+                            song.singers,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(fontSize: 12.5, color: accent),
+                          ),
+                        ),
+                      ),
+                      if (song.subtitleTail.isNotEmpty)
+                        Flexible(
+                          child: Text(
+                            ' · ${song.subtitleTail}',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(fontSize: 12.5, color: secondary),
+                          ),
+                        ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+            Text(song.ext.toUpperCase(), style: TextStyle(fontSize: 11, color: secondary)),
+            _IconTap(
+              icon: liked ? CupertinoIcons.heart_fill : CupertinoIcons.heart,
+              color: liked ? CupertinoColors.systemRed.resolveFrom(context) : secondary,
+              onTap: onLike,
+            ),
+            _IconTap(icon: CupertinoIcons.cloud_download, color: secondary, onTap: onDownload),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// 列表行尾部的小图标按钮（自带按下变淡）。
+class _IconTap extends StatelessWidget {
+  const _IconTap({required this.icon, required this.color, required this.onTap});
+
+  final IconData icon;
+  final Color color;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return CupertinoButton(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+      pressedOpacity: 0.5,
+      onPressed: onTap,
+      child: Icon(icon, size: 22, color: color),
+    );
+  }
+}
+
+/// 0.5px 的分隔线（iOS 的 hairline）。
+class _Hairline extends StatelessWidget {
+  const _Hairline();
+
+  @override
+  Widget build(BuildContext context) => Container(
+        height: 0.5,
+        color: CupertinoColors.separator.resolveFrom(context),
+      );
 }

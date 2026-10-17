@@ -15,6 +15,7 @@ import '../features/player/player_controller.dart';
 import '../features/profile/profile_page.dart';
 import '../features/search/search_page.dart';
 import '../shared/cover_cache.dart';
+import 'glass_tab_bar.dart';
 import 'layout.dart';
 import 'legacy_material_host.dart';
 import 'nav_sidebar.dart';
@@ -231,7 +232,8 @@ class _MainShellState extends State<MainShell> with WidgetsBindingObserver {
 
   static const List<String> _titles = ['Tonicuisc', '列表', '我的'];
 
-  /// 宽屏左侧导航栏的三项（图标 + 选中态图标 + 文字）。
+  /// 三个目的地（图标 + 选中态图标 + 文字）。**窄屏悬浮胶囊和宽屏侧边栏共用这一份**，
+  /// 免得哪天改了一边、另一边图标对不上。
   static const List<NavSidebarItem> _navItems = [
     NavSidebarItem(
       icon: CupertinoIcons.search,
@@ -248,6 +250,12 @@ class _MainShellState extends State<MainShell> with WidgetsBindingObserver {
       selectedIcon: CupertinoIcons.person_fill,
       label: '我的',
     ),
+  ];
+
+  /// 窄屏悬浮胶囊的三项 —— 从 `_navItems` 派生。
+  static final List<GlassTabItem> _tabItems = [
+    for (final item in _navItems)
+      GlassTabItem(icon: item.icon, selectedIcon: item.selectedIcon, label: item.label),
   ];
 
   /// 三个 tab 的页面本体：**窄屏 / 宽屏共用同一份**，只换外面的壳。
@@ -341,29 +349,16 @@ class _MainShellState extends State<MainShell> with WidgetsBindingObserver {
     );
   }
 
-  /// 窄屏底部 tab 栏（苹果那套）。底部安全区（home indicator）由
-  /// `CupertinoTabBar` 自己按 `viewPadding` 处理，所以播放条不要再加一层。
+  /// 窄屏底部的**悬浮胶囊** tab 栏（iOS 26 那套）。
+  ///
+  /// 底部安全区（home indicator）在这里补：`GlassTabBar` 故意不自己吃
+  /// `viewPadding.bottom`，否则胶囊会被撑高、圆角比例就散了。
+  /// 也正因为 tab 栏在最底下，**播放条不用再加一层**安全区。
   Widget _tabBar() {
-    return CupertinoTabBar(
-      currentIndex: _tab,
-      onTap: _selectTab,
-      items: const [
-        BottomNavigationBarItem(
-          icon: Icon(CupertinoIcons.search),
-          activeIcon: Icon(CupertinoIcons.search_circle_fill),
-          label: '搜索',
-        ),
-        BottomNavigationBarItem(
-          icon: Icon(CupertinoIcons.music_albums),
-          activeIcon: Icon(CupertinoIcons.music_albums_fill),
-          label: '列表',
-        ),
-        BottomNavigationBarItem(
-          icon: Icon(CupertinoIcons.person),
-          activeIcon: Icon(CupertinoIcons.person_fill),
-          label: '我的',
-        ),
-      ],
+    final safeBottom = MediaQuery.viewPaddingOf(context).bottom;
+    return Padding(
+      padding: EdgeInsets.only(bottom: safeBottom) + kFloatingTabBarMargin,
+      child: GlassTabBar(currentIndex: _tab, items: _tabItems, onTap: _selectTab),
     );
   }
 
