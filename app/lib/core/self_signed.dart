@@ -21,7 +21,10 @@ class SelfSignedOverrides extends HttpOverrides {
     client.badCertificateCallback = (cert, host, port) => allow;
     // 全 App 只有这一个 HttpClient 工厂（`main.dart` 里装了 HttpOverrides.global），
     // 双栈策略（IPv6 优先）挂在这里就等于全 App 生效，不用每个请求各管各的。
-    installDualStack(client);
+    // ⚠️ 装了 connectionFactory 之后，TLS 由 dual_stack **自己**握手（dart:io 不代劳），
+    // 所以直连时上面那个 badCertificateCallback 不会被调用 —— 开关必须再传一次进去。
+    // （上面那行留着是为了**走代理**那条路：那种情况 dart:io 会自己握手并调它。）
+    installDualStack(client, allowBadCertificate: () => allow);
     return client;
   }
 }

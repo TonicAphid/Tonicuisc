@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:tonicuisc/core/dual_stack.dart';
+import 'package:tonicuisc/core/server_config.dart';
 
 /// 假 socket：只用到 `destroy()`，其余成员靠 noSuchMethod 兜住。
 class _FakeSocket implements Socket {
@@ -45,6 +46,28 @@ void main() {
       final v4 = [InternetAddress('1.1.1.1'), InternetAddress('2.2.2.2')];
       expect(orderAddresses(v4), v4);
       expect(orderAddresses(const []), isEmpty);
+    });
+  });
+
+  group('needsOwnTls（装了 connectionFactory 之后 TLS 得自己发）', () {
+    test('直连 https：要自己握手', () {
+      expect(needsOwnTls(Uri.parse('https://uisc.tonicaphid.cn/api/health'), null), isTrue);
+    });
+
+    test('http：不用', () {
+      expect(needsOwnTls(Uri.parse('http://192.168.5.43:8000/api/health'), null), isFalse);
+    });
+
+    test('走代理的 https：不用（dart:io 自己发 CONNECT 再握手）', () {
+      expect(needsOwnTls(Uri.parse('https://uisc.tonicaphid.cn/api/health'), '127.0.0.1'), isFalse);
+    });
+
+    test('App 的默认地址必须落进「自己握手」这一档', () {
+      // 这条判错的下场就是这个 bug：请求明文打到 443，
+      // 家里 v6 回 400、frp 节点直接关连接（Connection closed before full header was received）
+      final url = Uri.parse(kDefaultServerUrl);
+      expect(url.isScheme('https'), isTrue);
+      expect(needsOwnTls(url, null), isTrue);
     });
   });
 

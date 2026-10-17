@@ -69,6 +69,10 @@
 3. 点「确定」后，**面板会直接把 CNAME 目标告诉你**，例如选香港-2 就是：
 
    > 请使用自定义域名需要将您的 `uisc.tonicaphid.cn` 域名通过 **CNAME 解析至 `xg-2.frp.one`** 才能正常访问。
+   >
+   > ⚠️ **这句只当参考**：面板给的是最省事的 CNAME 做法，但 **CNAME 不能和 AAAA 共存**。
+   > 我们这套要「A = 节点 IP + AAAA = 家里 v6」，所以**实际填的是 A 记录**，
+   > 把 `xg-2.frp.one` 解析出来的 IP 手填进去 —— 见下面第二节。
 
    > **备案**：建隧道页顶部会提示「自定义域名解析到中国境内节点(**中国特别行政区除外**)建站，您的域名必须在工信部备案」——
    > **香港属于「特别行政区」**，所以**免备案**，`tonicaphid.cn` 不用去工信部备案。
@@ -82,34 +86,50 @@
 
 ## 二、阿里云侧（**顺序很重要**）
 
-### 1. 先停掉 DDNS 定时器
+> **⚠️ 面板说的「CNAME 解析至 `xg-2.frp.one`」不是唯一的做法，而且在我们这套里不能用。**
+> 我们要的是 **A + AAAA 共存**（v6 直连家里、v4 进隧道），而 **CNAME 不能和 AAAA 共存** ——
+> 所以节点这条改成 **手写 A 记录指向节点 IP**。下面两步就是全部。
 
-`uisc.tonicaphid.cn` 马上要变成 CNAME，而 **CNAME 不能和 A/AAAA 共存**。
-家里那个 `ddns` 定时器还在给 `uisc` 刷 AAAA，**不停掉它就会把 CNAME 顶掉**：
-
-```bash
-cd /opt/Tonicuisc
-python -m tonicuisc_server ddns remove
-python -m tonicuisc_server ddns status      # 确认没了
-```
-
-> RAM 密钥不会丢：`uisc` 不再需要 A/AAAA，但 lego 签证书（走 `_acme-challenge`）和别的域名照常用得着它。
-
-### 2. 删掉 `uisc` 现有的 A / AAAA
-
-阿里云 → 云解析 → `tonicaphid.cn` → 把 `uisc` 的 **AAAA**（和 A，如果有）删掉。
-
-### 3. 加 CNAME
+### 1. A 记录 = 节点 IP（不是 CNAME）
 
 | 记录类型 | 主机记录 | 记录值 |
 | --- | --- | --- |
-| `CNAME` | `uisc` | 面板给的**节点域名**（例：`xg-2.frp.one`） |
+| `A` | `uisc` | 面板节点域名**解析出来的 IP**（例：`xg-2.frp.one` → `23.147.68.16`） |
 
-「绑定域名」和这里的主机记录**必须完全对得上**。核对：
+「绑定域名」和这里的主机记录**必须完全对得上**（面板绑 `uisc.tonicaphid.cn`，主机记录就填 `uisc`）。核对：
 
 ```bash
-nslookup -type=CNAME uisc.tonicaphid.cn 223.5.5.5
+nslookup uisc.tonicaphid.cn 223.5.5.5     # 应该出节点 IP
+nslookup xg-2.frp.one 223.5.5.5           # 对比，两者应该一致
 ```
+
+> ⚠️ **节点 IP 变了要手改这一条**（TTL 600，10 分钟内生效）。写死 IP 的代价就是这个，
+> 换来的是能同时挂 AAAA。
+
+### 2. AAAA 记录 = 家里的稳定 IPv6（**「v6 不过隧道」靠的就是它**）
+
+给 `uisc` 再挂一条 **AAAA**，值由家里的 DDNS 定时器刷：
+
+```bash
+cd /opt/Tonicuisc
+python -m tonicuisc_server ddns install --only v6   # 只刷 AAAA，绝不碰 A
+python -m tonicuisc_server ddns status
+```
+
+> RAM 密钥照旧要用（刷 AAAA + lego 签证书走 `_acme-challenge`）。
+>
+> ⚠️ **必须是 `--only v6`**：默认的 `both` / `v4` 会顺手把 **A 刷成家里的 v4** ——
+> 家宽 443 入站被运营商封，那条 A 等于废的，**没 v6 的客户端会全部连不上**。
+> （`ddns.py` 里也是这么注释的：「家里没公网 v4 时可以 `ddns run --only v6`：只刷 AAAA、不碰 A」。）
+
+### 于是两族各走各的
+
+| 客户端 | 连到 | 实际路径 |
+| --- | --- | --- |
+| **有 IPv6** | AAAA（家里 v6） | **直连家里 443**，不过中转，延迟最低 |
+| **没有 IPv6** | A（节点 IP） | 节点 443 → 按 SNI 送进 frp 隧道 → 家里 |
+
+客户端两族谁先谁后由 `app/lib/core/dual_stack.dart` 决定：**v6 优先，250ms 回落 v4**。
 
 ---
 
@@ -201,6 +221,10 @@ systemctl status openfrp --no-pager
 
 ## 四、证书续签（**已实测：没问题**）
 
+> **前提已经变了（2026-10-17）**：`uisc` 现在是 **A + AAAA**，**不是 CNAME** ——
+> 下面这段「CNAME 会不会拦住子记录」的探索**现在用不上了**：`_acme-challenge.uisc` 就是个普通子记录，
+> DNS-01 天然正常。留着是因为它记录了一个反直觉的实测结论（万一哪天改回 CNAME 才用到）。
+
 `uisc` 变成 CNAME 后，DNS-01 要写的验证记录 `_acme-challenge.uisc.tonicaphid.cn` 就落在 CNAME 节点下面。
 按「CNAME 会拦住子记录」的常见说法，续签应该失败 —— **但实测证明并不会**。
 
@@ -267,8 +291,13 @@ nslookup -type=TXT _acme-challenge.uisc.tonicaphid.cn 8.8.8.8
 # 1) frpc 在跑
 systemctl status chmlfrp --no-pager      # 或 openfrp
 
-# 2) 域名 CNAME 指到了节点
-nslookup -type=CNAME uisc.tonicaphid.cn 223.5.5.5
+# 2) A 指向节点、AAAA 指向家里（两族都要在）
+nslookup -type=A    uisc.tonicaphid.cn 223.5.5.5     # → 23.147.68.16（节点）
+nslookup -type=AAAA uisc.tonicaphid.cn 223.5.5.5     # → 240e:...（家里）
+
+# 2b) 两条路各验一遍（★ 别只看 ping，必须 curl）
+curl -4 -s https://uisc.tonicaphid.cn/api/health     # 通 → 隧道那条路 OK
+curl -6 -s https://uisc.tonicaphid.cn/api/health     # 通 → 家里 v6 直连 OK
 
 # 3) 从外面（手机关 WiFi 用蜂窝）打开
 #    https://uisc.tonicaphid.cn/api/health
@@ -317,30 +346,37 @@ python -m tonicuisc_server acme --status
     # → 200 {"status":"ok","sources":[...],"auth":"enabled"}
     ```
     **隧道活着，路径通。**
-- **现役路线 = 隧道**（2026-10-17 实测复核）：`uisc` 的 DNS 是 `CNAME → xg-2.frp.one`，
-  隧道活着、`/api/health` 返回 `200`，证书是**你自己那张 Let's Encrypt**（端到端，中转方看不到明文）。
-- **「家里直连 + 8443」并没有启用**（2026-10-17 核过，和之前这里写的不一样）：
-  - DNS 仍是 CNAME，**没有** A / AAAA；
-  - 部署机 `ss -tlnp` 只有 **80 / 443**，没有任何 8443 配置；
-  - 部署机 `.env` 和 systemd unit 里都搜不到 `8443`；
-  - 客户端默认地址（`app/lib/core/server_config.dart`）**不带端口**。
-
-  **⚠️ 别只改客户端那一行就以为切过去了**：隧道节点的 8443 是**关的**
-  （实测 `23.147.68.16:8443 → 拒绝`），只改地址会让 App 直接连不上。
-  完整六步见 README「HTTPS → 家里的两个坑」——那是**待办清单，不是现状**。
-  真要切，下面这些**缺一不可**：删 CNAME 换 A/AAAA → 装回 DDNS 定时器 →
-  路由器映射 8443 → 防火墙放行 8443 → 部署机 `.env` 加 `TONICUISC_HTTPS_PORT=8443` 并重启。
-- **回滚方式**：因为现役就是隧道，所以**回滚 = 什么都不用做**；反过来哪天切到直连后想退回隧道，
-  把 CNAME 改回 `xg-2.frp.one` 即可（隧道本身一直留着当备用）。
+- **现役路线 = 隧道（v4）+ 家里 v6 直连（v6）**（2026-10-17 实测）：`uisc` 上是
+  **A = `23.147.68.16`（香港-2 节点，**手填**，不是 CNAME）+ AAAA = 家里的稳定 IPv6**，
+  两族都走 **443**、客户端地址**不带端口**。实测：
+  ```
+  curl -6 -s https://uisc.tonicaphid.cn/api/health   # 200，remote_ip=240e:318:3d2d:2900:4637:e6ff:fec1:c0c5（家里）
+  curl -4 -s https://uisc.tonicaphid.cn/api/health   # 200，remote_ip=23.147.68.16（节点 → 进隧道）
+  ```
+  - **为什么 A 写成节点 IP、不用 CNAME**：CNAME **不能和 AAAA 共存**，而 AAAA 这条正是
+    「有 v6 就不过隧道、直连家里」的关键。
+  - **好处**：v6 客户端延迟最低（不过中转）；v4 客户端也照样能用 —— 它走的是**节点**的 443，
+    **绕开了家里 v4 的 443 封锁**。
+  - **维护要点**：DDNS 定时器必须 **`--only v6`**（只刷 AAAA）。用默认的 `both` / `v4`
+    会把 A 刷成**家里的 v4**（443 被封）→ 没 v6 的客户端**全部连不上**。节点 IP 变了要手改 A。
+  - 客户端两族谁先谁后由 `app/lib/core/dual_stack.dart` 定：**v6 优先，250ms 回落 v4**。
+- **「家里 v4 直连 + 8443」没启用**（2026-10-17 核过）：部署机 `ss -tlnp` 只有 **80 / 443**，
+  `.env` / systemd unit 里搜不到 `8443`；隧道节点的 8443 是**关的**
+  （实测 `23.147.68.16:8443 → 拒绝连接`），**所以别只改客户端那一行**。
+  完整六步见 README「HTTPS → 家里的两个坑」——那是**备选方案，不是现状**。
+- **回滚方式**：v6 那条路出问题 → 删掉 AAAA，全员走隧道；想整体退回「纯隧道」→
+  删掉 AAAA（A 保留也行，指向节点就是隧道）。注意**一旦加回 CNAME，AAAA 就加不回来了**。
 - **隧道**：`tonicuisc`，本地 `127.0.0.1:443`（HTTPS 类型），连接地址 `uisc.tonicaphid.cn`
-- **CNAME 目标**：`xg-2.frp.one`（香港-2，**TTL 600**）；`vip.bj.frp.one`（北京）被拦、`sz.frp.one`（深圳）已挂，都不再使用
+- **节点**：`xg-2.frp.one` → **`23.147.68.16`**（香港-2）—— `uisc` 的 **A 记录手填的就是这个 IP**（TTL 600）；
+  `vip.bj.frp.one`（北京）被拦、`sz.frp.one`（深圳）已挂，都不再使用
 - **⚠️ 排查网络问题的坑**：CNAME 换过之后，**公共 DNS（如 223.5.5.5）在 TTL 内仍会返回旧节点的 IP**
   `vip.bj.frp.one` → `82.156.215.91`**（缓存残留）。App 里出现 TLS 报错时，先确认解析到的是哪个 IP：
   ```
   Resolve-DnsName uisc.tonicaphid.cn -Server 223.5.5.5 -Type A -DnsOnly
   ```
   手机上同理 —— **开关一次飞行模式 / 重连 WiFi** 清掉系统 DNS 缓存即可。
-- **续签**：✅ 已实测 —— `uisc` 转 CNAME 后，`_acme-challenge.uisc` 仍能被公网解析器查到（见第四节），DNS-01 续签正常，不需要通配符
+- **续签**：✅ 正常。第四节那个「CNAME 会不会拦子记录」的探索**已经用不上了**（`uisc` 现在是 A + AAAA，不是 CNAME），
+  `_acme-challenge.uisc` 就是普通子记录，DNS-01 天然通
 - **证书现状**（2026-10-17 实测）：现役 `uisc` 证书 `issuer=CN=YE2`（Let's Encrypt 生产），
   SAN 只有 `uisc.tonicaphid.cn`，**2027-01-14 到期**（当时剩 89 天）——自动续签由部署机上的
   `acme` 流程负责（`python -m tonicuisc_server acme --status` 可看）。

@@ -95,6 +95,7 @@ app/                               Flutter 客户端
     shared/dialogs.dart            苹果风确认弹窗（showCupertinoDialog）
     shared/glass.dart              「液态玻璃」材质（模糊 + 半透明 + 高光描边 + 投影）
   test/                            单测：歌词解析、模型、文件名过滤；layout_test / shell_test 测响应式布局与外壳
+  tool/probe_net.dart              网络探针：连不上服务器时先跑它（`dart run tool/probe_net.dart`）
 
 tool/                              构建与自检脚本
   bootstrap_platforms.ps1/.sh      生成各平台原生工程 + 打补丁 + pub get
@@ -151,12 +152,15 @@ flutter build windows --release
 
 **默认服务器地址是 `https://uisc.tonicaphid.cn`（不带端口）**，定义在 `app/lib/core/server_config.dart` 的 `kDefaultServerUrl`——要换服务器改这一行即可。用户在本机改过之后会存在本地设置里，不会再回到默认值；改地址的入口是「我的」页**长按版本号**（平时隐藏，App 不再要求用户填 IP）。同一个弹窗里还有「**允许自签证书**」开关，内网自签 HTTPS 时才需要打开。
 
-> **为什么不带端口**：`uisc` 现在走 frp 隧道（`CNAME → xg-2.frp.one`），隧道映射的是 **443**。
-> 「家里直连 + 8443」那套**还没启用**——真要切过去，**必须先把 DNS / DDNS / 路由器 / 防火墙 / 部署机
-> `.env` 五处都改好，再改这一行**；只改客户端那一行会导致 App **连不上**
-> （隧道节点的 8443 是关的，实测过）。详见下面「HTTPS → 家里的两个坑」。
+> **为什么不带端口、两族还都通**：`uisc` 上是**一条 A + 一条 AAAA**——
+> **A = frp 节点 IP**（`23.147.68.16`，香港-2）、**AAAA = 家里的 IPv6**。所以：
 >
-> `app/lib/core/dual_stack.dart`（v6 优先、250ms 回落 v4）是**为直连双栈准备的**，走隧道时用不上。
+> - **有 IPv6 的客户端** → 连**家里**的 `443`（**不过隧道**，最短路径）
+> - **没有 IPv6 的客户端** → 连**节点**的 `443`，节点按 SNI 送进隧道 → 家里
+>
+> 客户端**优先 IPv6**（`app/lib/core/dual_stack.dart`：v6 先连，250ms 没连上就把 v4 也发出去，谁先连上算谁）——正好是「v6 走直连、v6 不通走隧道」。
+>
+> ⚠️ 这套要求 **DDNS 只刷 AAAA**（`ddns install --only v6`）：A 得一直指着节点；被刷成家里的 v4（家里 443 被运营商封）的话，没 v6 的客户端就**全连不上**。详见下面「HTTPS → 家里的两个坑」。
 
 ### Windows 本机第一次跑（三个坑 + 一个噪音）
 
@@ -401,27 +405,32 @@ python -m tonicuisc_server caddy --start    # 前台启动（默认显示日志�
 
 | 域名 | 用途 | 绑哪台机器 | 记录（**2026-10-17 实测**） |
 | --- | --- | --- | --- |
-| `uisc.tonicaphid.cn` | **正式**，App 全部访问走它 | 部署机（清凉那台） | **CNAME → `xg-2.frp.one`**（走 frp 隧道，映射 443） |
+| `uisc.tonicaphid.cn` | **正式**，App 全部访问走它 | 部署机（清凉那台） | **A = `23.147.68.16`**（香港-2 节点，**手填**）+ **AAAA = 家里稳定 v6** |
 | `tuisc.tonicaphid.cn` | **测试**，自己调试用 | 这台测试机 | **目前一条记录都没有**（要用得先加 A / AAAA） |
 
-> `uisc` **不是** A + AAAA 直连：为了让「家里 443 被运营商封」这件事绕过去，它现在指着 frp 隧道。
-> 隧道那条路映射的是 **443**，所以客户端地址**不带端口**。
-> 想改成直连（A + AAAA + 非标端口 8443）见下面「家里的两个坑」——**那是待办，不是现状**。
+> `uisc` 是 **A + AAAA 混着用**，两族都走 **443**（客户端地址**不带端口**），但**走的路不一样**：
 >
-> 走隧道时客户端只认 `uisc` 这一个名字（节点只给 A），先 v4 还是先 v6 由系统按 RFC 6724 自己挑；
-> `app/lib/core/dual_stack.dart` 那套「v6 优先、v6 不通回落 v4」是**为直连双栈准备的**，
-> 现在这条路用不上，但留着不碍事。
+> - **v6 → 直连家里**（`curl -6` 实测 `remote_ip=240e:318:3d2d:2900:4637:e6ff:fec1:c0c5`）
+> - **v4 → 进 frp 隧道**（`curl -4` 实测 `remote_ip=23.147.68.16`，节点按 SNI 送进隧道）
+>
+> **A 为什么直接写节点 IP、不用 CNAME**：因为 **CNAME 不能和 AAAA 共存**，而 AAAA 这条正是
+> 「v6 不过隧道、直连家里」的关键。`curl -4` 通也就顺带证明：家里 v4 的 443 被封**不影响**
+> 没 v6 的客户端 —— 它们走的是**节点**的 443。
+>
+> 客户端只认 `uisc` 这一个名字，两族谁先谁后由 `app/lib/core/dual_stack.dart` 决定（**v6 优先**、250ms 回落 v4）。
+> 想改成「纯直连 + 非标端口 8443」见下面「家里的两个坑」——**那是备选，没启用**。
 
 ### 一次性准备
 
 1. **DNS（阿里云解析）**：`tonicaphid.cn` 的 NS 是 `dns13/dns14.hichina.com`，记录在**阿里云云解析 DNS** 里改。
-   走隧道时给 `uisc` 配 **CNAME**（指向节点）；走直连时给两个域名各配 **A + AAAA** 两条，
-   值用脚本探测（见下）。**CNAME 和 A/AAAA 不能共存**，切换时先删掉一种。
+   `uisc` 现在是 **A 手填节点 IP + AAAA 脚本刷家里 v6**（见上表）——**A 不能写成 CNAME**，
+   否则 AAAA 加不上。要走「纯直连 + 8443」就两条都填家里地址（`--only both`）；
+   要退回「纯隧道」就删掉 AAAA（或改回 CNAME）。**CNAME 和 A/AAAA 不能共存**。
 2. **放行入站 443（和 80）**：
    - Windows 防火墙：`pwsh -File deploy/open-firewall.ps1`（管理员），只加两条具名规则，可 `-Remove` 撤销；
-   - 光猫 / 路由器：**IPv4 端口映射**（外网 443 → 部署机 443）+ **IPv6 防火墙放行** TCP 80/443。
-   - （走隧道时这一条不需要——隧道是家里**主动连出去**的，不依赖入站。）
-     两族都要放行——只放 v6 的话，纯 IPv4 网络就连不上。
+   - 光猫 / 路由器：**IPv6 防火墙放行 TCP 80/443** —— 现在 v6 是**直连家里**的，必须放行。
+     **IPv4 的 443 端口映射不需要**：家宽 443 入站本来就被运营商封，v4 客户端走的是 frp 隧道
+     （家里主动连出去，不依赖入站）。（哪天整体退成「纯隧道」，两族入站就都不需要了。）
 3. **服务端 `server/.env`**：
    ```
    TONICUISC_HOST=127.0.0.1                        # 只监听 IPv4 回环
@@ -479,13 +488,22 @@ python -m tonicuisc_server ddns check       # 只读：看这个域名现有记�
 
 - **80 / 443 入站被运营商封**：住宅宽带很常见（工信部政策——家宽开 443 得企业专线 + 备案，办不下来）。
 
-  **⚠️ 现状先说清楚（2026-10-17 实测）**：`uisc` 现在走的是 **frp 隧道**
-  （`CNAME → xg-2.frp.one`，隧道映射 **443**），**不是**下面这套非标端口。
-  部署机只监听 80 / 443，没有任何 8443 配置；客户端默认地址也**不带端口**。
-  **所以下面六步是「待办方案」，不是现状**——别以为已经切过去了。
+  **⚠️ 现状先说清楚（2026-10-17 实测）**：`uisc` 上是
+  **A = `23.147.68.16`（香港-2 节点，手填）+ AAAA = 家里稳定 v6**，两族都走 **443**、**不带端口**：
 
-  三条路可选：**继续用隧道**（零改动，延迟看节点）/ **换非标端口 8443**（下面这套）/ **套 CDN 代理**。
-  要切 8443，整套六步**缺一不可**：
+  - **有 IPv6** → 直连家里（`curl -6` 实测 `remote_ip=240e:318:3d2d:2900:4637:e6ff:fec1:c0c5`）
+  - **没有 IPv6** → 连节点 `443`，节点按 SNI 送进隧道 → 家里（`curl -4` 实测 `remote_ip=23.147.68.16`）
+
+  这样「家里 v4 的 443 被封」就绕过去了 —— **没 v6 的客户端走的是节点的 443**，不是家里的。
+
+  > **维护要点**：DDNS 定时器只能用 **`--only v6`**（只刷 AAAA）：
+  > `python -m tonicuisc_server ddns install --only v6`。
+  > `ddns.py` 里也是这么写的：「家里没公网 v4 时可以 `ddns run --only v6`：只刷 AAAA、不碰 A」。
+  > 要是用默认的 `both` / `v4` 把 **A 刷成家里的 v4**，没 v6 的客户端会**全部连不上**。
+  > 节点 IP 换了要自己手改 A（TTL 600，10 分钟内生效）。
+
+  另一条路（**备选，没启用**）：**家里 v4 直连 + 非标端口 8443** —— 家里 v4 也有公网、而且
+  愿意开非标端口时才值得做。要切 8443，下面六步**缺一不可**：
 
   1. `server/.env` 里加两行。**证书不用重签**——lego 走 DNS-01，跟端口无关：
      ```
@@ -502,14 +520,14 @@ python -m tonicuisc_server ddns check       # 只读：看这个域名现有记�
        协议 **TCP**。只填 IP 不填端口不算数。
      - **IPv6**：**不需要端口映射**（IPv6 没有 NAT，端到端直连），只要在路由器的 **IPv6 防火墙**里
        放行**入站 TCP 8443** 到部署机那个 IPv6 地址。
-  4. **DNS 改成直连**：`uisc` 现在指的是 frp 节点的 **CNAME**，而 CNAME **不能和 A / AAAA 共存**，
-     所以要**先在阿里云控制台手删掉那条 CNAME**，再在部署机跑：
+  4. **DNS**：把 A 从「节点 IP」改成「家里的公网 v4」，AAAA 保持家里 v6 —— 也就是 `--only both`：
      ```
-     python deploy/update_dns.py --update --only both   # 写 A（家里公网 v4）+ AAAA（家里稳定 v6）
+     python deploy/update_dns.py --update --only both
      ```
-     （不加 `--update` 只打印。删 CNAME 这步脚本不管——`sync_record` 只按同类型查重，不会动 CNAME。）
-     > 之前为了走隧道，家里的 DDNS 定时器大概率被 `ddns remove` 停掉了（CNAME 和 A/AAAA 不能共存）。
-     > **改回直连必须把它装回来**，否则家里的公网地址一变就再也连不上：
+     （不加 `--update` 只打印。）
+     > ⚠️ 改完 A 就不再是节点 IP → **隧道那条路从域名上消失了**（一个名字只能指一个地方）。
+     > 回滚 = 把 A 手改回 `23.147.68.16`。
+     > ⚠️ DDNS 也要跟着换口径：现在跑的是 `--only v6`（只刷 AAAA），切 8443 要换成默认的 `both`：
      > `python -m tonicuisc_server ddns install`（`ddns status` 确认）。
   5. **改客户端默认地址**：`app/lib/core/server_config.dart` 的 `kDefaultServerUrl` 改成
      `https://uisc.tonicaphid.cn:8443`，重新发版（App 里临时改：我的 → 长按版本号 → 服务器地址）。
@@ -523,8 +541,9 @@ python -m tonicuisc_server ddns check       # 只读：看这个域名现有记�
   > （说「家里装了监控 / NAS，要远程访问」，**别说建网站**，说了会直接进备案流程被拒）。
   > 注意这跟云服务器上的「未备案域名拦截」不是一回事：那是云厂商自己的防火墙做的域名比对，
   > 家里是 ISP 的 IP，ISP 只封端口、不做域名比对。
-  > 另外**走直连之后 frp 隧道那条路就不在域名上了**（域名只能指一个地方）。要回滚就把 CNAME 改回
-  > `sz.frp.one` / `xg-2.frp.one`；隧道本身留着当备用，用 `curl --resolve` 单独测它。
+  > 另外这套 8443 是**「全走家里」**的：切过去之后 A 不再是节点 IP，**没 v6 的客户端也只能走家里的
+  > v4:8443**，隧道就此不在域名上。回滚 = 把 A 改回 `23.147.68.16`（隧道一直活着，可以用
+  > `curl --resolve` 单独测它）。
 - **纯 IPv4 或纯 IPv6 的网络**：双栈记录本身覆盖了两族，但如果你只放行了其中一族，另一族就连不上
   （IPv4 需要路由器端口映射，IPv6 需要防火墙放行，两件事都要做）。
 
@@ -668,7 +687,8 @@ python -m tonicuisc_server                        # 现在直接是 https://192.
   - 迁完的页面顺带消掉一类噪音：Material 的 `IconButton(tooltip: ...)` 在 Windows 上会触发引擎的 AXTree 报错刷屏（见上面「Windows 本机第一次跑」）。
 - **iOS 26「液态玻璃」（Liquid Glass）**：`lib/shared/glass.dart` 里的 `GlassSurface` 是这套材质的底座 —— `BackdropFilter` 模糊 + 半透明底色 + 0.5px 高光描边 + 淡投影（少了描边就像一块塑料板）。iOS 26 最有辨识度的**悬浮胶囊 tab 栏**已经落地（见下）。
   > ⚠️ **「内容从玻璃栏下穿过」这一半还没做**：Flutter 的 `ListView` 只在 `padding == null` 时才自动吃 `MediaQuery.padding`，而现有页面都写了显式 `padding`，所以内容暂时还不会滑到玻璃底下去。要做成完全体得按顺序来：**① 先逐页迁移**，让每个页面的滚动容器把 `MediaQuery.paddingOf(context)` 加进自己的 padding；**② 再把外壳改成 `Stack`**，让顶栏 / 侧边栏 / tab 栏**叠在**内容上面（现在它们和内容是 `Column` 里的兄弟节点，根本压不到一起）。顺序反了会「内容被玻璃栏盖住」——那正是当初 `barBackgroundColor` 必须不透明的原因。
-- **双栈连接（IPv6 优先）**：域名同时有 `AAAA` / `A` 时，客户端**先连 IPv6**；250ms 还没连上就把 IPv4 也发出去，谁先连上算谁（`lib/core/dual_stack.dart`，RFC 8305 Happy Eyeballs 的最小实现，挂在唯一的 `HttpClient` 工厂上所以全 App 生效）。自己接管这一步是因为 `dart:io` 默认把整个地址列表交给系统排序，而且**一个地址连不通时是干等超时**，不会立刻换下一个——手机从 WiFi 切到只有 v4 的网络时最能感觉到。
+- **双栈连接（IPv6 优先）**：域名同时有 `AAAA` / `A` 时，客户端**先连 IPv6**；250ms 还没连上就把 IPv4 也发出去，谁先连上算谁（`lib/core/dual_stack.dart`，RFC 8305 Happy Eyeballs 的最小实现，挂在唯一的 `HttpClient` 工厂上所以全 App 生效）。自己接管这一步是因为 `dart:io` 默认把整个地址列表交给系统排序，而且**一个地址连不通时是干等超时**，不会立刻换下一个——手机从 WiFi 切到只有 v4 的网络时最能感觉到。实测差别很大：v6 直连约 20ms，走 v4 隧道要 3.2 秒（首连的 TLS 握手要绕香港再回家）。
+  > ⚠️ **这个实现有个必须记住的坑：装了 `HttpClient.connectionFactory` 之后，dart:io 就不再代劳 TLS 了。** `_http/http_impl.dart` 里是 `if (cf != null) { 直接用它返回的 socket } else { isSecure ? SecureSocket.startConnect(...) : ... }`——它**完全信任**你给的 socket，直接在上面写明文 HTTP。所以 `dual_stack.dart` 必须自己 `SecureSocket.secure(socket, host: url.host)`（`host` 必须是**域名**：SNI 决定节点怎么路由、证书也按域名校验）。漏掉这一步的现象是「明文请求打到 443」：家里 v6 那条回 `400 Client sent an HTTP request to an HTTPS server.`，frp 节点那条直接把连接关掉（`Connection closed before full header was received`）。判定规则抽成了纯函数 `needsOwnTls()` 并有测试盯着；真机验证就跑 `app/tool/probe_net.dart`。**走代理时不握手**——那种情况 dart:io 会自己发 `CONNECT` 再握手，`badCertificateCallback` 也只在那条路上还会被调用。
 - **两套布局（一套代码）**：窗口宽度 ≥ `840` **且**短边 ≥ `480` 时切**桌面布局**——左侧苹果风宽侧边栏（`lib/app/nav_sidebar.dart`，图标 + 文字，208px，悬停 / 选中都有过渡）+ 宽内容区 + **横跨整个窗口**的底部播放条（`lib/app/layout.dart` 里的 `useDesktopLayout`）；否则是**手机布局**——`CupertinoNavigationBar` 顶栏 + 底部**悬浮胶囊 tab 栏**（`lib/app/glass_tab_bar.dart`，iOS 26 那种：不贴边、圆角胶囊、玻璃材质、选中项背后一块淡底色；底部 home indicator 的安全区由外壳补，胶囊自己不吃，否则会被撑高）。宽屏下内容两侧平分留白、收在 1200 逻辑像素内（只加 `Padding`，不改页面拿到的约束，所以各页面一行都不用动）。窗口在断点两侧拖动时 `IndexedStack` 里那三页**原地复用**，搜索到一半的结果不会丢。
 - **登录页**（未登录时的首屏，`lib/features/auth/login_page.dart`）：进页面自动登记设备码，主按钮「打开登录页并复制设备码」弹出系统浏览器并把码放进剪贴板；后台**自适应轮询**（1s→3s），批准后自动完成登录。连不上服务器、码过期、被拒绝、已经领过一次（`claimed`）都会给人话提示；**没登记成功的码不会摆给用户复制**（点了会先重试登记）。
 - **搜索 tab**（`lib/features/search/search_page.dart`）：关键词搜索、音源勾选、显示「正在进行…」和用时、试听、下载、点红心加进「我喜欢」；**点歌手名进歌手主页**；**滑到底自动再加载 15 条**（按 id 去重，不会重复）。
@@ -751,8 +771,12 @@ iOS 产物为未签名 `.ipa`，安装需要自行用 Xcode 重签。
 # 服务端测试（232 个用例，秒级，不联网）
 cd server && python -m pytest -q
 
-# 客户端：静态检查 + 测试（34 个用例：歌词解析、模型、文件名过滤、响应式布局、外壳、双栈连接）
+# 客户端：静态检查 + 测试（38 个用例：歌词解析、模型、文件名过滤、响应式布局、外壳、双栈连接）
 cd app && flutter analyze && flutter test
+
+# 连不上服务器时先跑这个探针：四条路各测一遍（原生对照 / App 真实路径 / 强制 v6 / 强制 v4）
+# 全通退出码 0，有失败返回 1（可直接塞进脚本）
+cd app && dart run tool/probe_net.dart
 
 # 包里每个模块都要能 import（compileall 只查语法，查不出「import 的模块被搬走了」）
 cd server && python scripts/check_imports.py

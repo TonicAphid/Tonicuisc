@@ -2,15 +2,18 @@
 ///
 /// 为什么自己接管：`dart:io` 默认把整个地址列表交给 `Socket.startConnect`，
 /// 由系统按 RFC 6724 排序——顺序随平台 / 网络环境变，而且**一个地址连不通时
-/// 是干等超时**，不会立刻换下一个。家里的服务是「IPv6 直连 + IPv4 非标端口」
-/// 两套并存（见 README 的「HTTPS」一节），客户端要的是「v6 优先，但 v6 坏了
-/// 别把界面卡住」。
+/// 是干等超时**，不会立刻换下一个。`uisc.tonicaphid.cn` 上两族走的正好是
+/// **两条不同的路**：**AAAA = 家里的 IPv6（直连）**、**A = frp 节点（节点按 SNI
+/// 送进隧道）**，客户端要的是「v6 优先走直连，v6 坏了 250ms 内回落到隧道」
+/// （见 README 的「HTTPS」一节）。
 ///
 /// 这里实现 RFC 8305（Happy Eyeballs）的最小版本：
 ///
 /// 1. 解析出全部地址，**IPv6 排前面**（同族内保持系统给的顺序）；
 /// 2. 先连第一个，[kHappyEyeballsStagger] 还没连上就把下一个也发出去；
-/// 3. 谁先连上算谁，其余的取消。
+/// 3. 谁先连上算谁，其余的取消；
+/// 4. 该加密的**自己加密** —— ⚠️ 这个坑踩过：装了 `connectionFactory` 之后
+///    dart:io **不再代劳 TLS**，返回裸 socket 就是明文请求（详见 [dualStackConnect]）。
 ///
 /// 250ms 是 RFC 8305 建议的头筹时间：给 v6 一个先手，又不至于在 v6 坏掉的
 /// 网络上白等几秒——手机从 WiFi 切到只有 v4 的蜂窝时最能感觉到。
@@ -42,32 +45,101 @@ List<InternetAddress> orderAddresses(List<InternetAddress> addresses) {
 ///
 /// App 里所有 `dart:io` 的 HTTP 都走同一个 `HttpClient` 工厂
 /// （`SelfSignedOverrides.createHttpClient`），在那里调一次就全覆盖了。
-void installDualStack(HttpClient client) {
-  client.connectionFactory = dualStackConnect;
+///
+/// [allowBadCertificate] 就是「允许自签证书」那个开关（**每次握手现读**，中途改也生效）。
+/// 必须传进来：装了 `connectionFactory` 之后 TLS 由我们自己握手，直连时
+/// `client.badCertificateCallback` **根本不会被调用**（只有走代理那条路才会）。
+void installDualStack(HttpClient client, {bool Function()? allowBadCertificate}) {
+  client.connectionFactory = (url, proxyHost, proxyPort) => dualStackConnect(
+        url,
+        proxyHost,
+        proxyPort,
+        allowBadCertificate: allowBadCertificate,
+      );
 }
 
 /// [HttpClient.connectionFactory] 的实现：签名由 dart:io 定死。
 ///
 /// `proxyHost` / `proxyPort` 不为空说明这次要走代理，那就**必须**连代理本身，
 /// 不能拿 url 的 host 去解析——否则代理等于没走（dart:io 也是这么约定的）。
-Future<ConnectionTask<Socket>> dualStackConnect(Uri url, String? proxyHost, int? proxyPort) async {
+///
+/// ⚠️ **装了 `connectionFactory` 之后，TLS 得我们自己握手。**
+/// `_http/http_impl.dart` 里是这么写的：
+///
+/// ```dart
+/// if (cf != null) { connectionTask = cf(uri, host, port); }   // 拿到的 socket 直接用
+/// else { connectionTask = isSecure && proxy.isDirect
+///     ? SecureSocket.startConnect(...) : Socket.startConnect(...); }
+/// ```
+///
+/// 它**完全信任你返回的 socket**，直接在上面写明文 HTTP。当初这里漏了握手，
+/// 现象就是「请求明文打到 443」：家里 v6 那条回 `400 Client sent an HTTP request to an
+/// HTTPS server.`，frp 节点那条直接把连接关掉
+/// （`Connection closed before full header was received`）。
+Future<ConnectionTask<Socket>> dualStackConnect(
+  Uri url,
+  String? proxyHost,
+  int? proxyPort, {
+  bool Function()? allowBadCertificate,
+}) async {
   final host = proxyHost ?? url.host;
   final port = proxyPort ?? url.port;
 
+  // ── 1) 先拿一条**裸** TCP 连接 ─────────────────────────────────────────
+  final Socket socket;
   // 地址字面量不用解析：用户填 IP 连内网自签就是这么用的（`https://192.168.5.43`）。
   final literal = InternetAddress.tryParse(host);
-  if (literal != null) return Socket.startConnect(literal, port);
-
-  final addresses = orderAddresses(await InternetAddress.lookup(host));
-  if (addresses.isEmpty) {
-    throw SocketException('域名解析不出任何地址：$host');
+  if (literal != null) {
+    socket = await Socket.connect(literal, port);
+  } else {
+    final addresses = orderAddresses(await InternetAddress.lookup(host));
+    if (addresses.isEmpty) {
+      throw SocketException('域名解析不出任何地址：$host');
+    }
+    // 只有一族就不用赛跑，省掉一次多余的分支
+    socket = addresses.length == 1
+        ? await Socket.connect(addresses.first, port)
+        : await raceConnections(addresses, port);
   }
-  // 只有一族就不用赛跑，省掉一次多余的分支
-  if (addresses.length == 1) return Socket.startConnect(addresses.first, port);
 
-  final socket = await raceConnections(addresses, port);
+  // ── 2) 该加密的自己加密 ────────────────────────────────────────────────
+  final ready = await _secureIfNeeded(
+    socket,
+    url,
+    proxyHost,
+    allowBadCertificate: allowBadCertificate,
+  );
   // 走到这里所有落选的连接都已经取消过了，所以 onCancel 不用做事
-  return ConnectionTask.fromSocket(Future<Socket>.value(socket), () {});
+  return ConnectionTask.fromSocket(Future<Socket>.value(ready), () {});
+}
+
+/// 装了 `connectionFactory` 之后，这条连接要不要**我们自己**做 TLS 握手。
+///
+/// 判定跟 dart:io 内部分支一致：
+///
+/// - **走代理** → 不用（返回裸 socket，dart:io 会自己发 `CONNECT` 再握手，别抢它的活）；
+/// - **直连 https** → **要**（它不代劳，不握手就是明文）；
+/// - **http** → 不用。
+///
+/// 抽成纯函数是为了能测：这个判断漏掉过一次（请求明文打到 443），
+/// 而它在真机上第一眼很难看出来。
+bool needsOwnTls(Uri url, String? proxyHost) => proxyHost == null && url.isScheme('https');
+
+Future<Socket> _secureIfNeeded(
+  Socket socket,
+  Uri url,
+  String? proxyHost, {
+  bool Function()? allowBadCertificate,
+}) {
+  if (!needsOwnTls(url, proxyHost)) return Future<Socket>.value(socket);
+  final allow = allowBadCertificate;
+  // SNI / 证书校验用的都必须是**域名**（`url.host`），不能是 IP ——
+  // frp 节点要靠 SNI 路由，证书也是按域名签的。
+  return SecureSocket.secure(
+    socket,
+    host: url.host,
+    onBadCertificate: allow == null ? null : (cert) => allow(),
+  );
 }
 
 /// Happy Eyeballs 主体：错开启动多个连接，返回**先连上**的那个 socket。
