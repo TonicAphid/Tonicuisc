@@ -7,6 +7,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../../core/api_client.dart';
 import '../../core/credentials.dart';
+import '../../core/download_target.dart';
 import '../../version.dart';
 
 /// 「我的」页面：账户、本机设备、服务端地址、设备管理与退出登录。
@@ -242,6 +243,12 @@ class _ProfilePageState extends State<ProfilePage> {
     }
   }
 
+  Future<void> _chooseDownloadDir() async {
+    final dir = await DownloadTarget.choose();
+    if (dir == null || !mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('下载目录：${dir.path}')));
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -320,6 +327,13 @@ class _ProfilePageState extends State<ProfilePage> {
                 ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
                 : const Icon(Icons.chevron_right),
             onTap: _checkingUpdate ? null : _checkUpdate,
+          ),
+        if (_isDesktop)
+          ListTile(
+            leading: const Icon(Icons.folder_outlined),
+            title: const Text('下载目录'),
+            subtitle: const Text('选择音乐保存位置，第一次下载时也会问'),
+            onTap: _chooseDownloadDir,
           ),
         ListTile(
           dense: true,

@@ -4,8 +4,8 @@ name: Build
 run-name: ${{ github.event.head_commit.message || github.ref_name }}
 
 on:
-  # 分支 push 也进这个 workflow，但只有「版本提交」或 tag/手动触发才跑全平台；
-  # 普通提交只跑静态检查和 macOS（见 gate / macos.yml），避免每次提交烧三份 runner。
+  # 分支 push 也进这个 workflow，但只有「版本提交」或 tag/手动触发才构建；
+  # 普通提交只跑一个几秒钟的 gate，什么都不构建，不烧 runner。
   push:
     branches: [main, master]
     tags: ["v*"]
@@ -15,6 +15,10 @@ on:
         description: 发布标签（留空则用 app/pubspec.yaml 里的版本号）
         required: false
         default: ""
+      intel:
+        description: 额外构建 Intel macOS (x64)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -35,6 +39,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       full: ${{ steps.check.outputs.full }}
+      macos_include: ${{ steps.check.outputs.macos_include }}
     steps:
       - name: 检查触发条件
         id: check
@@ -43,21 +48,35 @@ jobs:
           REF_TYPE: ${{ github.ref_type }}
           MESSAGE: ${{ github.event.head_commit.message }}
           INPUT_TAG: ${{ inputs.tag }}
+          INPUT_INTEL: ${{ inputs.intel }}
         run: |
-          # 规则和 release job 取版本号的规则保持一致：
-          # 手动触发 / tag / 提交标题里带 vX.Y.Z（可带 fix）→ 全平台 + Release；
-          # 其它普通 push → 只跑静态检查 + macOS。
+          # 只认提交标题**最前面**的 vX.Y.Z / vX.Y.Zfix；
+          # 后面跟「修复 xxx」之类的文字完全不影响。
+          # 手动触发 / tag 一律全平台。
           full=false
           if [ "$EVENT" = "workflow_dispatch" ] || [ "$REF_TYPE" = "tag" ] || [ -n "$INPUT_TAG" ]; then
             full=true
-          elif printf '%s' "$MESSAGE" | grep -qiE 'v[0-9]+\.[0-9]+(\.[0-9]+)?(fix)?'; then
+          elif printf '%s' "$MESSAGE" | head -n 1 | grep -qiE '^[[:space:]]*v[0-9]+\.[0-9]+(\.[0-9]+)?(fix)?'; then
             full=true
           fi
+
+          arm64='{"name":"Apple Silicon (arm64)","os":"macos-latest","arch":"arm64","asset":"tonicuisc-macos-arm64.dmg","artifact":"tonicuisc-macos-arm64","optional":false}'
+          intel='{"name":"Intel (x86_64)","os":"macos-13","arch":"x64","asset":"tonicuisc-macos-x64.dmg","artifact":"tonicuisc-macos-x64","optional":true}'
+          if [ "$INPUT_INTEL" = "true" ]; then
+            macos_include="[$arm64,$intel]"
+          else
+            macos_include="[$arm64]"
+          fi
+
           echo "full=$full" >> "$GITHUB_OUTPUT"
+          echo "macos_include=$macos_include" >> "$GITHUB_OUTPUT"
           echo "完整构建: $full"
+          echo "macOS 矩阵: $macos_include"
 
   analyze:
     name: 静态检查
+    needs: gate
+    if: needs.gate.outputs.full == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -83,7 +102,7 @@ jobs:
   desktop:
     name: ${{ matrix.name }}
     # 静态检查 + 单元测试先过，再开始烧各平台的构建时间
-    # macOS 不在这里：它单独跑（见 macos.yml），那边出 arm64 + Intel 两个架构
+    # macOS 不在这里：它是同一个 workflow 的 macos job，默认 arm64，勾 intel 才加 x64
     needs: [gate, analyze]
     if: needs.gate.outputs.full == 'true'
     runs-on: ${{ matrix.os }}
@@ -197,6 +216,144 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  macos:
+    name: macOS ${{ matrix.name }}
+    # 只有 gate 判定为版本提交 / tag / 手动触发时才构建；普通 push 直接跳过。
+    needs: [gate, analyze]
+    if: needs.gate.outputs.full == 'true'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    continue-on-error: ${{ matrix.optional }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.gate.outputs.macos_include) }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: 本次构建信息
+        run: |
+          echo "触发方式: ${{ github.event_name }}"
+          echo "提交     : ${{ github.sha }}"
+          echo "构建号   : ${{ github.run_number }}"
+
+      - name: 本地 Dart 自检
+        run: |
+          python3 tool/check_dart_balance.py
+          python3 tool/check_dart_imports.py
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: 确认 runner
+        run: |
+          echo "runner 架构: $(uname -m)"
+          echo "macOS 版本 : $(sw_vers -productVersion)"
+          echo "本次目标   : ${{ matrix.arch }}"
+
+      - name: 缓存 CocoaPods
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/CocoaPods
+          key: pods-${{ matrix.os }}-${{ hashFiles('app/pubspec.yaml') }}
+          restore-keys: pods-${{ matrix.os }}-
+
+      - name: 生成 macOS 工程
+        working-directory: app
+        run: |
+          flutter config --enable-macos-desktop
+          flutter create --project-name tonicuisc --org com.tonicuisc --platforms=macos .
+
+      - name: 应用原生补丁
+        run: bash ./tool/apply_patches.sh
+
+      - name: 检查沙盒权限（少了就连不上后端）
+        run: |
+          for key in com.apple.security.network.client \
+                     com.apple.security.files.downloads.read-write \
+                     com.apple.security.files.user-selected.read-write; do
+            if grep -q "$key" app/macos/Runner/Release.entitlements; then
+              echo "OK   $key"
+            else
+              echo "缺失 $key —— 补丁没打上？"
+              exit 1
+            fi
+          done
+
+      - name: 写入版本号
+        env:
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+        run: |
+          python tool/apply_version.py "${{ github.ref_name }}" --build=${{ github.run_number }}
+
+      - name: 安装依赖
+        working-directory: app
+        run: flutter pub get
+
+      - name: 构建
+        working-directory: app
+        run: flutter build macos --release
+
+      - name: 校验产物
+        run: |
+          APP="app/build/macos/Build/Products/Release/tonicuisc.app"
+          BIN="$APP/Contents/MacOS/tonicuisc"
+          if [ ! -d "$APP" ]; then echo "没找到 $APP"; exit 1; fi
+          archs="$(lipo -archs "$BIN")"
+          echo "架构   : $archs"
+          echo "体积   : $(du -sh "$APP" | cut -f1)"
+          echo "签名   :"
+          codesign -dv --verbose=2 "$APP" 2>&1 | sed -n '1,6p' || true
+
+          case "${{ matrix.arch }}" in
+            arm64)
+              echo "$archs" | grep -q arm64 || { echo "期望 arm64，实际 $archs"; exit 1; } ;;
+            x64)
+              echo "$archs" | grep -q x86_64 || { echo "期望 x86_64，实际 $archs"; exit 1; } ;;
+          esac
+          echo "架构校验通过"
+
+      - name: 打包
+        run: |
+          APP="app/build/macos/Build/Products/Release/tonicuisc.app"
+
+          if ! codesign --verify --deep --strict "$APP" 2>/dev/null; then
+            echo "未签名，执行 ad-hoc 签名"
+            codesign --force --deep --sign - \
+              --entitlements app/macos/Runner/Release.entitlements "$APP"
+          fi
+          codesign --verify --deep --strict "$APP"
+          codesign -dv --verbose=2 "$APP" 2>&1 | sed -n '1,6p'
+
+          bash tool/installer/macos/make_dmg.sh "$APP" "$GITHUB_WORKSPACE/${{ matrix.asset }}" "Tonicuisc"
+          hdiutil verify "$GITHUB_WORKSPACE/${{ matrix.asset }}"
+          ls -lh "$GITHUB_WORKSPACE/${{ matrix.asset }}"
+
+      - name: 写使用说明
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+          ### 装到 Mac 上
+
+          1. 下载 `tonicuisc-macos-*.dmg`，双击打开；
+          2. 把里面的 `tonicuisc` 拖到「应用程序」；
+          3. 第一次打开会被 Gatekeeper 拦（未公证）。右键 App → 打开，或执行一次：
+
+          ```bash
+          xattr -dr com.apple.quarantine /Applications/tonicuisc.app
+          ```
+
+          Intel 机器下 `arm64` 包跑不起来，请选 `x64`。
+          EOF
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.asset }}
+          if-no-files-found: error
+
   ios:
     name: iOS (未签名)
     needs: [gate, analyze]
@@ -254,10 +411,9 @@ jobs:
 
   release:
     name: 发布 Release
-    needs: [gate, analyze, desktop, ios]
-    # macOS 产物由 macos.yml 单独挂上去（workflow 之间不能互相 needs），
-    # 所以刚建好的 Release 里先只有 Windows / Linux / iOS 的包，
-    # macOS 那两个 DMG（arm64 / x64）会在 macos.yml 跑完后补上。
+    needs: [gate, analyze, desktop, ios, macos]
+    # macOS 现在是 Build 里的一个 job，Release 会等它跑完，
+    # 所以三个平台（Windows / Linux / macOS）的安装包会一次性上传。
     if: >-
       needs.gate.outputs.full == 'true'
       && (github.event_name == 'workflow_dispatch' || github.ref_type == 'tag' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')

@@ -50,6 +50,11 @@
 	<array>
 		<string>audio</string>
 	</array>
+	<!-- 让「文件」App 能看到下载目录（Documents/Downloads） -->
+	<key>UIFileSharingEnabled</key>
+	<true/>
+	<key>LSSupportsOpeningDocumentsInPlace</key>
+	<true/>
 	<!-- 允许访问 http 形式的后端（局域网自建服务） -->
 	<key>NSAppTransportSecurity</key>
 	<dict>

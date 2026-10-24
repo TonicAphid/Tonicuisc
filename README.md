@@ -77,6 +77,7 @@ app/                               Flutter 客户端
     app/glass_tab_bar.dart         手机底部「悬浮胶囊」tab 栏（iOS 26 风）
     app/legacy_material_host.dart  过渡壳：罩住还没迁到 Cupertino 的页面（迁完即删）
     core/api_client.dart           HTTP 客户端（接口方法、`X-API-Key`、下载）
+    core/download_target.dart      下载目录：桌面选择并记住，iOS 写 Documents/Downloads
     core/api_errors.dart           异常类型 + friendlyError（把报错翻成人话）
     core/server_config.dart        默认服务器地址 + 本机保存的地址
     core/credentials.dart          设备凭据（系统安全存储 + 桌面端兜底）
@@ -120,7 +121,7 @@ deploy/                            家里部署（外部 v4 + v6 双栈 → 内�
   open-firewall.ps1                放行入站 80 / 443（管理员，可 -Remove 撤销）
   update_dns.py                    维护 A / AAAA 记录（阿里云解析；--update 才真改，--check 只读）
   .aliyun.env.example              AK 配置样例（真文件 .aliyun.env 已 gitignore，用 ddns set-key 填）
-.github/workflows/                 server-ci.yml（后端）/ build.yml（客户端）/ macos.yml（macOS 单独构建）
+.github/workflows/                 server-ci.yml（后端）/ build.yml（客户端全平台，含 macOS）
 ```
 
 ## 快速开始
@@ -188,7 +189,7 @@ flutter build windows --release
 
 另外一个**不用管**的噪音：控制台刷 `[ERROR:flutter/shell/platform/common/accessibility_bridge.cc(114)] Failed to update ui::AXTree, error: N will not be in the tree and is not the new root`。这是 Flutter 引擎在 Windows 上的已知 bug（[#98099](https://github.com/flutter/flutter/issues/98099)、[#182444](https://github.com/flutter/flutter/issues/182444)，后者给的复现条件是 **`ListView` + Material `Tooltip`**），**只是 debug 控制台的日志**，界面和功能都不受影响，release 版没有控制台。仓库里的 `Tooltip` 全部来自还没迁到 Cupertino 的 `IconButton(tooltip: ...)`，**逐页迁移做完它自然就没了**。
 
-**第三方输入法**：Flutter Windows engine 有一个已知 bug（[#190042](https://github.com/flutter/flutter/issues/190042)）——窗口失焦再回来后 IMM 输入上下文可能变陈旧，搜狗 / 微信输入法会表现为完全打不出中文。仓库在 CI 的 `flutter create` 之后会跑 [`tool/patch_windows_ime.py`](tool/patch_windows_ime.py)，在 `WM_SETFOCUS` / `WM_ACTIVATE` 时恢复默认输入上下文并链接 `imm32`。**本机重新生成 Windows 工程后也要手动跑一次这个脚本**，否则 `flutter run` 出来的窗口没有这个补丁。它不能修 Flutter 另一个「切换输入框时 composing 泄漏」（#191196），那个要等 engine 修复。
+**第三方输入法**：Flutter Windows engine 有一个已知 bug（[#190042](https://github.com/flutter/flutter/issues/190042)）——窗口失焦再回来后 IMM 输入上下文可能变陈旧，搜狗 / 微信输入法会表现为完全打不出中文。仓库在 CI 的 `flutter create` 之后会跑 [`tool/patch_windows_ime.py`](tool/patch_windows_ime.py)：**只在真正离开窗口再回来之后**恢复一次默认输入上下文（不会在输入过程中重置，否则会把正在拼写的 IME 打断），并链接 `imm32`。**本机重新生成 Windows 工程后也要手动跑一次这个脚本**，否则 `flutter run` 出来的窗口没有这个补丁。它不能修 Flutter 另一个「切换输入框时 composing 泄漏」（#191196），那个要等 engine 修复。
 
 ### 第一次登录
 
@@ -751,7 +752,7 @@ python -m tonicuisc_server                        # 现在直接是 https://192.
   > **回落做到了握手层**：`attemptBothFamilies()` 在「TCP 连上了但 TLS 握手被掐」时（中间盒/拦截的典型手法，大陆节点上实测就是这样），会把两个家族**换个顺序整套再来一遍**，而不是就此认输 —— 因为「TCP 通」根本不等于「这条路能用」。
 - **两套布局（一套代码）**：窗口宽度 ≥ `840` **且**短边 ≥ `480` 时切**桌面布局**——左侧苹果风宽侧边栏（`lib/app/nav_sidebar.dart`，图标 + 文字，208px，悬停 / 选中都有过渡）+ 宽内容区 + **横跨整个窗口**的底部播放条（`lib/app/layout.dart` 里的 `useDesktopLayout`）；否则是**手机布局**——`CupertinoNavigationBar` 顶栏 + 底部**悬浮胶囊 tab 栏**（`lib/app/glass_tab_bar.dart`，iOS 26 那种：不贴边、圆角胶囊、玻璃材质、选中项背后一块淡底色；底部 home indicator 的安全区由外壳补，胶囊自己不吃，否则会被撑高）。宽屏下内容两侧平分留白、收在 1200 逻辑像素内（只加 `Padding`，不改页面拿到的约束，所以各页面一行都不用动）。窗口在断点两侧拖动时 `IndexedStack` 里那三页**原地复用**，搜索到一半的结果不会丢。
 - **登录页**（未登录时的首屏，`lib/features/auth/login_page.dart`）：进页面自动登记设备码，主按钮「打开登录页并复制设备码」弹出系统浏览器并把码放进剪贴板；后台**自适应轮询**（1s→3s），批准后自动完成登录。连不上服务器、码过期、被拒绝、已经领过一次（`claimed`）都会给人话提示；**没登记成功的码不会摆给用户复制**（点了会先重试登记）。
-- **搜索 tab**（`lib/features/search/search_page.dart`）：关键词搜索（音源固定酷我，不再显示选择条）、显示「正在进行…」和用时、试听、下载、点红心加进「我喜欢」；**点歌手名进歌手主页**；**滑到底自动再加载 15 条**（按 id 去重，不会重复）。
+- **搜索 tab**（`lib/features/search/search_page.dart`）：关键词搜索（音源固定酷我，不再显示选择条）、显示「正在进行…」和用时、试听、下载、点红心加进「我喜欢」；**点歌手名进歌手主页**；**滑到底自动再加载 15 条**（按 id 去重，不会重复）。下载在桌面端第一次会让你选文件夹并记住（「我的」里可改），iOS 自动写到「文件」App 里的 `Tonicuisc/Downloads`。
 - **歌手主页**（`lib/features/search/artist_page.dart`）：这个歌手能搜到的所有歌、「全部播放」、逐首点红心（完整度见上面的「歌手主页」一节）。
 - **列表 tab**（`lib/features/library/library_page.dart`）：最上面是**播放列表**（显示正在播放的歌、队列长度、播放模式），下面是 **我喜欢 / 收藏 / 播放历史**，各自显示数量，点进去可播放、单条移除、清空。
 - **播放队列**（`lib/features/player/queue_page.dart`）：全屏播放页点列表按钮弹出，或在「列表」tab 里整页打开。
@@ -767,44 +768,35 @@ python -m tonicuisc_server                        # 现在直接是 https://192.
 
 - **`server-ci.yml`**：安装依赖 → `compileall` → 模块 import 检查 → `pytest`（264 个用例，不联网、不需要 musicdl）。
 - **`build.yml`**：
-  1. 每个分支 push 都会进来，但先跑一个很便宜的 `gate`：**手动触发 / tag / 提交标题里带 `vX.Y.Z`** 才跑全平台；
-     普通 push 只跑静态检查，然后再由 `macos.yml` 接上 macOS；
-  2. `静态检查` job 跑 `flutter analyze` + `flutter test`（普通 push 也跑，保证质量）；
-  3. `Windows / Linux / iOS` 需要 `gate.full == true` 且 `needs: analyze`，静态检查过了才开始烧构建时间；
+  1. 每个分支 push 都会进来，但先跑一个几秒钟的 `gate`：**手动触发 / tag / 提交标题最前面是 `vX.Y.Z(fix)`** 才构建；
+     普通 push 只跑 gate，**静态检查、Windows、Linux、macOS、iOS 全部跳过**；
+  2. `静态检查` job 跑 `flutter analyze` + `flutter test`（只在版本构建时跑）；
+  3. `Windows / Linux / iOS / macOS` 都需要 `gate.full == true`；
   4. Flutter 版本固定在 `env.FLUTTER_VERSION`（固定版本缓存才会命中，否则每次都要重新保存 1GB+ 缓存）；
-  5. 全平台构建成功后由 `发布 Release` job 汇总产物上传到 GitHub Release。
-- **`macos.yml`**（macOS 单独构建）：见下。
+  5. 全平台构建成功后由 `发布 Release` job 汇总产物上传到 GitHub Release；它会等 macOS 一起跑完。
 
-> **发版规则**：gate 看的是**这次 push 的 tip commit 标题**。直接 `git commit -m "v0.2.5"` 是有效的；但如果是 `Merge branch 'main' of ...` 这种合并提交，版本号在父提交里、tip 标题没有，就会被当成普通 push（v0.2.5 就踩过这个坑）。所以发版要么保证 tip 提交标题就是 `vX.Y.Z`，要么直接推 tag（tag 触发不依赖提交标题）。
+### macOS 在 Build 里
 
-### 为什么 macOS 单独一个 workflow
+macOS 不再单独开 workflow，直接是 `Build` 的一个 job：
 
-1. **架构**：GitHub 的 `macos-latest` 现在是 **Apple Silicon（arm64）**，只出 arm64 的话
-   **Intel Mac 跑不起来**。所以支持两个架构：`macos-latest` → `tonicuisc-macos-arm64.dmg`，
-   `macos-13` → `tonicuisc-macos-x64.dmg`。
-   **Intel 那条默认不跑**（手动触发时勾 `intel` 才跑）：`macos-13` 容量紧张——实测排了一个多小时
-   还在队列里，而 `needs: build` 要等**全部**矩阵腿，它会把挂包那步一起卡死。
-   勾了 intel 就接受「挂包要等它」这个代价。
-2. **成本**：macOS runner 计费是 Linux 的 10 倍，全平台 matrix 跑一次要 40 分钟。改客户端时
-   只想验证 macOS，用 `workflow_dispatch` 手动触发这个就够了。
-3. 产物是 **DMG**：里面是 `tonicuisc.app` + 指向 `/Applications` 的快捷方式，拖进去就是安装。
-   打包前会做一次 **ad-hoc 签名**（保留沙盒/网络 entitlements），再用 `lipo -archs` 校验
-   **产物名写的架构是不是真的在里面**。
+1. **普通 push 不构建 macOS**，也不构建其它平台；只有版本提交 / tag / 手动触发才跑。
+2. **版本提交 / tag / 手动触发**时，macOS 和 Windows / Linux / iOS 一起构建；`发布 Release` 会等 macOS 跑完，
+   所以 DMG 和另外两个平台的安装包**一次性上传**，不会再出现「Release 建好了 macOS 还没传」的空窗。
+3. Intel 版默认不跑：手动触发 `Build` 时勾 `intel` 才加 `macos-13` 那条腿（容量紧张，排队很久）。
+4. 产物是 DMG：里面是 `tonicuisc.app` + 指向 `/Applications` 的快捷方式；打包前做 **ad-hoc 签名**
+   （保留沙盒/网络 entitlements），再用 `lipo -archs` 校验架构。
 
 触发方式与产物：
 
 | 触发 | 行为 |
 | --- | --- |
-| 普通 push `main` / `master` | 只跑静态检查 + **macOS arm64**，只出 artifact，不建 Release |
-| 提交标题带 `vX.Y.Z` 的 push | **全平台构建 + Release**，macOS 由 `workflow_run` 接上并挂 DMG |
-| `Build` 成功之后（`workflow_run`） | 自动接上 macOS；有 Release 才上传，普通 push 只保留 artifact |
-| 手动 `workflow_dispatch` | 手动跑 `Build` 是全平台；手动跑 `macOS Build` 只出 macOS，勾 `publish` 才挂 Release，勾 `intel` 才出 x64 |
-| 推送 `v*` tag | `build.yml` 全平台构建，macOS 由 `workflow_run` 接上并挂 Release |
+| 普通 push `main` / `master` | 只跑 gate，**不构建任何平台** |
+| 提交标题**最前面**是 `vX.Y.Z` / `vX.Y.Zfix` | 全平台构建 + Release（标题后面的文字随便写） |
+| 手动 `workflow_dispatch` | 全平台 + Release；勾 `intel` 才额外出 macOS x64 |
+| 推送 `v*` tag | 全平台构建 + Release |
 
-> 为什么用 `workflow_run` 而不是 `push: tags`：Release 是 `build.yml` 用 **GITHUB_TOKEN**
-> 建的 tag，GitHub 规定「GITHUB_TOKEN 触发的事件不会再触发别的 workflow」，
-> 所以 `push: tags` **根本不会响**（实测：一次都没被触发）。`workflow_run` 不受这条限制，
-> 而且它在 `Build` **完全跑完**后才启动，天然不会和建 Release 抢。
+> 版本号只认提交标题**开头**：`v0.2.5fix 修复歌词` 可以；`Merge branch 'main' of ...` 不行（
+> 哪怕父提交标题是 `v0.2.5fix`）。所以发版要么保证 tip 标题以版本号开头，要么直接推 tag。
 
 **ad-hoc 签名 + Gatekeeper**：CI 会做一次 ad-hoc 签名（不需要 Apple 开发者账号），但没有 Apple
 公证，用浏览器下载后 macOS 仍会拦（可能提示「已损坏，无法打开」）。
@@ -832,9 +824,8 @@ Release 命名：**标题 = 提交标题**（`run-name` 也是），**标签 = �
 产物：`tonicuisc-windows-x64-setup.exe`（安装包）、`tonicuisc-windows-x64-portable.zip`、
 `tonicuisc-linux-x64.tar.gz`、`tonicuisc-macos-arm64.dmg`、`tonicuisc-macos-x64.dmg`、`tonicuisc-ios-unsigned.ipa`。
 
-> `build.yml` 建 Release 时先挂 Windows / Linux / iOS 三个平台的包，macOS 那两个 DMG 由
-> `macos.yml` 在自己跑完后补上去（workflow 之间不能互相 `needs`，所以两边都用了
-> 「没有就建、有就改」的幂等写法）。
+> `发布 Release` 会等 macOS job 跑完再上传，所以 Windows / Linux / macOS 三个平台的包
+> 是一次性出现在 Release 里的，不再有「先有 Release、macOS 过几分钟才补 DMG」的空窗。
 
 iOS 产物为未签名 `.ipa`，安装需要自行用 Xcode 重签。
 

@@ -1,8 +1,10 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/cupertino.dart';
 
 import '../../core/api_client.dart';
+import '../../core/download_target.dart';
 import '../../models/song.dart';
 import '../player/player_controller.dart';
 import '../../shared/cover_cache.dart';
@@ -161,13 +163,17 @@ class _SearchPageState extends State<SearchPage> {
   }
 
   Future<void> _download(Song song) async {
-    Toast.show(context, '正在下载 ${song.name} …');
     try {
-      final dir = await ApiClient.downloadDirectory();
+      final dir = await DownloadTarget.resolve();
+      if (dir == null) return; // 桌面端取消了选择文件夹
+      if (!mounted) return;
+      Toast.show(context, '正在下载 ${song.name} …');
       final path = await widget.api.downloadTo(song, dir);
       if (!mounted) return;
       Toast.show(context, '已保存到 $path');
     } catch (err) {
+      // macOS 沙盒重启后旧目录可能没权限了：清掉记录，下次重新选
+      if (err is FileSystemException && Platform.isMacOS) await DownloadTarget.clear();
       if (err is UnauthorizedException) {
         await widget.onUnauthorized('$err');
         return;

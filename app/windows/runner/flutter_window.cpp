@@ -55,9 +55,15 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
                               LPARAM const lparam) noexcept {
   // Windows IME input context can become stale after the window loses and
   // regains focus, which breaks third-party IMEs (flutter/flutter#190042).
-  // Restore the window's default IMM input context on focus/activation.
-  if (message == WM_SETFOCUS ||
-      (message == WM_ACTIVATE && wparam != WA_INACTIVE)) {
+  // Only reset after a real focus loss: resetting on every activation tears
+  // down an IME that is already composing (that made input stop immediately).
+  static bool ime_reset_pending = false;
+  if (message == WM_ACTIVATE && LOWORD(wparam) == WA_INACTIVE) {
+    ime_reset_pending = true;
+  } else if (ime_reset_pending &&
+             (message == WM_SETFOCUS ||
+              (message == WM_ACTIVATE && LOWORD(wparam) != WA_INACTIVE))) {
+    ime_reset_pending = false;
     if (flutter_controller_ && flutter_controller_->view()) {
       ::ImmAssociateContextEx(
           flutter_controller_->view()->GetNativeWindow(), nullptr, IACE_DEFAULT);

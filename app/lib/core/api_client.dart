@@ -2,7 +2,6 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:http/http.dart' as http;
-import 'package:path_provider/path_provider.dart';
 
 import '../models/song.dart';
 import 'api_errors.dart';
@@ -301,13 +300,5 @@ class ApiClient {
   Future<void> libraryClear(String kind) async {
     final resp = await http.delete(_uri('/api/library/$kind'), headers: _headers).timeout(const Duration(seconds: 20));
     if (resp.statusCode != 200) throw errorOf(resp);
-  }
-
-  /// 桌面端返回「下载」目录，iOS 返回应用文档目录。
-  static Future<Directory> downloadDirectory() async {
-    if (Platform.isIOS || Platform.isAndroid) {
-      return getApplicationDocumentsDirectory();
-    }
-    return await getDownloadsDirectory() ?? getApplicationDocumentsDirectory();
   }
 }
