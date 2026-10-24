@@ -1,6 +1,9 @@
+import 'dart:async';
 import 'dart:ffi';
 import 'dart:io';
 
+import 'package:flutter/cupertino.dart'
+    show CupertinoActivityIndicator, CupertinoAlertDialog, CupertinoDialogAction, showCupertinoDialog;
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 
@@ -8,6 +11,8 @@ import '../../core/api_client.dart';
 import '../../core/credentials.dart';
 import '../../core/download_target.dart';
 import '../../core/update_installer.dart';
+import '../../shared/dialogs.dart';
+import '../../shared/toast.dart';
 import '../../version.dart';
 
 /// 「我的」页面：账户、本机设备、服务端地址、设备管理与退出登录。
@@ -84,21 +89,14 @@ class _ProfilePageState extends State<ProfilePage> {
   }
 
   Future<void> _revoke(Map<String, dynamic> device) async {
-    // 在任何 await 之前把 messenger 抓出来：对话框期间页面可能被关掉，
-    // 之后再 ScaffoldMessenger.of(context) 会拿到一个已失活的 element 直接抛
-    final messenger = ScaffoldMessenger.of(context);
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('吊销这台设备？'),
-        content: Text('${device['name'] ?? '未命名设备'}\n\n吊销后它需要重新登录。'),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('取消')),
-          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('吊销')),
-        ],
-      ),
+    final confirmed = await showConfirmDialog(
+      context,
+      title: '吊销这台设备？',
+      message: '${device['name'] ?? '未命名设备'}\n\n吊销后它需要重新登录。',
+      confirmText: '吊销',
+      destructive: true,
     );
-    if (confirmed != true || !mounted) return;
+    if (!confirmed || !mounted) return;
     final wasCurrent = device['current'] == true;
     try {
       await widget.api.revokeDevice('${device['id']}');
@@ -112,16 +110,14 @@ class _ProfilePageState extends State<ProfilePage> {
       setState(() {
         _devices = _devices.where((item) => item['id'] != device['id']).toList();
       });
-      messenger.showSnackBar(SnackBar(content: Text('已吊销 ${device['name'] ?? '该设备'}')));
+      Toast.show(context, '已吊销 ${device['name'] ?? '该设备'}');
       await _load();
     } catch (err) {
       if (err is UnauthorizedException) {
         await widget.onUnauthorized('$err');
         return;
       }
-      if (mounted) {
-        messenger.showSnackBar(SnackBar(content: Text('吊销失败：$err')));
-      }
+      if (mounted) Toast.show(context, '吊销失败：$err');
     }
   }
 
@@ -148,7 +144,7 @@ class _ProfilePageState extends State<ProfilePage> {
     return 'x64';
   }
 
-  /// 查 GitHub Release（服务端会缓存 10 分钟），有更新就打开安装包下载页。
+  /// 查 GitHub Release（服务端会缓存 10 分钟），有更新就下载并静默安装。
   Future<void> _checkUpdate() async {
     if (_checkingUpdate) return;
     setState(() => _checkingUpdate = true);
@@ -164,40 +160,30 @@ class _ProfilePageState extends State<ProfilePage> {
 
       final latest = '${data['latest'] ?? ''}';
       if (data['has_update'] != true) {
-        await showDialog<void>(
-          context: context,
-          builder: (context) => AlertDialog(
-            title: const Text('已是最新版本'),
-            content: const Text('当前 $kAppVersion（build $kAppBuild）'),
-            actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text('好'))],
-          ),
-        );
+        await _alert('已是最新版本', '当前 $kAppVersion（build $kAppBuild）');
         return;
       }
 
       final asset = data['asset'];
       if (data['ready'] != true || asset is! Map) {
-        final message = '${data['message'] ?? '安装包还没上传完，稍后再试'}';
-        await showDialog<void>(
-          context: context,
-          builder: (context) => AlertDialog(
-            title: Text('新版本 v$latest 已发布'),
-            content: Text(message),
-            actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text('好'))],
-          ),
+        await _alert(
+          '新版本 v$latest 已发布',
+          '${data['message'] ?? '安装包还没上传完，稍后再试'}',
         );
         return;
       }
 
       final url = '${asset['url'] ?? ''}';
+      final fallbackUrl = '${asset['direct_url'] ?? ''}';
       final name = '${asset['name'] ?? ''}';
+      final size = (asset['size'] as num?)?.toInt() ?? 0;
       final notes = '${data['notes'] ?? ''}'.trim();
-      final download = await showDialog<bool>(
+      final download = await showCupertinoDialog<bool>(
         context: context,
-        builder: (context) => AlertDialog(
+        builder: (context) => CupertinoAlertDialog(
           title: Text('发现新版本 v$latest'),
           content: SizedBox(
-            width: 440,
+            width: 320,
             child: SingleChildScrollView(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -213,13 +199,22 @@ class _ProfilePageState extends State<ProfilePage> {
                     const SizedBox(height: 4),
                     Text(notes, style: const TextStyle(fontSize: 13)),
                   ],
+                  const SizedBox(height: 12),
+                  const Text(
+                    '下载完成后会自动安装并重新启动 App；安装时会弹一次 UAC 授权框，请点「是」。',
+                    style: TextStyle(fontSize: 12),
+                  ),
                 ],
               ),
             ),
           ),
           actions: [
-            TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('稍后')),
-            FilledButton(
+            CupertinoDialogAction(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('稍后'),
+            ),
+            CupertinoDialogAction(
+              isDefaultAction: true,
               onPressed: url.isEmpty ? null : () => Navigator.pop(context, true),
               child: const Text('下载并安装'),
             ),
@@ -229,37 +224,46 @@ class _ProfilePageState extends State<ProfilePage> {
       if (download != true || !mounted || url.isEmpty) return;
 
       final progress = ValueNotifier<double>(0);
-      // ignore: unawaited_futures
-      showDialog<void>(
+      final navigator = Navigator.of(context, rootNavigator: true);
+      unawaited(showCupertinoDialog<void>(
         context: context,
         barrierDismissible: false,
-        builder: (context) => AlertDialog(
+        builder: (context) => CupertinoAlertDialog(
           title: Text('正在下载 v$latest'),
-          content: ValueListenableBuilder<double>(
-            valueListenable: progress,
-            builder: (context, value, _) => Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                LinearProgressIndicator(value: value > 0 ? value : null),
-                const SizedBox(height: 12),
-                Text(value > 0 ? '${(value * 100).round()}%' : '正在下载…'),
-                const SizedBox(height: 8),
-                const Text('下载完成后会自动静默安装并重新启动 App', style: TextStyle(fontSize: 12)),
-              ],
-            ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const SizedBox(height: 8),
+              const CupertinoActivityIndicator(),
+              const SizedBox(height: 14),
+              ValueListenableBuilder<double>(
+                valueListenable: progress,
+                builder: (context, value, _) => Text(
+                  value > 0 ? '${(value * 100).round()}%' : '正在下载…',
+                ),
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                '下载完成后会自动静默安装并重新启动 App',
+                style: TextStyle(fontSize: 12),
+              ),
+            ],
           ),
         ),
-      );
+      ));
       try {
         await UpdateInstaller.downloadAndInstall(
           url: url,
+          fallbackUrl: fallbackUrl,
           fileName: name,
+          expectedSize: size,
           onProgress: (value) => progress.value = value,
         );
       } catch (err) {
         if (!mounted) return;
-        Navigator.of(context, rootNavigator: true).pop();
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('安装更新失败：$err')));
+        // 进度框还压在栈顶，先收掉再提示（Toast 走 Overlay，不 pop 会被盖住）
+        navigator.pop();
+        Toast.show(context, '安装更新失败：$err', duration: const Duration(seconds: 5));
       }
     } catch (err) {
       if (!mounted) return;
@@ -267,16 +271,30 @@ class _ProfilePageState extends State<ProfilePage> {
         await widget.onUnauthorized('$err');
         return;
       }
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('检查更新失败：$err')));
+      Toast.show(context, '检查更新失败：$err', duration: const Duration(seconds: 5));
     } finally {
       if (mounted) setState(() => _checkingUpdate = false);
     }
   }
 
+  /// 苹果风单按钮提示（`CupertinoApp` 下不能用 Material 的 `showDialog`）。
+  Future<void> _alert(String title, String message) {
+    return showCupertinoDialog<void>(
+      context: context,
+      builder: (context) => CupertinoAlertDialog(
+        title: Text(title),
+        content: Text(message),
+        actions: [
+          CupertinoDialogAction(onPressed: () => Navigator.pop(context), child: const Text('好')),
+        ],
+      ),
+    );
+  }
+
   Future<void> _chooseDownloadDir() async {
     final dir = await DownloadTarget.choose();
     if (dir == null || !mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('下载目录：${dir.path}')));
+    Toast.show(context, '下载目录：${dir.path}');
   }
 
   @override

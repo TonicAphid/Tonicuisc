@@ -190,12 +190,17 @@ flutter build windows --release
 
 另外一个**不用管**的噪音：控制台刷 `[ERROR:flutter/shell/platform/common/accessibility_bridge.cc(114)] Failed to update ui::AXTree, error: N will not be in the tree and is not the new root`。这是 Flutter 引擎在 Windows 上的已知 bug（[#98099](https://github.com/flutter/flutter/issues/98099)、[#182444](https://github.com/flutter/flutter/issues/182444)，后者给的复现条件是 **`ListView` + Material `Tooltip`**），**只是 debug 控制台的日志**，界面和功能都不受影响，release 版没有控制台。仓库里的 `Tooltip` 全部来自还没迁到 Cupertino 的 `IconButton(tooltip: ...)`，**逐页迁移做完它自然就没了**。
 
-**Windows 第三方输入法**：这是 Flutter Windows 嵌入层的已知问题（[#190042](https://github.com/flutter/flutter/issues/190042)、[#191196](https://github.com/flutter/flutter/issues/191196)，修复 PR [#190043](https://github.com/flutter/flutter/pull/190043) 至今仍是 draft），**换输入框 Widget（Material `TextField` ↔ `CupertinoTextField`）不会有任何区别**。踩过的两次：
+**Windows 第三方输入法**：这是 Flutter Windows 嵌入层的已知问题（[#190042](https://github.com/flutter/flutter/issues/190042)、[#191196](https://github.com/flutter/flutter/issues/191196)，修复 PR [#190043](https://github.com/flutter/flutter/pull/190043) 至今仍是 draft），**换输入框 Widget（Material `TextField` ↔ `CupertinoTextField`）不会有任何区别**。踩过的三次：
 
 - 在窗口焦点变化时调 `ImmAssociateContextEx` 重置 IMM 上下文 → 候选窗直接错乱、打一个字就断，**补丁已删除**（`tool/patch_windows_ime.py` 一并删掉，CI 也不再跑）。
 - 模板自带的 `WM_ACTIVATE` 处理**不看 `wparam`**：窗口被别的程序（包括输入法候选窗 / 皮肤窗）抢走激活时也强行 `SetFocus` 回 Flutter 子窗口，等于在组字途中结束一次文本输入会话 → 现象就是「第一个字母上屏后输入法不动了，再点一次输入框才恢复」。现在**只在真正获得激活时**才设置焦点（`app/windows/runner/win32_window.cpp`）。
+- **框架自己在窗口失焦时收焦点**（这次才是主因）。引擎把「窗口失焦」分成两路告诉框架，两路都会把输入焦点收走：
+  1. `SystemChannels.lifecycle` → `AppLifecycleState.inactive` → `FocusManager._appLifecycleChange` 挂起 `primaryFocus`；
+  2. `PlatformDispatcher.onViewFocusChange` → `View.didChangeViewFocus` 收到 `unfocused` 后 `rootScope.requestScopeFocus()`，把焦点停到根作用域。
 
-Debug 构建里两个输入框会把每一次文本 / 组字变化写进 `%TEMP%\tonicuisc-ime.log`（`app/lib/core/ime_debug.dart`，Release 空操作）：`composing` 一直是 `(-1, -1)` = 引擎根本没收到组字消息（Dart 侧无解，只能等上游）；先有 `composing=(a, b)` 再突然变回 `(-1, -1)` 且字只上屏一个 = 组字被 App 打断，这类能在我们这边修。
+  输入法弹出候选窗的一瞬间主窗口就短暂失焦，于是两路同时到达、组字被打断。`app/lib/core/desktop_lifecycle.dart` 在桌面端把这两路都拦下来（`hidden` / `paused` 照常透传），`foreground` 这个 notifier 继续给「播放时屏幕常亮」用。
+
+Debug 构建里两个输入框会把每一次文本 / 组字变化写进 `%LOCALAPPDATA%\Tonicuisc\logs\tonicuisc-ime.log`（`app/lib/core/ime_debug.dart`，Release 空操作；不放 `%TEMP%` 是因为它的 ACL 会被各种沙箱工具改坏）：`composing` 一直是 `(-1, -1)` = 引擎根本没收到组字消息（Dart 侧无解，只能等上游）；先有 `composing=(a, b)` 再突然变回 `(-1, -1)` 且字只上屏一个 = 组字被 App 打断，这类能在我们这边修。
 
 ### 第一次登录
 
@@ -296,7 +301,7 @@ GET /api/update?platform=windows&arch=x64&version=v0.2.5&build=42
 
 返回里 `asset.url` 已经是 `https://gh-proxy.com/<GitHub 原始地址>`。App **不再跳浏览器**：点「下载并安装」后自己下载（带进度），然后：
 
-- **Windows**：跑 Inno Setup 的 `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS` 覆盖安装，脚本退出后重新启动 App；
+- **Windows**：安装包下到 `%LOCALAPPDATA%\Tonicuisc\update\`（**不用 `%TEMP%`**，那里的 ACL 常被沙箱工具改坏），再用 **WMI `Win32_Process.Create`** 拉起 `install.ps1`。这里不能用 `Process.start(detached)`：父进程 `exit(0)` 时 detached 子进程会被一起收掉，安装程序根本不会启动（实测 v0.2.7 → v0.2.9 两次都是下载完就没了）。脚本用 `Start-Process -Verb RunAs` 弹一次 UAC，再跑 Inno 的 `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS /DIR=<当前目录> /LOG=<setup.log>`；成功或失败都写 `last-result.txt`，App 下次启动时由 `UpdateInstaller.consumeResult()` 弹窗说明原因（UAC 被取消也会提示），然后重新拉起旧 App。安装包未签名，UAC 会显示「未知发布者」；
 - **macOS**：`hdiutil` 挂载 DMG，`ditto` 替换当前 `.app`，去掉 quarantine，再 `open` 重新启动；
 - **Linux**：解压 tar.gz 覆盖当前 bundle，再 `nohup` 启动。
 

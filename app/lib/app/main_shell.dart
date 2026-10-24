@@ -5,7 +5,9 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../core/api_client.dart';
 import '../core/credentials.dart';
+import '../core/desktop_lifecycle.dart';
 import '../core/self_signed.dart';
+import '../core/update_installer.dart';
 import '../features/auth/device_login.dart';
 import '../features/auth/login_page.dart';
 import '../features/library/library_page.dart';
@@ -48,12 +50,16 @@ class _MainShellState extends State<MainShell> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    // 桌面端把 `inactive` 拦掉了（见 core/desktop_lifecycle.dart），所以「窗口失活」
+    // 这条信号得从 DesktopLifecycle 拿，否则 alt-tab 之后常亮会一直开着。
+    DesktopLifecycle.foreground.addListener(_onForegroundChanged);
     unawaited(_keepScreenAwake(true));
     _bootstrap();
   }
 
   @override
   void dispose() {
+    DesktopLifecycle.foreground.removeListener(_onForegroundChanged);
     WidgetsBinding.instance.removeObserver(this);
     unawaited(_keepScreenAwake(false));
     _player.dispose();
@@ -68,6 +74,8 @@ class _MainShellState extends State<MainShell> with WidgetsBindingObserver {
       // 平台不支持就算了，不影响使用
     }
   }
+
+  void _onForegroundChanged() => unawaited(_keepScreenAwake(DesktopLifecycle.foreground.value));
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
@@ -102,6 +110,28 @@ class _MainShellState extends State<MainShell> with WidgetsBindingObserver {
     if (key != null && key.isNotEmpty) {
       unawaited(_library.refresh());
     }
+    // 上次自动更新失败时安装脚本留了原因（UAC 被取消 / 安装程序报错），
+    // 等首帧出来再弹，这时 Navigator 才在。
+    WidgetsBinding.instance.addPostFrameCallback((_) => unawaited(_reportUpdateResult()));
+  }
+
+  /// 把「上次自动更新没成功」的原因提示一次，读完即删。
+  Future<void> _reportUpdateResult() async {
+    final message = await UpdateInstaller.consumeResult();
+    if (message == null || !mounted) return;
+    await showCupertinoDialog<void>(
+      context: context,
+      builder: (context) => CupertinoAlertDialog(
+        title: const Text('自动更新没有完成'),
+        content: Text('$message\n\n可以到 GitHub Releases 手动下载安装包。'),
+        actions: [
+          CupertinoDialogAction(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('好'),
+          ),
+        ],
+      ),
+    );
   }
 
   /// 统一的「换 ApiClient」动作：重建 LibraryState + 让播放器跟着换。

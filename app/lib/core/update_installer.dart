@@ -3,23 +3,58 @@ import 'dart:io';
 
 import 'package:http/http.dart' as http;
 
-/// 下载桌面安装包并静默安装，然后由脱离的脚本重新启动 App。
+/// 下载桌面安装包 → 交给一个「脱离当前进程」的安装脚本 → 静默安装并重启。
 ///
-/// 当前进程会在脚本启动后立即退出；脚本等文件锁释放后再覆盖安装。
+/// ## 为什么 Windows 上不能用 `Process.start(detached)` + `exit(0)`
+///
+/// 实测（2026-10-24，v0.2.7 → v0.2.9）：安装包下载完整、`install.ps1` 也写出来了，
+/// 但点完「下载并安装」App 直接消失，安装程序**根本没启动**。原因不是权限，而是：
+/// 父进程 `exit(0)` 时，detached 出来的 PowerShell 被一起收掉了（进程在同一个
+/// 作业对象里），它连脚本第一行都没跑到。用 WMI 的 `Win32_Process.Create` 创建
+/// 就不一样：进程归 WMI 服务管，不在本进程的作业对象里，能一直活到安装结束。
+///
+/// ## 流程（Windows）
+///
+/// 1. 下载到 `%LOCALAPPDATA%\Tonicuisc\update\`（不放 `%TEMP%`，它的 ACL 会被
+///    各种沙箱工具改坏）；
+/// 2. 写 `install.ps1`：等 2 秒 → 用 `-Verb RunAs` 弹 UAC → 静默安装 → 写结果 →
+///    重新打开 App；
+/// 3. 用 WMI 启动这个脚本，然后 App 自己退出。
+///
+/// 安装脚本是普通用户权限，只有安装程序本身要管理员（UAC 那一下）。
+/// 失败信息写在 `last-result.txt`，App 下次启动时由 `consumeResult()` 读出来提示。
 class UpdateInstaller {
   UpdateInstaller._();
 
+  static const _appDirName = 'Tonicuisc';
+  static const _updateDirName = 'update';
+  static const _resultFileName = 'last-result.txt';
+
+  /// 下载并安装。成功启动安装脚本后本进程会 `exit(0)`，函数不会返回。
+  ///
+  /// [fallbackUrl] 是镜像失败时的直连地址；[expectedSize] 用来校验下载完整性
+  /// （服务端 `/api/update` 会给 `asset.size`）。
   static Future<void> downloadAndInstall({
     required String url,
+    String? fallbackUrl,
     required String fileName,
+    int expectedSize = 0,
     required void Function(double progress) onProgress,
   }) async {
-    final temp = await Directory.systemTemp.createTemp('tonicuisc_update');
-    final target = File('${temp.path}${Platform.pathSeparator}${_safeName(fileName)}');
-    await _download(url, target, onProgress);
+    final dir = await _prepareDirectory();
+    final target = File('${dir.path}${Platform.pathSeparator}${_safeName(fileName)}');
+    try {
+      await _download(url, target, onProgress, expectedSize);
+    } catch (first) {
+      final alt = (fallbackUrl ?? '').trim();
+      if (alt.isEmpty || alt == url) rethrow;
+      // 镜像挂了就换直连再试一次（进度条归零重新走）
+      onProgress(0);
+      await _download(alt, target, onProgress, expectedSize);
+    }
 
     if (Platform.isWindows) {
-      await _installWindows(target);
+      await _installWindows(target, dir);
     } else if (Platform.isMacOS) {
       await _installMacos(target);
     } else if (Platform.isLinux) {
@@ -27,8 +62,54 @@ class UpdateInstaller {
     } else {
       throw UnsupportedError('当前平台不支持自动安装');
     }
-    // 脚本已经脱离；这里结束旧进程，安装脚本会在 2 秒后接手。
+    // 安装脚本已经脱离（Windows 走 WMI，其它平台 detached），这里结束旧进程。
     exit(0);
+  }
+
+  /// 上一次自动更新的结果（只在上次失败时有内容）。读完即删。
+  ///
+  /// 场景：UAC 被取消 / 安装程序报错 → 安装脚本把原因写进文件并把旧 App 重新拉起来，
+  /// 这里把它取出来给用户一个明确的提示，而不是「更新了一下，怎么还是老版本」。
+  static Future<String?> consumeResult() async {
+    if (!Platform.isWindows) return null;
+    final file = File('${_baseDirectory().path}${Platform.pathSeparator}$_resultFileName');
+    try {
+      if (!file.existsSync()) return null;
+      final text = await file.readAsString();
+      await file.delete();
+      final trimmed = text.trim();
+      if (trimmed.isEmpty || trimmed == 'ok' || trimmed.startsWith('ok ')) return null;
+      return trimmed;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static Directory _baseDirectory() {
+    final local = Platform.environment['LOCALAPPDATA'];
+    if (Platform.isWindows && local != null && local.isNotEmpty) {
+      return Directory(
+        '$local${Platform.pathSeparator}$_appDirName${Platform.pathSeparator}$_updateDirName',
+      );
+    }
+    return Directory('${Directory.systemTemp.path}${Platform.pathSeparator}tonicuisc_update');
+  }
+
+  /// 每次更新前清空目录：旧安装包 / 旧日志留着没用，还会越堆越多。
+  static Future<Directory> _prepareDirectory() async {
+    final base = _baseDirectory();
+    if (await base.exists()) {
+      await for (final entity in base.list()) {
+        try {
+          await entity.delete(recursive: true);
+        } catch (_) {
+          // 删不掉就算了，不影响下载
+        }
+      }
+    } else {
+      await base.create(recursive: true);
+    }
+    return base;
   }
 
   static String _safeName(String name) {
@@ -40,6 +121,7 @@ class UpdateInstaller {
     String url,
     File target,
     void Function(double progress) onProgress,
+    int expectedSize,
   ) async {
     final client = http.Client();
     try {
@@ -63,28 +145,97 @@ class UpdateInstaller {
       if (total > 0 && received != total) {
         throw HttpException('下载不完整：$received/$total', uri: Uri.parse(url));
       }
+      // 有些镜像不给 Content-Length（chunked），用服务端给的文件大小兜底：
+      // 不然一个被截断的 exe 会被当成下载成功，安装时静默失败。
+      if (expectedSize > 0) {
+        final actual = await target.length();
+        if (actual != expectedSize) {
+          throw HttpException(
+            '安装包大小不对：$actual/$expectedSize（镜像可能返回了错误页）',
+            uri: Uri.parse(url),
+          );
+        }
+      }
     } finally {
       client.close();
     }
   }
 
-  static Future<void> _installWindows(File setup) async {
+  static Future<void> _installWindows(File setup, Directory dir) async {
     final exe = Platform.resolvedExecutable;
-    final dir = File(exe).parent.path;
-    final script = File('${setup.parent.path}${Platform.pathSeparator}install.ps1');
+    final installDir = File(exe).parent.path;
+    final script = File('${dir.path}${Platform.pathSeparator}install.ps1');
+    final log = File('${dir.path}${Platform.pathSeparator}setup.log');
+    final result = File('${dir.path}${Platform.pathSeparator}$_resultFileName');
+
+    // 参数拼成一整串交给 Start-Process，避免 PowerShell 对数组里的引号再加工。
+    final args = [
+      '/VERYSILENT',
+      '/SUPPRESSMSGBOXES',
+      '/NORESTART',
+      '/CLOSEAPPLICATIONS',
+      '/DIR="$installDir"',
+      '/LOG="${log.path}"',
+    ].join(' ');
+    final setupBaseName = setup.uri.pathSegments.last.replaceAll(RegExp(r'\.exe$'), '');
+    final systemRoot = Platform.environment['SystemRoot'] ?? r'C:\Windows';
+    final powershell =
+        '$systemRoot\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
+
     final content = '''
+\$ErrorActionPreference = 'Stop'
+# 等旧 App 完全退出，文件锁释放
 Start-Sleep -Seconds 2
-Unblock-File -Path '${_psEscape(setup.path)}' -ErrorAction SilentlyContinue
-\$installArgs = @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/CLOSEAPPLICATIONS','/DIR="${_psEscape(dir)}"')
-Start-Process -FilePath '${_psEscape(setup.path)}' -ArgumentList \$installArgs -Wait
+try {
+  # -Verb RunAs：UAC 就在这里弹（普通用户权限的脚本 → 管理员权限的安装程序）
+  \$p = Start-Process -FilePath '${_psEscape(setup.path)}' -ArgumentList '${_psEscape(args)}' -Verb RunAs -PassThru
+  if (\$p) {
+    \$p.WaitForExit()
+    \$code = \$p.ExitCode
+  } else {
+    # 极少数 PowerShell 版本拿不到 RunAs 的进程句柄，按进程名等它结束
+    \$deadline = (Get-Date).AddMinutes(5)
+    while ((Get-Process -Name '${_psEscape(setupBaseName)}' -ErrorAction SilentlyContinue) -and ((Get-Date) -lt \$deadline)) {
+      Start-Sleep -Milliseconds 500
+    }
+    \$code = 0
+  }
+  if (\$code -eq 0) {
+    'ok' | Out-File -Encoding utf8 '${_psEscape(result.path)}'
+  } else {
+    "failed 安装程序退出码 \$code（日志：${_psEscape(log.path)}）" | Out-File -Encoding utf8 '${_psEscape(result.path)}'
+  }
+} catch {
+  "failed \$(\$_.Exception.Message)（日志：${_psEscape(log.path)}）" | Out-File -Encoding utf8 '${_psEscape(result.path)}'
+}
+Start-Sleep -Seconds 1
+# 脚本是普通用户权限，这里拉起来的也是普通用户权限的 App
 Start-Process -FilePath '${_psEscape(exe)}'
 ''';
     await _writeScript(script, content);
-    await Process.start(
-      'powershell.exe',
-      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script.path],
-      mode: ProcessStartMode.detached,
-    );
+
+    // 关键一步：用 WMI 创建，脱离本进程的作业对象。见类注释。
+    final commandLine =
+        '"$powershell" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "${script.path}"';
+    final psCommand =
+        'Invoke-CimMethod -ClassName Win32_Process -MethodName Create '
+        "-Arguments @{ CommandLine = '${_psEscape(commandLine)}' } | "
+        'Select-Object -ExpandProperty ReturnValue';
+    final outcome = await Process.run(powershell, [
+      '-NoProfile',
+      '-NonInteractive',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-Command',
+      psCommand,
+    ]);
+    final code = '${outcome.stdout}'.trim();
+    if (outcome.exitCode != 0 || code != '0') {
+      throw StateError(
+        '启动安装脚本失败（WMI 返回 ${code.isEmpty ? outcome.exitCode : code}）：'
+        '${outcome.stderr}'.trim(),
+      );
+    }
   }
 
   static Future<void> _installMacos(File dmg) async {
