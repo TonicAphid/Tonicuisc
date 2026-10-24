@@ -9,9 +9,11 @@ GitHub API 匿名只有 60 次/小时，所以结果在进程内缓存 10 分钟
 
 from __future__ import annotations
 
+import html
 import re
 import threading
 import time
+import xml.etree.ElementTree as ET
 from typing import Any
 
 import requests
@@ -21,11 +23,16 @@ from ..core.download import download_candidates
 from ..core.logging import timing_log
 
 _HTTP_TIMEOUT = 10.0
-_CACHE_TTL = 10 * 60
+_CACHE_TTL = 5 * 60
 
 #: 每个平台优先找的安装包文件名（按顺序回退）
 _WINDOWS_ASSETS = ("tonicuisc-windows-x64-setup.exe", "tonicuisc-windows-x64-portable.zip")
 _LINUX_ASSETS = ("tonicuisc-linux-x64.tar.gz",)
+_ALL_ASSETS = _WINDOWS_ASSETS + _LINUX_ASSETS + (
+    "tonicuisc-macos-arm64.dmg",
+    "tonicuisc-macos-x64.dmg",
+    "tonicuisc-ios-unsigned.ipa",
+)
 
 _VERSION_RE = re.compile(r"v?(\d+)\.(\d+)\.(\d+)(?:[\s._-]*fix)?", re.IGNORECASE)
 
@@ -44,6 +51,14 @@ def _display_version(tag: str) -> str:
         return (tag or "").lstrip("v")
     fix = "fix" if re.search(r"fix", tag or "", re.IGNORECASE) else ""
     return f"{match.group(1)}.{match.group(2)}.{match.group(3)}{fix}"
+
+
+def _strip_html(text: str) -> str:
+    """Atom 的 content 是 HTML；转成纯文本给 App 显示。"""
+    plain = html.unescape(text or "")
+    plain = re.sub(r"<[^>]+>", "\n", plain)
+    plain = re.sub(r"\n[ \t]+", "\n", plain)
+    return re.sub(r"\n{3,}", "\n\n", plain).strip()
 
 
 def _asset_names(platform: str, arch: str | None) -> tuple[str, ...]:
@@ -147,12 +162,22 @@ class UpdateService:
         return payload
 
     def latest_release(self) -> dict[str, Any] | None:
-        """查最新正式 Release（带 10 分钟进程内缓存）。"""
+        """查最新正式 Release（带 5 分钟进程内缓存）。
+
+        GitHub API 匿名额度只有 60 次/小时，超了会 403；这时退回 releases.atom
+        （不耗 API 额度），再不行就返回上一次的缓存，避免客户端只看到 502。
+        """
         now = time.time()
         with self._lock:
             if self._cached is not None and now - self._cached_at < self.ttl:
                 return self._cached
-            data = self._fetch_latest()
+            try:
+                data = self._fetch_latest()
+            except Exception as exc:
+                if self._cached is not None:
+                    timing_log(f"[update] 刷新失败，继续用旧缓存: {type(exc).__name__}: {exc}")
+                    return self._cached
+                raise
             self._cached = data
             self._cached_at = time.time()
             return data
@@ -164,6 +189,15 @@ class UpdateService:
 
     # ------------------------------------------------------------------ 内部
     def _fetch_latest(self) -> dict[str, Any] | None:
+        try:
+            return self._fetch_api()
+        except Exception as exc:
+            # 403（rate limit）/ 网络失败都走 Atom；Atom 是 GitHub 的公开 feed，
+            # 不消耗 API 额度，够拿 tag / 说明 / 发布时间。
+            timing_log(f"[update] GitHub API 失败，改用 releases.atom: {type(exc).__name__}: {exc}")
+            return self._fetch_atom()
+
+    def _fetch_api(self) -> dict[str, Any] | None:
         headers = {
             "Accept": "application/vnd.github+json",
             "User-Agent": "tonicuisc-update/1.0",
@@ -182,6 +216,61 @@ class UpdateService:
         data = response.json()
         timing_log(f"[update] GitHub latest {self.repo}: {data.get('tag_name')} ({time.perf_counter() - started:.2f}s)")
         return data if isinstance(data, dict) else None
+
+    def _fetch_atom(self) -> dict[str, Any] | None:
+        url = f"https://github.com/{self.repo}/releases.atom"
+        # 直连 GitHub 在部分网络会超时；Atom 也走一遍 gh-proxy 镜像再兜底直连。
+        targets = download_candidates(url)
+        last_error: Exception | None = None
+        for target in targets:
+            try:
+                response = self._http_get(
+                    target,
+                    headers={"User-Agent": "tonicuisc-update/1.0", "Accept": "application/atom+xml"},
+                    timeout=_HTTP_TIMEOUT,
+                )
+                response.raise_for_status()
+                text = response.text
+                if "<feed" not in text:
+                    raise ValueError("返回内容不是 Atom feed")
+                root = ET.fromstring(text)
+                break
+            except Exception as exc:  # 换下一个镜像
+                last_error = exc
+                continue
+        else:
+            raise last_error or RuntimeError("获取 releases.atom 失败")
+
+        ns = {"a": "http://www.w3.org/2005/Atom"}
+        entry = root.find("a:entry", ns)
+        if entry is None:
+            return None
+        tag = (entry.findtext("a:title", default="", namespaces=ns) or "").strip()
+        if not tag:
+            return None
+        link = entry.find("a:link[@rel='alternate']", ns)
+        if link is None:
+            link = entry.find("a:link", ns)
+        href = str(link.get("href") or "") if link is not None else ""
+        content = entry.findtext("a:content", default="", namespaces=ns) or ""
+        updated = (entry.findtext("a:updated", default="", namespaces=ns) or "").strip()
+        timing_log(f"[update] GitHub atom {self.repo}: {tag}")
+        return {
+            "tag_name": tag,
+            "body": _strip_html(content),
+            "published_at": updated,
+            "html_url": href,
+            # Atom 不列 assets，按约定文件名直接拼下载地址；三个平台的文件名是固定的
+            "assets": [
+                {
+                    "name": name,
+                    "size": 0,
+                    "browser_download_url": f"https://github.com/{self.repo}/releases/download/{tag}/{name}",
+                    "digest": "",
+                }
+                for name in _ALL_ASSETS
+            ],
+        }
 
 
 _service: UpdateService | None = None

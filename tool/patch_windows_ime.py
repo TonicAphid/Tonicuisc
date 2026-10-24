@@ -28,9 +28,7 @@ PATCH = """  // Windows IME input context can become stale after the window lose
   static bool ime_reset_pending = false;
   if (message == WM_ACTIVATE && LOWORD(wparam) == WA_INACTIVE) {
     ime_reset_pending = true;
-  } else if (ime_reset_pending &&
-             (message == WM_SETFOCUS ||
-              (message == WM_ACTIVATE && LOWORD(wparam) != WA_INACTIVE))) {
+  } else if (ime_reset_pending && message == WM_SETFOCUS) {
     ime_reset_pending = false;
     if (flutter_controller_ && flutter_controller_->view()) {
       ::ImmAssociateContextEx(

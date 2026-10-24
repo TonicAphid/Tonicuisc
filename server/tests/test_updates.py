@@ -9,9 +9,10 @@ from tonicuisc_server.services.updates import UpdateService
 
 
 class _Response:
-    def __init__(self, payload: dict, status: int = 200) -> None:
+    def __init__(self, payload: dict, status: int = 200, text: str = "") -> None:
         self._payload = payload
         self.status_code = status
+        self.text = text
 
     def raise_for_status(self) -> None:
         if self.status_code >= 400:
@@ -118,6 +119,33 @@ def test_no_release_returns_not_ready() -> None:
 
     assert result["ready"] is False
     assert result["latest"] is None
+
+
+def test_api_rate_limit_falls_back_to_atom() -> None:
+    atom = """<?xml version="1.0" encoding="utf-8"?>
+    <feed xmlns="http://www.w3.org/2005/Atom">
+      <entry>
+        <title>v0.2.6</title>
+        <link rel="alternate" href="https://github.com/o/r/releases/tag/v0.2.6"/>
+        <updated>2026-10-24T02:12:46Z</updated>
+        <content type="html">&lt;p&gt;修复更新检查&lt;/p&gt;</content>
+      </entry>
+    </feed>"""
+
+    def fake_get(url, **kwargs):
+        if "api.github.com" in url:
+            return _Response({}, status=403)
+        return _Response({}, text=atom)
+
+    service = UpdateService(repo="o/r", token="", ttl=600, http_get=fake_get)
+    result = service.check("windows", version="v0.2.5")
+
+    assert result["latest"] == "0.2.6"
+    assert result["has_update"] is True
+    assert result["ready"] is True
+    assert result["asset"]["name"] == "tonicuisc-windows-x64-setup.exe"
+    assert result["asset"]["url"].startswith("https://gh-proxy.com/https://github.com/o/r/releases/download/v0.2.6/")
+    assert "修复更新检查" in result["notes"]
 
 
 def test_unknown_platform_raises() -> None:

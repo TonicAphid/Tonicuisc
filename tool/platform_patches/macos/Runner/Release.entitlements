@@ -2,8 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>com.apple.security.app-sandbox</key>
-	<true/>
+	<!-- 自动更新需要在 App 内启动安装脚本；沙盒会禁止 Process.start，
+	     所以桌面版不再开 app-sandbox（网络/下载权限仍然保留，方便以后单独开启）。 -->
 	<!-- 访问后端 API：网络客户端权限（Flutter 模板默认没有） -->
 	<key>com.apple.security.network.client</key>
 	<true/>

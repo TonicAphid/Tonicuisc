@@ -3,11 +3,11 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
-import 'package:url_launcher/url_launcher.dart';
 
 import '../../core/api_client.dart';
 import '../../core/credentials.dart';
 import '../../core/download_target.dart';
+import '../../core/update_installer.dart';
 import '../../version.dart';
 
 /// 「我的」页面：账户、本机设备、服务端地址、设备管理与退出登录。
@@ -221,15 +221,45 @@ class _ProfilePageState extends State<ProfilePage> {
             TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('稍后')),
             FilledButton(
               onPressed: url.isEmpty ? null : () => Navigator.pop(context, true),
-              child: const Text('下载安装包'),
+              child: const Text('下载并安装'),
             ),
           ],
         ),
       );
       if (download != true || !mounted || url.isEmpty) return;
-      final opened = await launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
-      if (!opened && mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('没能打开下载链接，请稍后再试')));
+
+      final progress = ValueNotifier<double>(0);
+      // ignore: unawaited_futures
+      showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (context) => AlertDialog(
+          title: Text('正在下载 v$latest'),
+          content: ValueListenableBuilder<double>(
+            valueListenable: progress,
+            builder: (context, value, _) => Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                LinearProgressIndicator(value: value > 0 ? value : null),
+                const SizedBox(height: 12),
+                Text(value > 0 ? '${(value * 100).round()}%' : '正在下载…'),
+                const SizedBox(height: 8),
+                const Text('下载完成后会自动静默安装并重新启动 App', style: TextStyle(fontSize: 12)),
+              ],
+            ),
+          ),
+        ),
+      );
+      try {
+        await UpdateInstaller.downloadAndInstall(
+          url: url,
+          fileName: name,
+          onProgress: (value) => progress.value = value,
+        );
+      } catch (err) {
+        if (!mounted) return;
+        Navigator.of(context, rootNavigator: true).pop();
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('安装更新失败：$err')));
       }
     } catch (err) {
       if (!mounted) return;

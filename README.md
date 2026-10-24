@@ -78,6 +78,7 @@ app/                               Flutter 客户端
     app/legacy_material_host.dart  过渡壳：罩住还没迁到 Cupertino 的页面（迁完即删）
     core/api_client.dart           HTTP 客户端（接口方法、`X-API-Key`、下载）
     core/download_target.dart      下载目录：桌面选择并记住，iOS 写 Documents/Downloads
+    core/update_installer.dart     App 内下载安装包、静默安装并重启（Windows/macOS/Linux）
     core/api_errors.dart           异常类型 + friendlyError（把报错翻成人话）
     core/server_config.dart        默认服务器地址 + 本机保存的地址
     core/credentials.dart          设备凭据（系统安全存储 + 桌面端兜底）
@@ -209,7 +210,7 @@ flutter build windows --release
 | `TONICUISC_PORT` | `8000` | 端口 |
 | `TONICUISC_SOURCES` | `kuwo` | 启用音源（只保留酷我；代码里还留着 `migu` 别名兼容旧配置） |
 | `TONICUISC_GITHUB_REPO` | `TonicAphid/Tonicuisc` | 桌面更新检查查的 GitHub 仓库 |
-| `TONICUISC_GITHUB_TOKEN` | 空 | 可选 GitHub token；不填时匿名 API 只有 60 次/小时（结果缓存 10 分钟） |
+| `TONICUISC_GITHUB_TOKEN` | 空 | 可选 GitHub token；不填时匿名 API 只有 60 次/小时，超限会自动退回 `releases.atom`（结果缓存 5 分钟） |
 | `TONICUISC_SEARCH_SIZE` | `5` | 每个音源的抓取下限（实际按「要几条 ÷ 音源数」分摊） |
 | `TONICUISC_SEARCH_SIZE_PER_PAGE` | `1` | 每个请求取几条的**下限**；实际每页 = `max(该值, ceil(要几条 ÷ 并发数))` |
 | `TONICUISC_SEARCH_THREADS` | `10` | 每个音源的并发请求数（也是「要 15 条 → 每页 2 条 → 8 个请求」里的分母）。实测酷我 15 条：10 路比 5 路快约 30%，上游抖动时差距更大；怕被限流设回 `5` |
@@ -279,7 +280,7 @@ flutter build windows --release
 GET /api/update?platform=windows&arch=x64&version=v0.2.5&build=42
 ```
 
-服务端查 GitHub `releases/latest`（缓存 10 分钟），按平台选文件：
+服务端查 GitHub `releases/latest`（缓存 5 分钟）；API 限流/网络失败时自动退回 `releases.atom`，按平台选文件：
 
 | 平台 | 首选文件 |
 | --- | --- |
@@ -288,7 +289,13 @@ GET /api/update?platform=windows&arch=x64&version=v0.2.5&build=42
 | macOS x64 | `tonicuisc-macos-x64.dmg` |
 | Linux | `tonicuisc-linux-x64.tar.gz` |
 
-返回里 `asset.url` 已经是 `https://gh-proxy.com/<GitHub 原始地址>`，App 用系统浏览器打开下载。Release 已建但某个安装包还没上传完时返回 `ready: false`，App 提示稍后再试；这一般只发生在 macOS DMG 比 Windows/Linux 晚几分钟上传的时候。
+返回里 `asset.url` 已经是 `https://gh-proxy.com/<GitHub 原始地址>`。App **不再跳浏览器**：点「下载并安装」后自己下载（带进度），然后：
+
+- **Windows**：跑 Inno Setup 的 `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS` 覆盖安装，脚本退出后重新启动 App；
+- **macOS**：`hdiutil` 挂载 DMG，`ditto` 替换当前 `.app`，去掉 quarantine，再 `open` 重新启动；
+- **Linux**：解压 tar.gz 覆盖当前 bundle，再 `nohup` 启动。
+
+Release 已建但某个安装包还没上传完时返回 `ready: false`，App 提示稍后再试。Windows 的机器级安装目录（`Program Files`）触发 UAC 时，系统仍会要求确认一次；macOS 没有 `/Applications` 写权限时也会直接报错，不会假装静默成功。macOS 桌面版为了能启动安装脚本，`Release.entitlements` 已关闭 `app-sandbox`（网络/下载权限仍保留）。
 
 ## 登录（设备码流）
 
