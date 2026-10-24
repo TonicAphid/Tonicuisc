@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 from urllib.parse import quote
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 
 from ...services import DownloadFailed, SongNotFound, song_to_item
@@ -52,8 +52,20 @@ async def direct_url(item_id: str) -> dict:
         raise HTTPException(status_code=502, detail=str(exc))
 
 
-@router.get("/api/lyric/{item_id:path}", response_class=PlainTextResponse)
-async def lyric(item_id: str) -> PlainTextResponse:
+@router.get("/api/lyric/{item_id:path}")
+async def lyric(item_id: str, fmt: str = Query("text", alias="format")):
+    """歌词。
+
+    * ``format=text``（默认）：音源自带的逐行 LRC（纯文本，老客户端不变）；
+    * ``format=enhanced``：结构化逐字时间轴，没查完时返回 ``ready: false``，
+      客户端过两秒再问（和封面同一套「有结论才返回」的语义）。
+    """
+    if fmt in {"enhanced", "json"}:
+        try:
+            song = await asyncio.to_thread(get_service().get_song, item_id)
+        except SongNotFound:
+            raise HTTPException(status_code=404, detail="歌曲不存在或已过期，请重新搜索")
+        return await asyncio.to_thread(get_service().lyrics.enhanced, item_id, song)
     try:
         text = await asyncio.to_thread(get_service().lyric, item_id)
         return PlainTextResponse(text, media_type="text/plain; charset=utf-8")

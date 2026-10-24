@@ -323,6 +323,63 @@ python -m tonicuisc_server acme --status
 
 ---
 
+## ⚠️ 大陆节点会被备案拦截（2026-10-18 实测：杭州 ECS）
+
+用**自己的大陆服务器**（阿里云杭州 ECS `47.97.176.166`）跑 frps、A 指向它，结果
+**浏览器能正常打开、App 连不上**。查下来不是证书、不是客户端代码，是**备案拦截**：
+
+```
+$ curl -i -H 'Host: uisc.tonicaphid.cn' http://47.97.176.166/
+HTTP/1.1 403 Forbidden
+Server: Beaver                                   # ← 阿里云的拦截服务
+<title>Non-compliance ICP Filing</title>
+```
+
+拦截器**只看 TCP 第一个包里能不能读到 SNI**（域名未备案 → RST / 403 页）：
+
+| ClientHello | 结果 |
+|---|---|
+| openssl 默认（3.5 起默认带 **PQ 混合密钥** `X25519MLKEM768`，hello ≈1.6 KB、跨两个包，SNI 掉到第二个包里） | ✅ 握手成功 |
+| openssl `-groups X25519` / `-groups P-256` / `-tls1_2`（hello 一个包装得下，SNI 被读到） | ❌ RST |
+| **非 80/443 端口**（实测 `:7500` = frps 面板的明文 HTTP） | ✅ 301，**完全没被碰** |
+
+三条结论：
+
+1. **和证书无关**：同一个 IP、同一个 SNI、**同一条 4 张证书的链**，PQ 那条过、X25519 那条 RST。
+   lego v5 的 `.crt` 本来就是 4 条（叶子 + 3 张中间/交叉签名，见 `CHANGES-v0.2.1.md`），
+   **不要删**——最后那张 `ISRG Root X2` 正是给「信任库里还没有新 ISRG 根」的客户端接链用的，
+   删了有把现在好好的 v6 也弄坏的风险，而且对 v4 一点用都没有。
+2. **「浏览器能开、App 不行」就是这个原因**：Chrome / OpenSSL 3.5 默认发 **PQ 密钥共享** →
+   hello 跨包 → 检查器读不到 SNI → 放过；**dart:io 不发 PQ**（Flutter 侧 BoringSSL 没开）→
+   hello 小 → 被 RST。**App 侧修不了**：dart:io 没暴露曲线 / 密钥共享的接口。
+   唯一能骗过检查器的招是把 hello 撑大、让 SNI 掉出第一个包（比如塞个超长 ALPN）——
+   **那是刻意绕备案过滤器，而且检查器行为一变就挂，不做**。
+3. **拦截只打 80 / 443**：`:7500` 的明文 HTTP 一点没被碰。
+   → 想用自己大陆的机器，只能走**非标端口**（App 地址得带端口），或者把 A 换回**境外**节点。
+
+**自己复现这个 A/B**（同一个 IP、同一个 SNI、同一条证书链，**只差 ClientHello**）：
+
+```bash
+REQ='GET /api/health HTTP/1.1\r\nHost: uisc.tonicaphid.cn\r\nConnection: close\r\n\r\n'
+
+# ① 浏览器式（openssl 3.5 默认带 PQ 混合密钥）：拿到完整 HTTP 响应
+printf "$REQ" | openssl s_client -connect uisc.tonicaphid.cn:443 -4 \
+  -servername uisc.tonicaphid.cn -quiet -ign_eof
+# → {"status":"ok","sources":["MiguMusicClient","KuwoMusicClient"],...}
+
+# ② App 式（只给 X25519，就是 dart:io 的 hello）：连接直接被打掉
+printf "$REQ" | openssl s_client -connect uisc.tonicaphid.cn:443 -4 \
+  -servername uisc.tonicaphid.cn -groups X25519 -quiet -ign_eof
+# → write:errno=113（Windows 上长这样；Linux 大概是 Connection reset by peer）
+```
+
+> 所以「**浏览器打得开**」不能拿来判定 v4 通不通 —— 它靠 PQ 把 SNI 挤出了第一个包。
+> **判定只能用 `curl -4` 或 `dart run app/tool/probe_net.dart`**（两者都是非 PQ 的 hello，
+> 跟 App 一个待遇）。
+
+> 顺带两个安全提醒：`47.97.176.166` 的 **7500（frps 面板）** 和 **7000（frps 控制端口）**
+> 都是公网可连的——面板务必改掉默认账号 + 强密码。
+
 ## 本次实际部署（2026-10）
 
 - **服务商**：ChmlFrp（免费用户，**未实名**）
@@ -367,8 +424,10 @@ python -m tonicuisc_server acme --status
 - **回滚方式**：v6 那条路出问题 → 删掉 AAAA，全员走隧道；想整体退回「纯隧道」→
   删掉 AAAA（A 保留也行，指向节点就是隧道）。注意**一旦加回 CNAME，AAAA 就加不回来了**。
 - **隧道**：`tonicuisc`，本地 `127.0.0.1:443`（HTTPS 类型），连接地址 `uisc.tonicaphid.cn`
-- **节点**：`xg-2.frp.one` → **`23.147.68.16`**（香港-2）—— `uisc` 的 **A 记录手填的就是这个 IP**（TTL 600）；
-  `vip.bj.frp.one`（北京）被拦、`sz.frp.one`（深圳）已挂，都不再使用
+- **节点**：`xg-2.frp.one` → **`23.147.68.16`**（香港-2）—— ⚠️ **2026-10-18 实测它 443 已经不说 TLS 了**
+  （`openssl s_client` 报 `wrong version number`，TCP 能连上但握手拿不到证书），**别再往它指**；
+  `vip.bj.frp.one`（北京）被拦、`sz.frp.one`（深圳）已挂。A 记录现在指的是
+  **杭州 ECS `47.97.176.166`**（自己的机器，但被备案拦截，见下面那节）
 - **⚠️ 排查网络问题的坑**：CNAME 换过之后，**公共 DNS（如 223.5.5.5）在 TTL 内仍会返回旧节点的 IP**
   `vip.bj.frp.one` → `82.156.215.91`**（缓存残留）。App 里出现 TLS 报错时，先确认解析到的是哪个 IP：
   ```

@@ -422,6 +422,34 @@ def test_cover_falls_back_to_source_cover(service: MusicService, monkeypatch) ->
     assert service.storage.qq_cover_of(items[0]["id"]) == ""
 
 
+def test_cached_search_applies_resolved_qq_cover(service: MusicService, monkeypatch) -> None:
+    """搜索缓存里是原图快照，但 QQ 封面已经查到时，读缓存必须换成 QQ 封面。
+
+    否则 App 重启 / 缓存命中会一直返回音源原图（控制中心也会锁死那张图）。
+    """
+    _enable_qq_cover(monkeypatch, lambda name, singers="": None)
+    key = ("天地龙鳞", ("KuwoMusicClient",))
+    item = song_to_item(_song("old-0", "KuwoMusicClient", cover="https://kuwo/original.jpg"))
+    service.storage.save_search_cache(key, [item])
+    service.storage.set_qq_cover(item["id"], "https://y.gtimg.cn/qq.jpg")
+
+    assert service._client.calls == 0  # _FakeClient 没有被调用
+    items = service.search("天地龙鳞", sources=["kuwo"])
+
+    assert items[0]["cover_url"] == "https://y.gtimg.cn/qq.jpg"
+
+
+def test_cached_search_keeps_source_cover_when_qq_pending(service: MusicService, monkeypatch) -> None:
+    _enable_qq_cover(monkeypatch, lambda name, singers="": None)
+    key = ("天地龙鳞", ("KuwoMusicClient",))
+    item = song_to_item(_song("old-0", "KuwoMusicClient", cover="https://kuwo/original.jpg"))
+    service.storage.save_search_cache(key, [item])
+
+    items = service.search("天地龙鳞", sources=["kuwo"])
+
+    assert items[0]["cover_url"] == "https://kuwo/original.jpg", "还没查到时先保持原图"
+
+
 def test_only_selected_source_is_requested(service: MusicService) -> None:
     multi = _MultiClient()
     service._client = multi

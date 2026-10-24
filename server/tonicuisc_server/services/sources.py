@@ -13,6 +13,53 @@ from typing import TYPE_CHECKING, Any
 from ..core.config import SETTINGS, resolve_sources
 from ..core.logging import timing_log
 
+
+def _empty_song(source: str) -> Any:
+    """一个「什么都没解析出来」的 SongInfo（单独成函数，测试可以替换掉）。"""
+    from musicdl.modules.utils import SongInfo
+
+    return SongInfo(source=source)
+
+
+def _prefer_official_parser(source_client: Any) -> None:
+    """把酷我的解析顺序改成「官方优先、第三方兜底」。
+
+    背景（实测，见 ``.tmp/measure_search*.py`` 的结论）：musicdl 对每首歌先跑
+    ``_parsewiththirdpartapis``，那档现在基本全失败，却要串行试 3 个第三方接口，
+    每首白等 ~1.6s；随后 ``_parsewithofficialapiv1`` 只用 ~0.4s 就拿到了直链。
+    15 条搜索结果因此从 ~1.2s 变成 ~4.9s。
+
+    这里不删第三方解析，只是把它降级成官方失败后的兜底，所以 VIP/特殊曲目该走
+    第三方时照样能走，只是慢一点。musicdl 升级后方法名/签名变了就安静跳过。
+    """
+    if getattr(source_client, "source", "") != "KuwoMusicClient":
+        return
+    if getattr(source_client, "_tonicuisc_official_first", False):
+        return
+    official = getattr(source_client, "_parsewithofficialapiv1", None)
+    third = getattr(source_client, "_parsewiththirdpartapis", None)
+    if not callable(official) or not callable(third):
+        return
+    source = source_client.source
+
+    def _no_third_party(search_result: Any, request_overrides: Any = None) -> Any:
+        return _empty_song(source)
+
+    def _official_first(search_result: Any, *args: Any, **kwargs: Any) -> Any:
+        song = official(search_result, *args, **kwargs)
+        if getattr(song, "with_valid_download_url", False):
+            return song
+        try:
+            return third(search_result, kwargs.get("request_overrides"))
+        except Exception:  # 兜底也失败：保留官方的结果，让上层照常过滤
+            return song
+
+    source_client._parsewithofficialapiv1 = _official_first
+    source_client._parsewiththirdpartapis = _no_third_party
+    source_client._tonicuisc_official_first = True
+    timing_log(f"{source}: 解析顺序已改为官方优先（第三方仅兜底）")
+
+
 class SourceMixin:
     """宿主需要提供：``_client``、``_client_lock``、``_quiet``、``work_dir``、
     ``_source_locks``、``_locks_guard``。"""
@@ -49,6 +96,12 @@ class SourceMixin:
                     # 每个音源并发请求数
                     clients_threadings={name: SETTINGS.search_threads for name in sources},
                 )
+                # 酷我：官方解析比第三方快一个数量级，第三方退化为兜底（见函数注释）
+                for name, source_client in (getattr(self._client, "music_clients", None) or {}).items():
+                    try:
+                        _prefer_official_parser(source_client)
+                    except Exception as exc:  # 调顺序失败不能影响服务启动
+                        timing_log(f"{name}: 解析顺序调整失败（忽略）: {exc}")
             return self._client
 
     def _quiet_progress(self) -> Any:

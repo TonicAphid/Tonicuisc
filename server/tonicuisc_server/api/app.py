@@ -53,6 +53,10 @@ async def lifespan(app: FastAPI):
             get_service().close_cover_pool()
         except Exception:
             pass
+        try:
+            get_service().close_lyrics()
+        except Exception:
+            pass
         shutdown_thread_pool()
         redis_runtime.shutdown_redis()
 

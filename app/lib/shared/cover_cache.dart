@@ -28,6 +28,35 @@ class CoverCache {
 
   static String? of(String songId) => _covers[songId];
 
+  /// 播放前用：确认这首歌的封面已经有结论，最多等 [timeout]。
+  ///
+  /// 搜索列表一出来就会后台 [resolve]，用户点歌时通常**已经在查同一首**了，
+  /// 所以这里多半只是等同一个请求收尾，不会额外多查一次 QQ。
+  /// 返回 `null` 表示到点还没结论（调用方用音源原图兜底）。
+  static Future<String?> ensure(
+    ApiClient api,
+    Song song, {
+    Duration timeout = const Duration(milliseconds: 600),
+  }) async {
+    final id = song.id;
+    if (id.isEmpty) return null;
+    final known = _covers[id];
+    if (known != null) return known;
+    try {
+      final found = await api.covers(<String>[id]).timeout(timeout);
+      final url = found[id];
+      if (url != null) {
+        _covers[id] = url;
+        _requested.remove(id);
+        revision.value++;
+        return url;
+      }
+    } catch (_) {
+      // 超时 / 网络失败：不记结论，下次再问
+    }
+    return _covers[id];
+  }
+
   /// 把这批歌里还没有封面、也没问过的挑出来问一次。
   ///
   /// 服务端**只回有结论的 id**（含空串 = 查过、确实没有）；没出现的表示它还在查。

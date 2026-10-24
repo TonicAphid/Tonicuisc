@@ -152,6 +152,17 @@ class ApiClient {
     return utf8.decode(resp.bodyBytes);
   }
 
+  /// 增强歌词：`ready=false` 表示服务端正在后台匹配，过两秒再问。
+  Future<Map<String, dynamic>?> lyricEnhanced(String id) async {
+    final resp = await http
+        .get(_uri('/api/lyric/$id', {'format': 'enhanced'}), headers: _headers)
+        .timeout(const Duration(seconds: 20));
+    if (resp.statusCode == 404) return null;
+    if (resp.statusCode != 200) throw errorOf(resp);
+    final data = jsonDecode(utf8.decode(resp.bodyBytes));
+    return data is Map<String, dynamic> ? data : null;
+  }
+
   /// 取音源直链；失败时抛 [ApiException]，调用方回退到服务端代理流。
   Future<DirectSource> directUrl(String id) async {
     final resp = await http.get(_uri('/api/url/$id'), headers: _headers).timeout(const Duration(seconds: 20));

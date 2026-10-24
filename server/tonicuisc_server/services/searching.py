@@ -143,7 +143,12 @@ class SearchMixin:
             return None
         if need and len(items) < need and not allow_short:
             return None
-        return items if not need else items[:need]
+        page = items if not need else items[:need]
+        # 缓存里存的是「搜到那一刻」的封面快照。QQ 封面是后台异步补的，补完只会写
+        # `qcover`，不会回头改已经存下的搜索结果；不在这里重叠一次的话，缓存命中
+        # （尤其是 App 重启后）就会一直拿到音源原图，控制中心也跟着锁死原图。
+        self.apply_cached_covers(page)
+        return page
 
     def search_page(
         self,

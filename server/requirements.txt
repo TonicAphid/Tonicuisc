@@ -5,3 +5,5 @@ musicdl>=2.0.0
 redis>=5.0
 # 只为 `python -m tonicuisc_server cert` 生成自签证书；没装则退回调用 openssl
 cryptography>=42
+# 中文歌词拼音（增强歌词的附加行；没装则跳过拼音，不影响原文/翻译）
+pypinyin>=0.51

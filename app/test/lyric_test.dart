@@ -59,6 +59,48 @@ void main() {
     expect(sheet.lines.last.text, 'Second line');
   });
 
+  test('拼音在前、中文在后时以中文原文为准', () {
+    final sheet = LyricSheet.parse('[00:10.00]qíng tiān\n[00:10.00]晴天\n[00:15.00]gù shì\n[00:15.00]故事');
+
+    expect(sheet.lines.length, 2);
+    expect(sheet.lines.first.text, '晴天');
+    expect(sheet.lines.last.text, '故事');
+  });
+
+  test('解析增强歌词：逐字、翻译、拼音', () {
+    final sheet = LyricSheet.parseEnhanced({
+      'format': 'enhanced',
+      'ready': true,
+      'provider': 'kugou',
+      'lines': [
+        {
+          'start': 0,
+          'end': 1000,
+          'text': '晴天',
+          'translation': 'Sunny day',
+          'roman': 'qíng tiān',
+          'words': [
+            {'s': 0, 'e': 500, 't': '晴', 'r': 'qíng'},
+            {'s': 500, 'e': 1000, 't': '天', 'r': 'tiān'},
+          ],
+        },
+      ],
+    });
+
+    expect(sheet.synced, isTrue);
+    expect(sheet.hasWords, isTrue);
+    expect(sheet.lines.single.text, '晴天', reason: '原文不能被拼音替换');
+    expect(sheet.lines.single.translation, 'Sunny day');
+    expect(sheet.lines.single.roman, 'qíng tiān');
+    expect(sheet.lines.single.words.length, 2);
+    expect(sheet.lines.single.words.first.roman, 'qíng');
+  });
+
+  test('增强歌词没有 lines 时退回空', () {
+    expect(LyricSheet.parseEnhanced({'ready': false}).lines, isEmpty);
+    expect(LyricSheet.parseEnhanced(null).lines, isEmpty);
+  });
+
   test('去掉开头的歌名/歌手行', () {
     // 酷我头部写的歌名可能和真实歌名不一样（琵琶曲 vs 琵琶行）
     final sheet = LyricSheet.parse(

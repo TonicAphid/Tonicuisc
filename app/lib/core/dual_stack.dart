@@ -32,13 +32,16 @@ typedef SocketConnector = Future<ConnectionTask<Socket>> Function(Object host, i
 ///
 /// **稳定排序**：系统给的那份顺序里带着它自己的路由表判断，同族内重排反而
 /// 可能挑到更差的地址，所以只做「分族」这一步。
-List<InternetAddress> orderAddresses(List<InternetAddress> addresses) {
+///
+/// [preferV6] 给 false 就把 IPv4 排前面 —— [attemptBothFamilies] 第二轮用得上
+/// （v6 那条路连握手都被掐了，就别再让它占头筹）。
+List<InternetAddress> orderAddresses(List<InternetAddress> addresses, {bool preferV6 = true}) {
   final v6 = <InternetAddress>[];
   final v4 = <InternetAddress>[];
   for (final address in addresses) {
     (address.type == InternetAddressType.IPv6 ? v6 : v4).add(address);
   }
-  return [...v6, ...v4];
+  return preferV6 ? [...v6, ...v4] : [...v4, ...v6];
 }
 
 /// 给 [HttpClient] 装上双栈策略。
@@ -85,32 +88,67 @@ Future<ConnectionTask<Socket>> dualStackConnect(
   final host = proxyHost ?? url.host;
   final port = proxyPort ?? url.port;
 
-  // ── 1) 先拿一条**裸** TCP 连接 ─────────────────────────────────────────
-  final Socket socket;
-  // 地址字面量不用解析：用户填 IP 连内网自签就是这么用的（`https://192.168.5.43`）。
+  // ── 1) 地址字面量不用解析：用户填 IP 连内网自签就是这么用的（`https://192.168.5.43`）──
   final literal = InternetAddress.tryParse(host);
   if (literal != null) {
-    socket = await Socket.connect(literal, port);
-  } else {
-    final addresses = orderAddresses(await InternetAddress.lookup(host));
-    if (addresses.isEmpty) {
-      throw SocketException('域名解析不出任何地址：$host');
-    }
-    // 只有一族就不用赛跑，省掉一次多余的分支
-    socket = addresses.length == 1
-        ? await Socket.connect(addresses.first, port)
-        : await raceConnections(addresses, port);
+    final raw = await Socket.connect(literal, port);
+    final only = await _secureIfNeeded(
+      raw,
+      url,
+      proxyHost,
+      allowBadCertificate: allowBadCertificate,
+    );
+    return ConnectionTask.fromSocket(Future<Socket>.value(only), () {});
   }
 
-  // ── 2) 该加密的自己加密 ────────────────────────────────────────────────
-  final ready = await _secureIfNeeded(
-    socket,
-    url,
-    proxyHost,
-    allowBadCertificate: allowBadCertificate,
-  );
+  final addresses = await InternetAddress.lookup(host);
+  if (addresses.isEmpty) {
+    throw SocketException('域名解析不出任何地址：$host');
+  }
+
+  // ── 2) 双栈尝试（含握手）；握手被掐就换一族整套重来 ─────────────────────
+  final ready = await attemptBothFamilies(addresses, attemptAll: (ordered) async {
+    // 只有一族就不用赛跑，省掉一次多余的分支
+    final raw = ordered.length == 1
+        ? await Socket.connect(ordered.first, port)
+        : await raceConnections(ordered, port);
+    // 该加密的自己加密（装了 connectionFactory 之后 dart:io 不代劳）
+    return _secureIfNeeded(raw, url, proxyHost, allowBadCertificate: allowBadCertificate);
+  });
+
   // 走到这里所有落选的连接都已经取消过了，所以 onCancel 不用做事
   return ConnectionTask.fromSocket(Future<Socket>.value(ready), () {});
+}
+
+/// 「v6 优先」并不够：**TCP 连得上 ≠ 这条路能用**。
+///
+/// 中间盒很常见的做法是「TCP 放你过、TLS 握手阶段打 RST」—— 本项目在大陆节点上
+/// 实测到的就是这种（TCP 通、`openssl` 能握手、`dart:io` 被 RST）。
+/// 所以**握手失败时，把两个家族换个顺序整套再来一遍**，而不是就此认输。
+///
+/// 抽成独立函数是为了能测：[attemptAll] 接一组**已排好序**的地址，返回「连上且握手
+/// 完成」的那条 socket。测试里换成假实现，就能造出「v6 握手失败、v4 成功」这种
+/// 真机上很难复现的现场。
+Future<Socket> attemptBothFamilies(
+  List<InternetAddress> addresses, {
+  required Future<Socket> Function(List<InternetAddress> ordered) attemptAll,
+}) async {
+  final ordered = orderAddresses(addresses);
+  try {
+    return await attemptAll(ordered);
+  } on TlsException catch (first) {
+    // 只有一族就没得换，原样抛
+    final hasV6 = addresses.any((a) => a.type == InternetAddressType.IPv6);
+    final hasV4 = addresses.any((a) => a.type == InternetAddressType.IPv4);
+    if (!hasV6 || !hasV4) rethrow;
+
+    try {
+      return await attemptAll(orderAddresses(addresses, preferV6: false));
+    } catch (_) {
+      // 两条都不行：报**首选那条路**的错（更有诊断价值）
+      throw first;
+    }
+  }
 }
 
 /// 装了 `connectionFactory` 之后，这条连接要不要**我们自己**做 TLS 握手。

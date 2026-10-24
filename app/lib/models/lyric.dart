@@ -1,13 +1,49 @@
-/// LRC 歌词解析：后端 `/api/lyric/{id}` 返回的可能是带时间戳的 LRC，也可能是纯文本。
+/// 歌词模型：兼容音源自带的逐行 LRC，以及服务端 `/api/lyric?format=enhanced`
+/// 返回的结构化逐字歌词（含翻译 / 拼音 / 罗马音）。
+class LyricWord {
+  const LyricWord({
+    required this.start,
+    required this.end,
+    required this.text,
+    this.roman = '',
+  });
+
+  final Duration start;
+  final Duration end;
+  final String text;
+
+  /// 这一小段对应的拼音 / 罗马音；没有就是空串。
+  final String roman;
+}
+
 class LyricLine {
-  const LyricLine(this.time, this.text);
+  const LyricLine(
+    this.time,
+    this.text, {
+    this.words = const <LyricWord>[],
+    this.translation = '',
+    this.roman = '',
+  });
 
   final Duration time;
   final String text;
+
+  /// 逐字时间轴；为空表示这是普通逐行歌词。
+  final List<LyricWord> words;
+
+  /// 整行翻译（外语歌常见）。
+  final String translation;
+
+  /// 整行拼音 / 罗马音（中文歌拼音、日语 romaji）。
+  final String roman;
+
+  bool get hasWords => words.isNotEmpty;
+
+  bool get hasExtra => translation.isNotEmpty || roman.isNotEmpty;
 }
 
 class LyricSheet {
-  const LyricSheet(this.lines, this.synced);
+  const LyricSheet(this.lines, this.synced, {this.hasWords = false});
 
   static const LyricSheet empty = LyricSheet(<LyricLine>[], false);
 
@@ -16,10 +52,17 @@ class LyricSheet {
   /// 是否有时间轴（纯文本歌词没法跟着进度高亮）。
   final bool synced;
 
+  /// 是否有逐字时间轴（决定要不要做卡拉OK着色）。
+  final bool hasWords;
+
   static final RegExp _stamp = RegExp(r'\[(\d{1,3}):(\d{1,2})(?:[.:](\d{1,3}))?\]');
 
   /// LRC 的元信息标签，例如 `[by:xxx]`、`[offset:0]`、`[ti:歌名]`——不该当歌词显示。
   static final RegExp _metaTag = RegExp(r'\[[^\]]*\]');
+
+  /// 拼音的声调符号：用来识别「同一时间戳的拼音行」，避免把中文原文挤掉。
+  static final RegExp _pinyinTone = RegExp(r'[āáǎàēéěèīíǐìōóǒòūúǔùǖǘǚǜ]');
+  static final RegExp _cjk = RegExp(r'[\u4e00-\u9fff]');
 
   static LyricSheet parse(String? raw, {String? title, String? artist}) {
     final text = (raw ?? '').replaceAll('\r\n', '\n').trim();
@@ -43,9 +86,12 @@ class LyricSheet {
           seconds: int.parse(stamp.group(2)!),
           milliseconds: millis,
         );
-        // 同一个时间戳只留第一条：酷我英文歌是「原文 + 翻译」两行同一时间，
-        // 留后面的就会变成一直显示中文翻译。
-        if (time > Duration.zero && !seenTimes.add(time.inMilliseconds)) continue;
+        // 同一个时间戳只留一条：酷我英文歌是「原文 + 翻译」，
+        // 但中文歌偶尔会「拼音在前、中文在后」——那种情况要把中文换回来。
+        if (time > Duration.zero && !seenTimes.add(time.inMilliseconds)) {
+          _preferOriginalOverPinyin(lines, time, content);
+          continue;
+        }
         lines.add(LyricLine(time, content));
       }
     }
@@ -58,6 +104,70 @@ class LyricSheet {
     final synced = body.any((line) => line.time > Duration.zero);
     if (synced) body.sort((a, b) => a.time.compareTo(b.time));
     return LyricSheet(body, synced);
+  }
+
+  /// 解析服务端返回的增强歌词 JSON。
+  static LyricSheet parseEnhanced(dynamic raw) {
+    if (raw is! Map) return empty;
+    final rawLines = raw['lines'];
+    if (rawLines is! List) return empty;
+
+    final lines = <LyricLine>[];
+    for (final item in rawLines) {
+      if (item is! Map) continue;
+      final words = <LyricWord>[];
+      final rawWords = item['words'];
+      if (rawWords is List) {
+        for (final rawWord in rawWords) {
+          if (rawWord is! Map) continue;
+          words.add(
+            LyricWord(
+              start: Duration(milliseconds: _ms(rawWord['s'])),
+              end: Duration(milliseconds: _ms(rawWord['e'])),
+              text: '${rawWord['t'] ?? ''}',
+              roman: '${rawWord['r'] ?? ''}',
+            ),
+          );
+        }
+      }
+      var text = '${item['text'] ?? ''}';
+      if (text.isEmpty) text = words.map((word) => word.text).join();
+      lines.add(
+        LyricLine(
+          Duration(milliseconds: _ms(item['start'])),
+          text,
+          words: words,
+          translation: '${item['translation'] ?? ''}',
+          roman: '${item['roman'] ?? ''}',
+        ),
+      );
+    }
+    lines.removeWhere((line) => line.text.isEmpty && line.words.isEmpty);
+    if (lines.isEmpty) return empty;
+    lines.sort((a, b) => a.time.compareTo(b.time));
+    return LyricSheet(lines, true, hasWords: lines.any((line) => line.hasWords));
+  }
+
+  static int _ms(dynamic value) {
+    final number = value is num ? value.toInt() : (int.tryParse('$value') ?? 0);
+    return number < 0 ? 0 : number;
+  }
+
+  /// 同一时间戳上「拼音 + 中文」并存时，把带声调的拼音行换成中文原文。
+  ///
+  /// 不能无脑优先中文：英文歌的「原文 + 中文翻译」也是同一时间戳，
+  /// 那时候必须保留第一条英文原文。只有第一条带拼音声调时才替换。
+  static void _preferOriginalOverPinyin(List<LyricLine> lines, Duration time, String content) {
+    if (content.isEmpty || !_cjk.hasMatch(content)) return;
+    for (var i = 0; i < lines.length; i++) {
+      final existing = lines[i];
+      if (existing.time != time) continue;
+      if (existing.text == content) return;
+      if (_pinyinTone.hasMatch(existing.text) && !_cjk.hasMatch(existing.text)) {
+        lines[i] = LyricLine(time, content);
+      }
+      return;
+    }
   }
 
   static String _norm(String value) =>

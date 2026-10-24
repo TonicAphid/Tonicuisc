@@ -7,6 +7,7 @@
 * ``library``     —— 喜欢 / 收藏 / 播放历史（按账户）
 * ``devices`` / ``users`` / ``device_requests`` —— 设备与账户
 * ``sc``          —— 搜索结果缓存（默认 24 小时，**重启后依然命中**，不用重新联网搜）
+* ``lyric``       —— 增强（逐字）歌词缓存，命中后 30 天，没找到的负缓存 6 小时
 
 key 统一带 ``tonicuisc:`` 前缀，所以和别人的 Redis 共用一个库也不会打架。
 旧版本的 SQLite 数据用 ``scripts/import_sqlite.py`` 一次性导入。
@@ -26,6 +27,7 @@ from .device_requests import DeviceRequestMixin
 from .devices import DeviceMixin
 from .history import HistoryMixin
 from .library import LibraryMixin
+from .lyrics import LyricsCacheMixin
 from .search_cache import SearchCacheMixin
 from .songs import SongMixin
 from .users import UserMixin
@@ -39,6 +41,7 @@ class Storage(
     DeviceMixin,
     DeviceRequestMixin,
     LibraryMixin,
+    LyricsCacheMixin,
     SearchCacheMixin,
 ):
     """Redis 后端：按领域拆开的一堆 mixin 在这里拼成一个对象。

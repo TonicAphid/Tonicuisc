@@ -28,6 +28,7 @@ from ..core.constants import (  # noqa: F401 - compat re-export, api/tests use t
 )
 from ..core.errors import DownloadFailed, SongNotFound  # noqa: F401
 from ..core.text import clean  # noqa: F401
+from ..lyrics import LyricService
 from .song_item import song_to_item  # noqa: F401
 from .searching import SearchMixin
 from .sources import SourceMixin
@@ -59,9 +60,28 @@ class MusicService(SourceMixin, SearchMixin, ArtworkMixin, DownloadMixin):
         self.files_dir.mkdir(parents=True, exist_ok=True)
         #: 歌曲元信息 / 搜索结果缓存 / 账户 / 设备 / 收藏列表（都在 Redis 里）
         self.storage = Storage()
+        #: 逐字歌词：缓存 + 后台抓取（酷狗 KRC 等，见 lyrics 包）
+        self.lyrics = LyricService(self.storage)
         self._quiet: Any | None = None
 
+    # ------------------------------------------------------------ 存储绑定
+    @property
+    def storage(self) -> Storage:
+        return self._storage
+
+    @storage.setter
+    def storage(self, value: Storage) -> None:
+        """换存储时同步歌词缓存（测试会注入 fakeredis，生产只赋值一次）。"""
+        self._storage = value
+        lyrics = getattr(self, "lyrics", None)
+        if lyrics is not None:
+            lyrics.storage = value
+
     # ------------------------------------------------------------ 歌曲内存缓存
+    def close_lyrics(self) -> None:
+        """退出前收掉歌词线程池（别让后台抓取拖住解释器退出）。"""
+        self.lyrics.close()
+
     def _remember(self, song: Any) -> None:
         item = song_to_item(song)
         self._songs[item["id"]] = (song, time.time() + ITEM_TTL_SECONDS)

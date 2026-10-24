@@ -146,9 +146,14 @@ class PlayerController extends ChangeNotifier {
 
   Future<void> _start(Song song, ApiClient api) async {
     _fallbackStream = api.streamUri(song.id);
+    // 封面和直链一起要：列表页早就在后台查封面了，这里最多再等 600ms。
+    // just_audio_background 的 MediaItem 只在 setAudioSource 时取一次，先拿到 QQ 封面
+    // 才不会让控制中心锁死酷我原图（之后 UI 换图也带不动它）。
+    final coverReady = CoverCache.ensure(api, song);
     // 直连 CDN：不用等服务端把整首下完，第一次点歌也几乎立刻出声
     try {
       final direct = await api.directUrl(song.id);
+      await coverReady;
       await _player.setAudioSource(
         AudioSource.uri(Uri.parse(direct.url), headers: direct.headers, tag: _mediaItem(song)),
       );
@@ -158,6 +163,7 @@ class PlayerController extends ChangeNotifier {
       // 直链不可用（过期 / 需要额外鉴权）时走服务端代理
     }
     // 回退到服务端代理流：必须带上 X-API-Key，否则服务端开着鉴权时就是 401
+    await coverReady;
     await _player.setAudioSource(
       AudioSource.uri(_fallbackStream!, headers: api.streamHeaders, tag: _mediaItem(song)),
     );
@@ -338,14 +344,23 @@ class PlayerController extends ChangeNotifier {
     _notify();
   }
 
-  MediaItem _mediaItem(Song song) => MediaItem(
-        id: song.id,
-        title: song.name,
-        artist: song.singers,
-        album: song.album.isEmpty ? 'Tonicuisc' : song.album,
-        artUri: song.coverUrl.isEmpty ? null : Uri.tryParse(song.coverUrl),
-        extras: {'source': song.sourceLabel},
-      );
+  /// 控制中心 / 锁屏用的媒体信息。
+  ///
+  /// 封面必须优先用 [CoverCache]：搜索结果里的 `coverUrl` 只是「搜到那一刻」的音源原图，
+  /// QQ 封面是后台补的。如果这里直接用 `song.coverUrl`，控制中心会一直锁着酷我的糊图，
+  /// 之后 UI 换成 QQ 封面也带不动它（just_audio_background 的 MediaItem 只在 setAudioSource
+  /// 时取一次 tag，之后不会跟着 [CoverCache.revision] 更新）。
+  MediaItem _mediaItem(Song song) {
+    final cover = CoverCache.of(song.id) ?? song.coverUrl;
+    return MediaItem(
+      id: song.id,
+      title: song.name,
+      artist: song.singers,
+      album: song.album.isEmpty ? 'Tonicuisc' : song.album,
+      artUri: cover.isEmpty ? null : Uri.tryParse(cover),
+      extras: {'source': song.sourceLabel},
+    );
+  }
 
   @override
   void dispose() {

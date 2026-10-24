@@ -47,6 +47,15 @@ void main() {
       expect(orderAddresses(v4), v4);
       expect(orderAddresses(const []), isEmpty);
     });
+
+    test('preferV6: false 时 IPv4 排前面（留给第二轮的）', () {
+      final v4 = InternetAddress('1.1.1.1');
+      final v6 = InternetAddress('240e::1');
+      expect(
+        orderAddresses([v6, v4], preferV6: false).map((e) => e.address).toList(),
+        [v4.address, v6.address],
+      );
+    });
   });
 
   group('needsOwnTls（装了 connectionFactory 之后 TLS 得自己发）', () {
@@ -172,6 +181,78 @@ void main() {
       expect(winner, same(socket));
       expect(v6Cancelled, isTrue); // 黑洞那条被掐掉了
       expect(winnerCancelled, isFalse); // 赢家要留给 HttpClient 用
+    });
+  });
+
+  group('attemptBothFamilies（握手失败就换一族整套重来）', () {
+    test('v6 握手失败 → 换 v4 优先再来一遍，用 v4 那条', () async {
+      final orders = <List<InternetAddress>>[];
+      final v4Socket = _FakeSocket();
+
+      final socket = await attemptBothFamilies(
+        [_v6(), _v4()],
+        attemptAll: (ordered) async {
+          orders.add(ordered);
+          if (ordered.first.type == InternetAddressType.IPv6) {
+            // 中间盒的典型手法：TCP 放你过，握手阶段打 RST
+            // （本项目在大陆节点上实测到的就是这种，见 README / free-frp-relay.md）
+            throw const HandshakeException('Connection terminated during handshake');
+          }
+          return v4Socket;
+        },
+      );
+
+      expect(socket, same(v4Socket));
+      expect(orders, hasLength(2));
+      expect(orders[0].first.address, _v6().address); // 第一轮 v6 占头筹
+      expect(orders[1].first.address, _v4().address); // 第二轮换 v4 占头筹
+    });
+
+    test('v6 一次就成：绝不跑第二轮', () async {
+      final v6Socket = _FakeSocket();
+      var rounds = 0;
+
+      final socket = await attemptBothFamilies(
+        [_v6(), _v4()],
+        attemptAll: (ordered) async {
+          rounds++;
+          return v6Socket;
+        },
+      );
+
+      expect(socket, same(v6Socket));
+      expect(rounds, 1);
+    });
+
+    test('只有一族：没得换，原样抛出', () async {
+      var rounds = 0;
+      await expectLater(
+        attemptBothFamilies(
+          [_v6(), InternetAddress('240e::9')],
+          attemptAll: (ordered) async {
+            rounds++;
+            throw const HandshakeException('boom');
+          },
+        ),
+        throwsA(isA<HandshakeException>()),
+      );
+      expect(rounds, 1);
+    });
+
+    test('两族都不行：抛首选那条路的错', () async {
+      await expectLater(
+        attemptBothFamilies(
+          [_v6(), _v4()],
+          attemptAll: (ordered) async {
+            if (ordered.first.type == InternetAddressType.IPv6) {
+              throw const HandshakeException('v6 被掐');
+            }
+            throw const SocketException('v4 也不通');
+          },
+        ),
+        // 报第一条（v6）的错，而不是 v4 的 SocketException —— 首选那条更有诊断价值
+        throwsA(isA<HandshakeException>()),
+      );
     });
   });
 }

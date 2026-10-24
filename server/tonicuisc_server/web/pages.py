@@ -37,6 +37,9 @@ button.link { width: auto; margin-top: 6px; background: none; color: #3f51b5; fo
             text-align: center; padding: 14px 10px; border-radius: 10px; background: #eef0fb; color: #3f51b5;
             word-break: break-all; user-select: all; }
 hr { border: 0; border-top: 1px solid #e5e7eb; margin: 24px 0 4px; }
+.footer { max-width: 420px; margin: 18px auto 0; text-align: center; font-size: 12px; line-height: 1.6; color: #9ca3af; }
+.footer a { color: inherit; text-decoration: none; }
+.footer a:hover, .footer a:focus { text-decoration: underline; }
 @media (prefers-color-scheme: dark) {
   body { background: #111114; color: #e5e7eb; }
   .card { background: #1c1c1f; box-shadow: none; }
@@ -46,11 +49,14 @@ hr { border: 0; border-top: 1px solid #e5e7eb; margin: 24px 0 4px; }
   .hint { background: #3a2f10; color: #fcd34d; }
   .hint code { background: rgba(255,255,255,.08); }
   button.secondary { background: #2f2f36; color: #e5e7eb; }
+  .footer { color: #6b7280; }
 }
 """
 
 
 def page(title: str, body: str) -> str:
+    # 页脚统一挂 ICP 备案号：登录流程的每个页面（设备码 / 登录 / 注册 / 重置 / 结果）
+    # 都走这里，所以只写一处。链接到工信部备案系统是备案要求的展示方式。
     return f"""<!doctype html>
 <html lang="zh-CN"><head>
 <meta charset="utf-8">
@@ -58,7 +64,9 @@ def page(title: str, body: str) -> str:
 <meta name="robots" content="noindex, nofollow">
 <title>{html.escape(title)}</title>
 <style>{STYLE}</style>
-</head><body><div class="card">{body}</div></body></html>"""
+</head><body><div class="card">{body}</div>
+<footer class="footer"><a href="https://beian.miit.gov.cn/" target="_blank" rel="noopener noreferrer">蒙ICP备2026011401号-1</a></footer>
+</body></html>"""
 
 
 def _error(message: str) -> str:
