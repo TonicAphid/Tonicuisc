@@ -8,10 +8,12 @@
 
 **后端**
 
-- 搜索：只请求勾选的音源，**每个音源拆成多个并行请求**（musicdl 单请求内部是串行解析的），控制台不刷进度条，返回耗时
+- 搜索：只请求服务端启用的音源（默认**酷我**），**每个音源拆成多个并行请求**（musicdl 单请求内部是串行解析的），控制台不刷进度条，返回耗时
 - 播放：优先给音源直链（客户端直连 CDN），拿不到就回退服务端代理；未缓存时**边下边播**，缓存后支持 HTTP Range 拖动
-- 歌词 / 封面 / 附件下载
-- 持久化：Redis 存歌曲元信息、搜索历史、搜索结果缓存、**喜欢 / 收藏 / 播放历史**（按账户隔离），服务端启动时自动拉起 Redis、退出时自动关掉
+- 歌词：音源自带逐行 LRC 打底，服务端再从酷狗 KRC 补**逐字时间轴 / 翻译 / 罗马音**，中文歌用 `pypinyin` 补拼音（`/api/lyric?format=enhanced`）
+- 封面 / 附件下载
+- 桌面端更新：`/api/update` 查 GitHub Release，按平台选安装包并返回 **gh-proxy** 加速地址（iOS 不支持）
+- 持久化：Redis 存歌曲元信息、搜索历史、搜索结果缓存、**喜欢 / 收藏 / 播放历史**（按账户隔离）、增强歌词缓存，服务端启动时自动拉起 Redis、退出时自动关掉
 - 登录：**设备码流**（App 生成码，浏览器批准），每设备一把随机 API Key，服务端只存哈希
 - 安全：密码 PBKDF2-HMAC-SHA256、限速防爆破、按设备吊销、忘记密码用**恢复码**重置
 - 控制台：启动后底部常驻 `>` 提示符（像 MC 服务端），`h` 看命令、`q` 停服，设备 / 密码 / 恢复码 / 缓存都能直接操作
@@ -19,10 +21,11 @@
 **客户端**
 
 - 三个 tab：**搜索 / 列表 / 我的**
-- 搜索：关键词 + 音源勾选、显示用时、试听、红心、下载
+- 搜索：关键词搜索（音源固定酷我，不再显示选择器）、显示用时、试听、红心、下载
 - 列表：**播放列表（当前队列）** + 我喜欢 / 收藏 / 播放历史
 - 播放：**顺序 / 列表循环 / 单曲循环 / 随机**，上一首 / 下一首
-- 全屏播放页：封面 + 歌词跟随高亮 + 进度条（拖动时继续播放，松手才跳）
+- 全屏播放页：封面 + **进度条式卡拉OK歌词**（原文 + 翻译 + 拼音/罗马音）+ 可拖动进度
+- 我的：账户 / 设备管理 / **检查更新**（Windows / macOS / Linux）
 - 锁屏 / 控制中心控制（iOS / Android），前台常亮，列表用搜到的封面
 
 ## 目录结构
@@ -33,16 +36,20 @@ server/                            后端
     core/                          基础设施：config（环境变量、音源别名）/ constants / errors /
                                    logging / text / tls（证书、自签）/ runtime（线程池）
     storage/                       Redis：base（连接、key）+ songs / history / users / devices /
-                                   device_requests / library / search_cache + redis_runtime
+                                   device_requests / library / search_cache / lyrics + redis_runtime
     auth/                          鉴权：tokens（密码、API Key 哈希）/ codes（设备码、恢复码）/
                                    accounts（注册、校验、找回）/ device_flow（设备码登录流）/
                                    ratelimit（滑动窗口限速、防爆破）
     services/                      业务：sources（只搜选中的音源）/ searching（搜索、分页）/
                                    downloads（下载、缓存、边下边播）/ artwork（封面）/
+                                   updates（GitHub Release + gh-proxy 更新检查）/
                                    qqmusic + MusicService 门面
+    lyrics/                        增强歌词：models（数据模型）/ matcher（歌名歌手匹配）/
+                                   krc（酷狗 KRC 解密解析）/ pinyin（中文拼音）/
+                                   providers/kugou + service（缓存、后台抓取）
     api/                           HTTP：app（装配）/ deps（服务与鉴权单例）/ middleware
                                    （鉴权闸门 + 访问日志）/ limiters / ranges /
-                                   routes（health、account、library、media、search、login）
+                                   routes（health、account、library、media、search、update、login）
     web/                           /login 网页：pages（怎么画）+ login（点了之后干什么）
     cli/                           命令行：commands（管理命令）/ console（`>` 控制台）/
                                    launch（uvicorn + 原生 TLS）
@@ -86,9 +93,9 @@ app/                               Flutter 客户端
     features/player/queue_page.dart         播放队列（整页 / 底部弹层）
     features/player/player_bar.dart         底部播放条
     features/player/play_mode_icons.dart    播放模式图标
-    features/profile/profile_page.dart      我的 tab（账户 / 设备 / 版本）
+    features/profile/profile_page.dart      我的 tab（账户 / 设备 / 版本 / 检查更新）
     models/song.dart               歌曲模型
-    models/lyric.dart              LRC 解析
+    models/lyric.dart              歌词解析（逐行 LRC + 增强 JSON：逐字 / 翻译 / 拼音）
     shared/cover_cache.dart        QQ 封面缓存（按 id 批量问，同一首只问一次）
     shared/song_avatar.dart        封面（失败退回音源首字）
     shared/toast.dart              苹果风轻提示（替代 Material 的 SnackBar）
@@ -100,6 +107,9 @@ app/                               Flutter 客户端
 tool/                              构建与自检脚本
   bootstrap_platforms.ps1/.sh      生成各平台原生工程 + 打补丁 + pub get
   apply_patches.ps1/.sh            覆盖 macOS 权限、iOS Info.plist
+  patch_windows_ime.py             给生成的 Windows runner 打 IME 上下文补丁
+  installer/windows/tonicuisc.iss  Inno Setup 安装包脚本
+  installer/macos/make_dmg.sh      把 .app 打成 DMG
   apply_version.py                 从 tag / 提交标题写版本号
   check_dart_balance.py            本地自检 Dart 括号配平
   check_dart_imports.py            本地自检 Dart import 是否指到真实文件
@@ -178,6 +188,8 @@ flutter build windows --release
 
 另外一个**不用管**的噪音：控制台刷 `[ERROR:flutter/shell/platform/common/accessibility_bridge.cc(114)] Failed to update ui::AXTree, error: N will not be in the tree and is not the new root`。这是 Flutter 引擎在 Windows 上的已知 bug（[#98099](https://github.com/flutter/flutter/issues/98099)、[#182444](https://github.com/flutter/flutter/issues/182444)，后者给的复现条件是 **`ListView` + Material `Tooltip`**），**只是 debug 控制台的日志**，界面和功能都不受影响，release 版没有控制台。仓库里的 `Tooltip` 全部来自还没迁到 Cupertino 的 `IconButton(tooltip: ...)`，**逐页迁移做完它自然就没了**。
 
+**第三方输入法**：Flutter Windows engine 有一个已知 bug（[#190042](https://github.com/flutter/flutter/issues/190042)）——窗口失焦再回来后 IMM 输入上下文可能变陈旧，搜狗 / 微信输入法会表现为完全打不出中文。仓库在 CI 的 `flutter create` 之后会跑 [`tool/patch_windows_ime.py`](tool/patch_windows_ime.py)，在 `WM_SETFOCUS` / `WM_ACTIVATE` 时恢复默认输入上下文并链接 `imm32`。**本机重新生成 Windows 工程后也要手动跑一次这个脚本**，否则 `flutter run` 出来的窗口没有这个补丁。它不能修 Flutter 另一个「切换输入框时 composing 泄漏」（#191196），那个要等 engine 修复。
+
 ### 第一次登录
 
 1. App 打开就是登录页，自动生成一个设备码（`A1B1-C1D1`）
@@ -195,6 +207,8 @@ flutter build windows --release
 | `TONICUISC_ENV` | 空 | 当前环境（`uisc` 正式 / `tuisc` 测试）。决定对外域名、启动横幅、DDNS 目标；不填时**首次启动会问一次**并写进 `server/.env`。改：`python -m tonicuisc_server env tuisc`，或 `env --ask` 现场问一遍 |
 | `TONICUISC_PORT` | `8000` | 端口 |
 | `TONICUISC_SOURCES` | `kuwo` | 启用音源（只保留酷我；代码里还留着 `migu` 别名兼容旧配置） |
+| `TONICUISC_GITHUB_REPO` | `TonicAphid/Tonicuisc` | 桌面更新检查查的 GitHub 仓库 |
+| `TONICUISC_GITHUB_TOKEN` | 空 | 可选 GitHub token；不填时匿名 API 只有 60 次/小时（结果缓存 10 分钟） |
 | `TONICUISC_SEARCH_SIZE` | `5` | 每个音源的抓取下限（实际按「要几条 ÷ 音源数」分摊） |
 | `TONICUISC_SEARCH_SIZE_PER_PAGE` | `1` | 每个请求取几条的**下限**；实际每页 = `max(该值, ceil(要几条 ÷ 并发数))` |
 | `TONICUISC_SEARCH_THREADS` | `10` | 每个音源的并发请求数（也是「要 15 条 → 每页 2 条 → 8 个请求」里的分母）。实测酷我 15 条：10 路比 5 路快约 30%，上游抖动时差距更大；怕被限流设回 `5` |
@@ -203,7 +217,7 @@ flutter build windows --release
 | `TONICUISC_AUTH` | `1` | 设备 API Key 校验（`0` 关闭） |
 | `TONICUISC_DEVICE_CODE_TTL` | `600` | 设备码有效期（秒） |
 | `TONICUISC_TRUST_PROXY` | `1` | 限速是否按反代写的 `X-Forwarded-For` 取来源 IP |
-| `TONICUISC_QQ_COVER` | `1` | 用 QQ 音乐补封面（咪咕/酷我的封面经常糊） |
+| `TONICUISC_QQ_COVER` | `1` | 用 QQ 音乐补封面（音源给的封面经常糊） |
 | `TONICUISC_QQ_COVER_THREADS` | `8` | 补封面时的并发数（QQ 单次要 3~4 秒，8 路比 4 路快一倍） |
 | `TONICUISC_QQ_COVER_WAIT` | `25` | `/api/covers` 最多等正在跑的封面查询多久（秒）；到点还没结果的 id 先不返回，客户端过几秒再问 |
 | `TONICUISC_QQ_COVER_CACHE` | `2048` | QQ 封面查询的 LRU 记忆条数 |
@@ -255,6 +269,25 @@ flutter build windows --release
 除标注「免鉴权」的以外，所有 `/api` 接口都必须带请求头 `X-API-Key`。
 
 `{id}` 形如 `KuwoMusicClient:362538300`，由 `/api/search` 返回；内存缓存 3 小时，重启后从 Redis 恢复。
+
+## 桌面更新
+
+「我的」页的「检查更新」只对 Windows / macOS / Linux 显示，iOS 不参与。App 调：
+
+```http
+GET /api/update?platform=windows&arch=x64&version=v0.2.5&build=42
+```
+
+服务端查 GitHub `releases/latest`（缓存 10 分钟），按平台选文件：
+
+| 平台 | 首选文件 |
+| --- | --- |
+| Windows | `tonicuisc-windows-x64-setup.exe`（没有则 portable zip） |
+| macOS arm64 | `tonicuisc-macos-arm64.dmg` |
+| macOS x64 | `tonicuisc-macos-x64.dmg` |
+| Linux | `tonicuisc-linux-x64.tar.gz` |
+
+返回里 `asset.url` 已经是 `https://gh-proxy.com/<GitHub 原始地址>`，App 用系统浏览器打开下载。Release 已建但某个安装包还没上传完时返回 `ready: false`，App 提示稍后再试；这一般只发生在 macOS DMG 比 Windows/Linux 晚几分钟上传的时候。
 
 ## 登录（设备码流）
 
@@ -582,9 +615,20 @@ python -m tonicuisc_server                        # 现在直接是 https://192.
 
 公网暴露后注意：`/login` 是免鉴权的，80 只留给 Caddy 做跳转和证书校验（8000 别对公网开），密码别用弱口令。
 
+## 歌词（增强 LRC）
+
+音源自带的逐行 LRC 只够「整行高亮」，播放页现在用的是服务端补出来的逐字歌词：
+
+- 服务端按「歌名 + 歌手 + 时长」去酷狗找 KRC，解密（XOR + zlib）后解析成结构化时间轴；
+- KRC 自带 `type 0` 罗马音和 `type 1` 翻译，有就填；
+- 中文行没有罗马音时用 `pypinyin` 生成带声调的拼音（`qíng tiān`），**原文永远是主行，拼音只作为附加行**；
+- Redis 缓存 30 天，没找到的负缓存 6 小时；同一首歌并发只跑一个后台任务。
+
+`GET /api/lyric/{id}?format=enhanced` 是两段式：第一次通常返回 `ready: false`，App 隔 2 秒再问，拿到后替换逐行歌词。播放页的填充进度按**每个字自己的起止时间**算，不是整行匀速；所以短字扫得快、长字扫得慢，字间空隙会停住。
+
 ## 封面（QQ 音乐）
 
-咪咕 / 酷我给的封面经常是小图或者糊的，所以默认**用 QQ 音乐补一次**：拿「歌名 + 歌手」搜一下 QQ 音乐，从结果的 `albummid` 拼出 500×500 的专辑图 `https://y.gtimg.cn/music/photo_new/T002R500x500M000{albummid}.jpg`。
+酷我给的封面经常是小图或者糊的，所以默认**用 QQ 音乐补一次**：拿「歌名 + 歌手」搜一下 QQ 音乐，从结果的 `albummid` 拼出 500×500 的专辑图 `https://y.gtimg.cn/music/photo_new/T002R500x500M000{albummid}.jpg`。
 
 **搜索接口不等封面**——先按音源原图把列表画出来，同一时间把这批歌丢给后台线程池（默认 8 路）并发查 QQ 封面并写进 Redis；已经查过的封面**直接写进搜索结果**，所以重复搜同一个词第一帧就是 QQ 封面。客户端渲染完再调 `POST /api/covers {"ids":[...]}`（`lib/shared/cover_cache.dart`）：要么命中缓存，要么就等同一批已经在跑的请求，**同一首歌绝不会问两遍 QQ**；服务端还没拿到定论的 id 会缺席，客户端隔两秒再问（最多 3 轮），查到就换上去。所以补封面慢一点也不会拖慢搜索。
 
@@ -616,10 +660,10 @@ python -m tonicuisc_server                        # 现在直接是 https://192.
 
 **先说清楚它能做到什么、做不到什么**：音源只有关键词搜索，**没有「歌手 → 专辑 → 全部作品」这种接口**，所以这里是「搜歌手名，再只留歌手字段里真的包含这个名字的结果」（人名支持 `/`、`、`、`&` 分隔），同一个人名会多抓一些（2 倍且至少 60 条）再过滤。因此：
 
-- ✅ 能拿到这个歌手在咪咕/酷我上**关键词搜索排得比较靠前**的歌，比在搜索框里手打歌手名看到的多；
+- ✅ 能拿到这个歌手在酷我上**关键词搜索排得比较靠前**的歌，比在搜索框里手打歌手名看到的多；
 - ❌ **不等于该歌手的完整曲库**。冷门歌、没上架的歌不会有，可能混进同名/翻唱，也可能因为音源只返回前 N 条而丢掉一部分。
 
-想要真·完整曲库，得接专门的歌手接口（比如 QQ 音乐的 `singer_mid` → 歌曲列表），但那些歌的**播放地址还得回咪咕/酷我搜一遍**，成本和复杂度都上一个台阶，暂时没做。
+想要真·完整曲库，得接专门的歌手接口（比如 QQ 音乐的 `singer_mid` → 歌曲列表），但那些歌的**播放地址还得回酷我搜一遍**，成本和复杂度都上一个台阶，暂时没做。
 
 ## 数据（Redis）
 
@@ -635,7 +679,7 @@ python -m tonicuisc_server                        # 现在直接是 https://192.
 | `tonicuisc:lib:<用户>:<类型>` / `tonicuisc:libmeta:*` | 喜欢 / 收藏 / 播放历史 |
 | `tonicuisc:sc:<sha1>` | 搜索结果缓存（默认 24 小时） |
 
-**直链不当长期有效**：酷我 / 咪咕的 `download_url` 是带签名的临时 token，库里给它记了保守的 30 分钟有效期（`URL_TTL_SECONDS`）。重启服务后：
+**直链不当长期有效**：酷我的 `download_url` 是带签名的临时 token，库里给它记了保守的 30 分钟有效期（`URL_TTL_SECONDS`）。重启服务后：
 
 1. 内存缓存空了 → 从 `tonicuisc:song:*` 恢复歌曲；
 2. 直链还在有效期 → 直接播；
@@ -707,20 +751,21 @@ python -m tonicuisc_server                        # 现在直接是 https://192.
   > **回落做到了握手层**：`attemptBothFamilies()` 在「TCP 连上了但 TLS 握手被掐」时（中间盒/拦截的典型手法，大陆节点上实测就是这样），会把两个家族**换个顺序整套再来一遍**，而不是就此认输 —— 因为「TCP 通」根本不等于「这条路能用」。
 - **两套布局（一套代码）**：窗口宽度 ≥ `840` **且**短边 ≥ `480` 时切**桌面布局**——左侧苹果风宽侧边栏（`lib/app/nav_sidebar.dart`，图标 + 文字，208px，悬停 / 选中都有过渡）+ 宽内容区 + **横跨整个窗口**的底部播放条（`lib/app/layout.dart` 里的 `useDesktopLayout`）；否则是**手机布局**——`CupertinoNavigationBar` 顶栏 + 底部**悬浮胶囊 tab 栏**（`lib/app/glass_tab_bar.dart`，iOS 26 那种：不贴边、圆角胶囊、玻璃材质、选中项背后一块淡底色；底部 home indicator 的安全区由外壳补，胶囊自己不吃，否则会被撑高）。宽屏下内容两侧平分留白、收在 1200 逻辑像素内（只加 `Padding`，不改页面拿到的约束，所以各页面一行都不用动）。窗口在断点两侧拖动时 `IndexedStack` 里那三页**原地复用**，搜索到一半的结果不会丢。
 - **登录页**（未登录时的首屏，`lib/features/auth/login_page.dart`）：进页面自动登记设备码，主按钮「打开登录页并复制设备码」弹出系统浏览器并把码放进剪贴板；后台**自适应轮询**（1s→3s），批准后自动完成登录。连不上服务器、码过期、被拒绝、已经领过一次（`claimed`）都会给人话提示；**没登记成功的码不会摆给用户复制**（点了会先重试登记）。
-- **搜索 tab**（`lib/features/search/search_page.dart`）：关键词搜索、音源勾选、显示「正在进行…」和用时、试听、下载、点红心加进「我喜欢」；**点歌手名进歌手主页**；**滑到底自动再加载 15 条**（按 id 去重，不会重复）。
+- **搜索 tab**（`lib/features/search/search_page.dart`）：关键词搜索（音源固定酷我，不再显示选择条）、显示「正在进行…」和用时、试听、下载、点红心加进「我喜欢」；**点歌手名进歌手主页**；**滑到底自动再加载 15 条**（按 id 去重，不会重复）。
 - **歌手主页**（`lib/features/search/artist_page.dart`）：这个歌手能搜到的所有歌、「全部播放」、逐首点红心（完整度见上面的「歌手主页」一节）。
 - **列表 tab**（`lib/features/library/library_page.dart`）：最上面是**播放列表**（显示正在播放的歌、队列长度、播放模式），下面是 **我喜欢 / 收藏 / 播放历史**，各自显示数量，点进去可播放、单条移除、清空。
 - **播放队列**（`lib/features/player/queue_page.dart`）：全屏播放页点列表按钮弹出，或在「列表」tab 里整页打开。
 - **播放模式**：顺序播放 / 列表循环 / 单曲循环 / 随机播放，在播放页和队列页都能切；播完自动按模式走下一首（队列只有一首时随机播放也重头再来，顺序播放才停下）。快速连点「下一首」只会让最后一次点歌生效，不会被上一次没加载完的覆盖。
-- **我的 tab**（`lib/features/profile/profile_page.dart`）：账户名、本机设备名与设备 ID、重新登录、退出登录、版本号（**长按改服务器地址 + 允许自签证书**，入口平时隐藏）、已登录设备列表（可逐台吊销，删完即从列表消失）。
+- **我的 tab**（`lib/features/profile/profile_page.dart`）：账户名、本机设备名与设备 ID、重新登录、退出登录、版本号（**长按改服务器地址 + 允许自签证书**，入口平时隐藏）、**检查更新**（桌面端，走 `/api/update` + gh-proxy）、已登录设备列表（可逐台吊销，删完即从列表消失）。
 - **底部播放条**：封面缩略图、播放/暂停、进度拖动；点一下展开全屏播放页。
-- **全屏播放页**（`lib/features/player/now_playing_page.dart`）：大封面 + 喜欢/收藏 + 歌词跟随高亮（点歌词跳转）+ 进度条 + 上一首 / 播放暂停 / 下一首。**拖进度条时音频继续播，滑块跟手指走，松手才跳到那个位置**。
+- **全屏播放页**（`lib/features/player/now_playing_page.dart`）：大封面 + 喜欢/收藏 + **进度条式卡拉OK歌词**（逐字时间轴 + 翻译 + 拼音/罗马音，点歌词跳转）+ 进度条 + 上一首 / 播放暂停 / 下一首。**拖进度条时音频继续播，滑块跟手指走，松手才跳到那个位置**。打开页面时会直接 `jumpTo` 到当前行，不会从第一行慢慢滚。
+- **键盘收起**：iOS 上点输入框以外的空白处会主动 `unfocus`（`app.dart` 根部一层透明 `GestureDetector`），不用先点「完成」再点别处。
 - **封面**：所有列表都用搜到的 `cover_url`（`lib/shared/song_avatar.dart`），QQ 补的封面到了会自动换上去；加载失败或没有封面才退回音源首字。
 - **屏幕常亮**：App 在前台时不让系统自动息屏（`wakelock_plus`），切到后台自动放开，不会后台耗电。
 
 ## CI
 
-- **`server-ci.yml`**：安装依赖 → `compileall` → 模块 import 检查 → `pytest`（232 个用例，不联网、不需要 musicdl）。
+- **`server-ci.yml`**：安装依赖 → `compileall` → 模块 import 检查 → `pytest`（264 个用例，不联网、不需要 musicdl）。
 - **`build.yml`**：
   1. 每个分支 push 都会进来，但先跑一个很便宜的 `gate`：**手动触发 / tag / 提交标题里带 `vX.Y.Z`** 才跑全平台；
      普通 push 只跑静态检查，然后再由 `macos.yml` 接上 macOS；
@@ -729,6 +774,8 @@ python -m tonicuisc_server                        # 现在直接是 https://192.
   4. Flutter 版本固定在 `env.FLUTTER_VERSION`（固定版本缓存才会命中，否则每次都要重新保存 1GB+ 缓存）；
   5. 全平台构建成功后由 `发布 Release` job 汇总产物上传到 GitHub Release。
 - **`macos.yml`**（macOS 单独构建）：见下。
+
+> **发版规则**：gate 看的是**这次 push 的 tip commit 标题**。直接 `git commit -m "v0.2.5"` 是有效的；但如果是 `Merge branch 'main' of ...` 这种合并提交，版本号在父提交里、tip 标题没有，就会被当成普通 push（v0.2.5 就踩过这个坑）。所以发版要么保证 tip 提交标题就是 `vX.Y.Z`，要么直接推 tag（tag 触发不依赖提交标题）。
 
 ### 为什么 macOS 单独一个 workflow
 
@@ -796,10 +843,10 @@ iOS 产物为未签名 `.ipa`，安装需要自行用 Xcode 重签。
 改完代码推之前先跑这几条：
 
 ```bash
-# 服务端测试（232 个用例，秒级，不联网）
+# 服务端测试（264 个用例，秒级，不联网）
 cd server && python -m pytest -q
 
-# 客户端：静态检查 + 测试（38 个用例：歌词解析、模型、文件名过滤、响应式布局、外壳、双栈连接）
+# 客户端：静态检查 + 测试（歌词解析、模型、文件名过滤、响应式布局、外壳、双栈连接）
 cd app && flutter analyze && flutter test
 
 # 连不上服务器时先跑这个探针：先做「备案体检」（明文 80 看有没有阿里云拦截页），
