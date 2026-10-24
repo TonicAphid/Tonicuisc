@@ -93,7 +93,10 @@ class Settings:
     #: 跟着带上端口。证书跟端口无关（lego 走 DNS-01），换端口不用重新签。
     https_port: int = int(os.getenv("TONICUISC_HTTPS_PORT", "443"))
     reload: bool = os.getenv("TONICUISC_RELOAD", "0") in {"1", "true", "yes"}
-    sources: list[str] = field(default_factory=lambda: _env_list("TONICUISC_SOURCES", ["migu", "kuwo"]))
+    sources: list[str] = field(default_factory=lambda: _env_list("TONICUISC_SOURCES", ["kuwo"]))
+    #: 桌面端检查更新用的 GitHub 仓库（owner/repo）与可选 token（提高 API 额度）
+    github_repo: str = os.getenv("TONICUISC_GITHUB_REPO", "TonicAphid/Tonicuisc").strip().strip("/")
+    github_token: str = os.getenv("TONICUISC_GITHUB_TOKEN", "").strip()
     #: 每个音源的抓取下限（真正抓多少按「这次要几条 ÷ 音源数」分摊）
     search_size: int = int(os.getenv("TONICUISC_SEARCH_SIZE", "5"))
     #: 每个请求取几首（下限）：实际每页条数 = max(这个值, ceil(要几条 / 并发数))

@@ -6,6 +6,6 @@
 
 from __future__ import annotations
 
-from . import account, health, library, login, media, search
+from . import account, health, library, login, media, search, update
 
-__all__ = ["account", "health", "library", "login", "media", "search"]
+__all__ = ["account", "health", "library", "login", "media", "search", "update"]

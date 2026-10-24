@@ -49,8 +49,9 @@ async def sources() -> dict:
     configured = set(resolve_sources(SETTINGS.sources))
     return {
         "items": [
-            {"alias": alias, "name": class_name, "label": source_label(class_name), "enabled": class_name in configured}
+            {"alias": alias, "name": class_name, "label": source_label(class_name), "enabled": True}
             for alias, class_name in SOURCE_ALIASES.items()
+            if class_name in configured
         ]
     }
 

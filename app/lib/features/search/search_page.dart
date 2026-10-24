@@ -14,8 +14,8 @@ import 'artist_page.dart';
 /// 搜索页（首页 tab）：搜索、试听、下载、点红心。
 ///
 /// 全 Cupertino：搜索框用 `CupertinoSearchTextField`（自带放大镜 + 清除按钮，
-/// 键盘确认键也固定是「搜索」），音源是多选胶囊，列表行自己画（`ListTile`
-/// 那套 Material 的选中态 / 水波纹在这里不合适）。
+/// 键盘确认键也固定是「搜索」），列表行自己画（`ListTile` 那套 Material 的
+/// 选中态 / 水波纹在这里不合适）。音源现在固定酷我，不再显示选择胶囊。
 class SearchPage extends StatefulWidget {
   const SearchPage({
     super.key,
@@ -38,11 +38,7 @@ class _SearchPageState extends State<SearchPage> {
   /// 一次要多少条；滑到底再要同样多（服务端会去重，不会给重复的）。
   static const int _pageSize = 15;
 
-  /// 音源别名 → 显示名。**顺序就是界面上从左到右的顺序**（Map 保序）。
-  static const Map<String, String> _sourceLabels = {'migu': '咪咕', 'kuwo': '酷我'};
-
   final TextEditingController _keyword = TextEditingController();
-  final Set<String> _sources = <String>{'migu', 'kuwo'};
   final ScrollController _scroll = ScrollController();
 
   List<Song> _results = const [];
@@ -97,7 +93,6 @@ class _SearchPageState extends State<SearchPage> {
     try {
       final result = await widget.api.search(
         keyword,
-        sources: _sources.toList(),
         offset: 0,
         limit: _pageSize,
         refresh: true,
@@ -138,7 +133,6 @@ class _SearchPageState extends State<SearchPage> {
     try {
       final result = await widget.api.search(
         _lastKeyword,
-        sources: _sources.toList(),
         offset: _offset,
         limit: _pageSize,
       );
@@ -210,7 +204,6 @@ class _SearchPageState extends State<SearchPage> {
       builder: (context, _) => Column(
         children: [
           _searchRow(context),
-          _sourceRow(context),
           _statusRow(context),
           if (_error != null)
             Padding(
@@ -249,36 +242,6 @@ class _SearchPageState extends State<SearchPage> {
             onPressed: _searching ? null : _search,
             child: const Text('搜索'),
           ),
-        ],
-      ),
-    );
-  }
-
-  /// 音源多选。Cupertino 没有多选的分段控件（`CupertinoSegmentedControl` 是单选），
-  /// 所以自己画胶囊——和底部 tab 栏一个路数，观感统一。
-  Widget _sourceRow(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 12),
-      child: Row(
-        children: [
-          Text(
-            '音源：',
-            style: TextStyle(
-              fontSize: 13,
-              color: CupertinoColors.secondaryLabel.resolveFrom(context),
-            ),
-          ),
-          const SizedBox(width: 4),
-          for (final entry in _sourceLabels.entries) ...[
-            _SourcePill(
-              label: entry.value,
-              selected: _sources.contains(entry.key),
-              onTap: () => setState(() {
-                _sources.contains(entry.key) ? _sources.remove(entry.key) : _sources.add(entry.key);
-              }),
-            ),
-            const SizedBox(width: 6),
-          ],
         ],
       ),
     );
@@ -344,7 +307,6 @@ class _SearchPageState extends State<SearchPage> {
                     api: widget.api,
                     player: widget.player,
                     library: widget.library,
-                    sources: _sources.toList(),
                     onUnauthorized: widget.onUnauthorized,
                   ),
           onLike: () => _toggleLike(song),
@@ -386,43 +348,6 @@ class _SearchPageState extends State<SearchPage> {
       padding: const EdgeInsets.symmetric(vertical: 16),
       child: Center(
         child: Text('共 ${_results.length} 首', style: TextStyle(fontSize: 11, color: secondary)),
-      ),
-    );
-  }
-}
-
-/// 音源胶囊（多选）。
-class _SourcePill extends StatelessWidget {
-  const _SourcePill({required this.label, required this.selected, required this.onTap});
-
-  final String label;
-  final bool selected;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final accent = CupertinoTheme.of(context).primaryColor;
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTap: onTap,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 160),
-        curve: Curves.easeOut,
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
-        decoration: BoxDecoration(
-          color: selected
-              ? accent.withValues(alpha: 0.14)
-              : CupertinoColors.tertiarySystemFill.resolveFrom(context),
-          borderRadius: BorderRadius.circular(14),
-        ),
-        child: Text(
-          label,
-          style: TextStyle(
-            fontSize: 13,
-            fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
-            color: selected ? accent : CupertinoColors.label.resolveFrom(context),
-          ),
-        ),
       ),
     );
   }

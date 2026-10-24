@@ -15,7 +15,7 @@ from ..core.runtime import configure_thread_pool, shutdown_thread_pool
 from ..storage import redis_runtime
 from . import middleware as mw
 from .deps import get_auth, get_service
-from .routes import account, health, library, login, media, search
+from .routes import account, health, library, login, media, search, update
 
 
 def login_banner(settings, enabled: bool = True) -> str:
@@ -62,7 +62,7 @@ async def lifespan(app: FastAPI):
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="Tonicuisc API", version="1.0.0", description="咪咕 / 酷我 音源代理", lifespan=lifespan)
+    app = FastAPI(title="Tonicuisc API", version="1.0.0", description="酷我 音源代理", lifespan=lifespan)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
@@ -74,7 +74,7 @@ def create_app() -> FastAPI:
     # 注册顺序决定嵌套顺序：后注册的在外层，所以 access_log 会连 401 也记一行
     app.middleware("http")(mw.auth_guard)
     app.middleware("http")(mw.access_log)
-    for module in (health, account, library, media, search, login):
+    for module in (health, account, library, media, search, update, login):
         app.include_router(module.router)
     return app
 

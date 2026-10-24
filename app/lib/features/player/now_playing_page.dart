@@ -162,7 +162,7 @@ class _NowPlayingPageState extends State<NowPlayingPage> with SingleTickerProvid
       // 换歌了就别把上一首的歌词/错误盖到这一首上
       if (!mounted || _loadedSongId != song.id) return;
       if (_enhancedReady) return; // 增强歌词先到了，别用逐行版本覆盖
-      setState(() => _sheet = LyricSheet.parse(raw, title: song.name, artist: song.singers));
+      _applySheet(LyricSheet.parse(raw, title: song.name, artist: song.singers));
     } catch (err) {
       if (err is UnauthorizedException && widget.onUnauthorized != null) {
         if (mounted) await widget.onUnauthorized!('$err');
@@ -171,8 +171,22 @@ class _NowPlayingPageState extends State<NowPlayingPage> with SingleTickerProvid
       if (mounted && _loadedSongId == song.id) setState(() => _error = '歌词获取失败：$err');
     } finally {
       // stale 的那次不许动 _loading：不然会把新一轮「正在加载」提前收掉
-      if (mounted && _loadedSongId == song.id) setState(() => _loading = false);
+      if (mounted && _loadedSongId == song.id && _loading) setState(() => _loading = false);
     }
+  }
+
+  /// 歌词落地：同时把 loading 收掉、定位到当前行。
+  ///
+  /// 之前只 setState 不定位，列表要等下一句切行才会滚过去；而且那时 `_loading`
+  /// 还没关、ListView 根本没建出来，`_autoScroll` 找不到 controller 直接 no-op。
+  void _applySheet(LyricSheet sheet) {
+    setState(() {
+      _sheet = sheet;
+      _active = sheet.indexOf(widget.controller.position);
+      _loading = false;
+      _error = null;
+    });
+    _autoScroll(_active, jump: true);
   }
 
   /// 后台轮询增强歌词：`ready=false` 表示服务端还在匹配，隔两秒再问。
@@ -187,14 +201,8 @@ class _NowPlayingPageState extends State<NowPlayingPage> with SingleTickerProvid
         if (data != null && data['ready'] == true) {
           final sheet = LyricSheet.parseEnhanced(data);
           if (sheet.lines.isEmpty) return;
-          setState(() {
-            _enhancedReady = true;
-            _sheet = sheet;
-            _active = sheet.indexOf(widget.controller.position);
-            _error = null;
-            _loading = false;
-          });
-          _autoScroll(_active);
+          setState(() => _enhancedReady = true);
+          _applySheet(sheet);
           return;
         }
       } on UnauthorizedException {
@@ -206,13 +214,31 @@ class _NowPlayingPageState extends State<NowPlayingPage> with SingleTickerProvid
     }
   }
 
-  void _autoScroll(int index) {
-    if (!_sheet.synced || index < 0 || !_scroll.hasClients) return;
-    final viewport = _scroll.position.viewportDimension;
-    final target = (index * _lineExtent + _lineExtent / 2 - viewport / 2)
-        .clamp(0.0, _scroll.position.maxScrollExtent)
-        .toDouble();
-    _scroll.animateTo(target, duration: const Duration(milliseconds: 300), curve: Curves.easeOut);
+  void _autoScroll(int index, {bool jump = false, int attempt = 0}) {
+    if (!_sheet.synced || index < 0 || index >= _sheet.lines.length) return;
+    // 列表可能在歌词刚 setState 的这一帧还没挂上 ScrollController；
+    // 等这一帧画完再滚，必要时再补几帧。
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      if (!_scroll.hasClients) {
+        if (attempt < 3) {
+          Future<void>.delayed(const Duration(milliseconds: 50), () {
+            if (mounted) _autoScroll(index, jump: jump, attempt: attempt + 1);
+          });
+        }
+        return;
+      }
+      final viewport = _scroll.position.viewportDimension;
+      final target = (index * _lineExtent + _lineExtent / 2 - viewport / 2)
+          .clamp(0.0, _scroll.position.maxScrollExtent)
+          .toDouble();
+      if (jump) {
+        // 刚打开播放页：直接落到当前行，不要从第一行一路滚下来
+        _scroll.jumpTo(target);
+      } else {
+        _scroll.animateTo(target, duration: const Duration(milliseconds: 300), curve: Curves.easeOut);
+      }
+    });
   }
 
   @override

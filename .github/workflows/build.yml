@@ -4,9 +4,10 @@ name: Build
 run-name: ${{ github.event.head_commit.message || github.ref_name }}
 
 on:
-  # 分支 push 不跑全平台（只构建 macOS，见 macos.yml）。
-  # 全平台构建留给 tag 和手动触发，避免每次提交都烧 Windows/Linux/macOS 三份 runner。
+  # 分支 push 也进这个 workflow，但只有「版本提交」或 tag/手动触发才跑全平台；
+  # 普通提交只跑静态检查和 macOS（见 gate / macos.yml），避免每次提交烧三份 runner。
   push:
+    branches: [main, master]
     tags: ["v*"]
   workflow_dispatch:
     inputs:
@@ -28,6 +29,33 @@ env:
   FLUTTER_VERSION: 3.47.5
 
 jobs:
+  gate:
+    name: 判断是否完整构建
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      full: ${{ steps.check.outputs.full }}
+    steps:
+      - name: 检查触发条件
+        id: check
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          MESSAGE: ${{ github.event.head_commit.message }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          # 规则和 release job 取版本号的规则保持一致：
+          # 手动触发 / tag / 提交标题里带 vX.Y.Z（可带 fix）→ 全平台 + Release；
+          # 其它普通 push → 只跑静态检查 + macOS。
+          full=false
+          if [ "$EVENT" = "workflow_dispatch" ] || [ "$REF_TYPE" = "tag" ] || [ -n "$INPUT_TAG" ]; then
+            full=true
+          elif printf '%s' "$MESSAGE" | grep -qiE 'v[0-9]+\.[0-9]+(\.[0-9]+)?(fix)?'; then
+            full=true
+          fi
+          echo "full=$full" >> "$GITHUB_OUTPUT"
+          echo "完整构建: $full"
+
   analyze:
     name: 静态检查
     runs-on: ubuntu-latest
@@ -56,7 +84,8 @@ jobs:
     name: ${{ matrix.name }}
     # 静态检查 + 单元测试先过，再开始烧各平台的构建时间
     # macOS 不在这里：它单独跑（见 macos.yml），那边出 arm64 + Intel 两个架构
-    needs: analyze
+    needs: [gate, analyze]
+    if: needs.gate.outputs.full == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     strategy:
@@ -96,6 +125,11 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: ./tool/apply_patches.ps1
+
+      - name: 修复 Windows 第三方输入法（IME 上下文）
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: python tool/patch_windows_ime.py
 
       - name: 应用原生补丁（Linux）
         if: runner.os != 'Windows'
@@ -165,7 +199,8 @@ jobs:
 
   ios:
     name: iOS (未签名)
-    needs: analyze
+    needs: [gate, analyze]
+    if: needs.gate.outputs.full == 'true'
     runs-on: macos-latest
     timeout-minutes: 40
     steps:
@@ -219,11 +254,13 @@ jobs:
 
   release:
     name: 发布 Release
-    needs: [analyze, desktop, ios]
+    needs: [gate, analyze, desktop, ios]
     # macOS 产物由 macos.yml 单独挂上去（workflow 之间不能互相 needs），
     # 所以刚建好的 Release 里先只有 Windows / Linux / iOS 的包，
     # macOS 那两个 DMG（arm64 / x64）会在 macos.yml 跑完后补上。
-    if: github.event_name == 'workflow_dispatch' || github.ref_type == 'tag' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    if: >-
+      needs.gate.outputs.full == 'true'
+      && (github.event_name == 'workflow_dispatch' || github.ref_type == 'tag' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:

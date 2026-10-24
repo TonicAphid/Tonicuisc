@@ -35,9 +35,15 @@ class TonicuiscApp extends StatelessWidget {
         return CupertinoTheme(
           data: dark ? AppTheme.dark : AppTheme.light,
           // TODO(迁移): 页面全部迁到 Cupertino 后，这层过渡壳和 legacy_material_host.dart 一起删
-          child: LegacyMaterialHost(
-            brightness: dark ? Brightness.dark : Brightness.light,
-            child: child ?? const SizedBox.shrink(),
+          child: GestureDetector(
+            // iOS 上点空白处收起键盘：TextField 默认只在点自己时才处理焦点，
+            // 外层补一个 translucent 的 tap 识别器，点到列表/空白就 unfocus。
+            behavior: HitTestBehavior.translucent,
+            onTap: () => FocusManager.instance.primaryFocus?.unfocus(),
+            child: LegacyMaterialHost(
+              brightness: dark ? Brightness.dark : Brightness.light,
+              child: child ?? const SizedBox.shrink(),
+            ),
           ),
         );
       },

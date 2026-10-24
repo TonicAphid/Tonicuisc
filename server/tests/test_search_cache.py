@@ -55,7 +55,8 @@ class _FakeClient:
 
     def search(self, keyword: str) -> dict:
         self.calls += 1
-        return {"MiguMusicClient": [_song("1"), _song("2")]}
+        # 服务端现在默认只启用酷我，桩也要返回默认音源，否则会被 _search_sources 过滤掉
+        return {"KuwoMusicClient": [_song("1", "KuwoMusicClient"), _song("2", "KuwoMusicClient")]}
 
 
 class _SlowClient(_FakeClient):

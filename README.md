@@ -1,6 +1,6 @@
 # Tonicuisc
 
-自用音乐软件：**Python 后端（FastAPI + musicdl，音源为咪咕 / 酷我）** + **Flutter 客户端（Windows / Linux / macOS / iOS）**。
+自用音乐软件：**Python 后端（FastAPI + musicdl，音源为酷我）** + **Flutter 客户端（Windows / Linux / macOS / iOS）**。
 
 > 仅用于个人学习与自建服务，请勿商业使用或大规模分发。所有音频由第三方音源提供，本项目只做代理与整理。
 
@@ -194,7 +194,7 @@ flutter build windows --release
 | `TONICUISC_HOST` | `127.0.0.1` | 监听地址。默认**只监听 IPv4 回环**——家里部署时由 Caddy 反代过来，服务端不该直接对外。想让局域网 / 外网直连（不装 Caddy）再显式改成 `0.0.0.0` |
 | `TONICUISC_ENV` | 空 | 当前环境（`uisc` 正式 / `tuisc` 测试）。决定对外域名、启动横幅、DDNS 目标；不填时**首次启动会问一次**并写进 `server/.env`。改：`python -m tonicuisc_server env tuisc`，或 `env --ask` 现场问一遍 |
 | `TONICUISC_PORT` | `8000` | 端口 |
-| `TONICUISC_SOURCES` | `migu,kuwo` | 启用音源 |
+| `TONICUISC_SOURCES` | `kuwo` | 启用音源（只保留酷我；代码里还留着 `migu` 别名兼容旧配置） |
 | `TONICUISC_SEARCH_SIZE` | `5` | 每个音源的抓取下限（实际按「要几条 ÷ 音源数」分摊） |
 | `TONICUISC_SEARCH_SIZE_PER_PAGE` | `1` | 每个请求取几条的**下限**；实际每页 = `max(该值, ceil(要几条 ÷ 并发数))` |
 | `TONICUISC_SEARCH_THREADS` | `10` | 每个音源的并发请求数（也是「要 15 条 → 每页 2 条 → 8 个请求」里的分母）。实测酷我 15 条：10 路比 5 路快约 30%，上游抖动时差距更大；怕被限流设回 `5` |
@@ -243,17 +243,18 @@ flutter build windows --release
 | DELETE | `/api/library/{kind}/{song_id}` | 从列表移除 |
 | DELETE | `/api/library/{kind}` | 清空列表 |
 | GET | `/api/sources` | 可用音源 |
-| GET | `/api/search?keyword=&sources=migu,kuwo&limit=50&refresh=false` | 搜索（`refresh=true` = 想刷新：缓存比 `TONICUISC_SEARCH_SOFT_TTL` 新就直接返回并后台更新） |
+| GET | `/api/search?keyword=&sources=kuwo&limit=50&refresh=false` | 搜索（`refresh=true` = 想刷新：缓存比 `TONICUISC_SEARCH_SOFT_TTL` 新就直接返回并后台更新） |
 | GET | `/api/artist?name=周杰伦&sources=&limit=50` | 歌手主页：这个歌手在音源上能搜到的歌 |
 | GET | `/api/history?limit=20` | 搜索历史（按关键词聚合） |
 | GET | `/api/url/{id}` | 音源直链（best effort） |
-| GET | `/api/lyric/{id}` | 歌词（LRC 文本） |
+| GET | `/api/lyric/{id}` | 歌词（LRC 文本；`?format=enhanced` 为结构化逐字） |
+| GET | `/api/update?platform=&arch=&version=&build=` | 桌面端检查更新（返回 GitHub Release 信息 + gh-proxy 安装包地址；iOS 返回不支持） |
 | GET | `/api/stream/{id}` | 音频流，支持 HTTP Range |
 | GET | `/api/download/{id}` | 附件下载 |
 
 除标注「免鉴权」的以外，所有 `/api` 接口都必须带请求头 `X-API-Key`。
 
-`{id}` 形如 `MiguMusicClient:600929000000096577`，由 `/api/search` 返回；内存缓存 3 小时，重启后从 Redis 恢复。
+`{id}` 形如 `KuwoMusicClient:362538300`，由 `/api/search` 返回；内存缓存 3 小时，重启后从 Redis 恢复。
 
 ## 登录（设备码流）
 
@@ -721,11 +722,12 @@ python -m tonicuisc_server                        # 现在直接是 https://192.
 
 - **`server-ci.yml`**：安装依赖 → `compileall` → 模块 import 检查 → `pytest`（232 个用例，不联网、不需要 musicdl）。
 - **`build.yml`**：
-  1. 只在 **tag（`v*`）和手动触发**时跑全平台；普通分支 push 不触发，改由 `macos.yml` 只构建 macOS；
-  2. `静态检查` job 先跑 `flutter analyze` + `flutter test`；
-  3. `Windows / Linux / iOS` **`needs: analyze`**，静态检查过了才开始烧构建时间（出错 1 分钟就能拿到反馈，不会几个平台白跑）；
+  1. 每个分支 push 都会进来，但先跑一个很便宜的 `gate`：**手动触发 / tag / 提交标题里带 `vX.Y.Z`** 才跑全平台；
+     普通 push 只跑静态检查，然后再由 `macos.yml` 接上 macOS；
+  2. `静态检查` job 跑 `flutter analyze` + `flutter test`（普通 push 也跑，保证质量）；
+  3. `Windows / Linux / iOS` 需要 `gate.full == true` 且 `needs: analyze`，静态检查过了才开始烧构建时间；
   4. Flutter 版本固定在 `env.FLUTTER_VERSION`（固定版本缓存才会命中，否则每次都要重新保存 1GB+ 缓存）；
-  5. 全部成功后由 `发布 Release` job 汇总产物上传到 GitHub Release。
+  5. 全平台构建成功后由 `发布 Release` job 汇总产物上传到 GitHub Release。
 - **`macos.yml`**（macOS 单独构建）：见下。
 
 ### 为什么 macOS 单独一个 workflow
@@ -746,9 +748,10 @@ python -m tonicuisc_server                        # 现在直接是 https://192.
 
 | 触发 | 行为 |
 | --- | --- |
-| 推送 `main` / `master` | **只构建 macOS arm64**，只出 artifact，不建 Release |
-| `Build` 成功之后（`workflow_run`） | 自动接上：构建 arm64 并**挂到 Release** |
-| 手动 `workflow_dispatch` | 只出 artifact；勾 `publish` 才挂 Release，勾 `intel` 才出 x64 |
+| 普通 push `main` / `master` | 只跑静态检查 + **macOS arm64**，只出 artifact，不建 Release |
+| 提交标题带 `vX.Y.Z` 的 push | **全平台构建 + Release**，macOS 由 `workflow_run` 接上并挂 DMG |
+| `Build` 成功之后（`workflow_run`） | 自动接上 macOS；有 Release 才上传，普通 push 只保留 artifact |
+| 手动 `workflow_dispatch` | 手动跑 `Build` 是全平台；手动跑 `macOS Build` 只出 macOS，勾 `publish` 才挂 Release，勾 `intel` 才出 x64 |
 | 推送 `v*` tag | `build.yml` 全平台构建，macOS 由 `workflow_run` 接上并挂 Release |
 
 > 为什么用 `workflow_run` 而不是 `push: tags`：Release 是 `build.yml` 用 **GITHUB_TOKEN**

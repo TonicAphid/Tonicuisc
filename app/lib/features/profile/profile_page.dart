@@ -1,4 +1,9 @@
+import 'dart:ffi';
+import 'dart:io';
+
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../../core/api_client.dart';
 import '../../core/credentials.dart';
@@ -35,6 +40,7 @@ class _ProfilePageState extends State<ProfilePage> {
   Map<String, dynamic>? _me;
   List<Map<String, dynamic>> _devices = const [];
   bool _loading = true;
+  bool _checkingUpdate = false;
   String? _error;
 
   @override
@@ -126,6 +132,116 @@ class _ProfilePageState extends State<ProfilePage> {
     return '${dt.year}-${two(dt.month)}-${two(dt.day)} ${two(dt.hour)}:${two(dt.minute)}';
   }
 
+  bool get _isDesktop => !kIsWeb && (Platform.isWindows || Platform.isMacOS || Platform.isLinux);
+
+  String get _platformName {
+    if (Platform.isWindows) return 'windows';
+    if (Platform.isMacOS) return 'macos';
+    return 'linux';
+  }
+
+  String get _archName {
+    final abi = Abi.current();
+    if (abi == Abi.macosArm64) return 'arm64';
+    if (abi == Abi.macosX64) return 'x64';
+    return 'x64';
+  }
+
+  /// 查 GitHub Release（服务端会缓存 10 分钟），有更新就打开安装包下载页。
+  Future<void> _checkUpdate() async {
+    if (_checkingUpdate) return;
+    setState(() => _checkingUpdate = true);
+    try {
+      final data = await widget.api.checkUpdate(
+        platform: _platformName,
+        arch: _archName,
+        version: kAppVersion,
+        build: kAppBuild,
+      );
+      if (!mounted) return;
+      if (data['supported'] == false) return;
+
+      final latest = '${data['latest'] ?? ''}';
+      if (data['has_update'] != true) {
+        await showDialog<void>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('已是最新版本'),
+            content: Text('当前 $kAppVersion（build $kAppBuild）'),
+            actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text('好'))],
+          ),
+        );
+        return;
+      }
+
+      final asset = data['asset'];
+      if (data['ready'] != true || asset is! Map) {
+        final message = '${data['message'] ?? '安装包还没上传完，稍后再试'}';
+        await showDialog<void>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: Text('新版本 v$latest 已发布'),
+            content: Text(message),
+            actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text('好'))],
+          ),
+        );
+        return;
+      }
+
+      final url = '${asset['url'] ?? ''}';
+      final name = '${asset['name'] ?? ''}';
+      final notes = '${data['notes'] ?? ''}'.trim();
+      final download = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: Text('发现新版本 v$latest'),
+          content: SizedBox(
+            width: 440,
+            child: SingleChildScrollView(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('当前 $kAppVersion（build $kAppBuild）'),
+                  if (name.isNotEmpty) ...[
+                    const SizedBox(height: 6),
+                    Text('安装包：$name', style: const TextStyle(fontSize: 12)),
+                  ],
+                  if (notes.isNotEmpty) ...[
+                    const SizedBox(height: 12),
+                    const Text('更新内容：'),
+                    const SizedBox(height: 4),
+                    Text(notes, style: const TextStyle(fontSize: 13)),
+                  ],
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('稍后')),
+            FilledButton(
+              onPressed: url.isEmpty ? null : () => Navigator.pop(context, true),
+              child: const Text('下载安装包'),
+            ),
+          ],
+        ),
+      );
+      if (download != true || !mounted || url.isEmpty) return;
+      final opened = await launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
+      if (!opened && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('没能打开下载链接，请稍后再试')));
+      }
+    } catch (err) {
+      if (!mounted) return;
+      if (err is UnauthorizedException) {
+        await widget.onUnauthorized('$err');
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('检查更新失败：$err')));
+    } finally {
+      if (mounted) setState(() => _checkingUpdate = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -195,6 +311,16 @@ class _ProfilePageState extends State<ProfilePage> {
           onTap: widget.onLogout,
         ),
         const Divider(height: 32),
+        if (_isDesktop)
+          ListTile(
+            leading: const Icon(Icons.system_update_alt),
+            title: const Text('检查更新'),
+            subtitle: const Text('从 GitHub Release 获取桌面安装包（走 gh-proxy 加速）'),
+            trailing: _checkingUpdate
+                ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                : const Icon(Icons.chevron_right),
+            onTap: _checkingUpdate ? null : _checkUpdate,
+          ),
         ListTile(
           dense: true,
           leading: const Icon(Icons.info_outline),

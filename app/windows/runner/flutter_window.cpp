@@ -4,6 +4,8 @@
 
 #include "flutter/generated_plugin_registrant.h"
 
+#include <imm.h>
+
 FlutterWindow::FlutterWindow(const flutter::DartProject& project)
     : project_(project) {}
 
@@ -51,6 +53,17 @@ LRESULT
 FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
                               WPARAM const wparam,
                               LPARAM const lparam) noexcept {
+  // Windows IME input context can become stale after the window loses and
+  // regains focus, which breaks third-party IMEs (flutter/flutter#190042).
+  // Restore the window's default IMM input context on focus/activation.
+  if (message == WM_SETFOCUS ||
+      (message == WM_ACTIVATE && wparam != WA_INACTIVE)) {
+    if (flutter_controller_ && flutter_controller_->view()) {
+      ::ImmAssociateContextEx(
+          flutter_controller_->view()->GetNativeWindow(), nullptr, IACE_DEFAULT);
+    }
+  }
+
   // Give Flutter, including plugins, an opportunity to handle window messages.
   if (flutter_controller_) {
     std::optional<LRESULT> result =
