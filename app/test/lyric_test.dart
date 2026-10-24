@@ -96,6 +96,58 @@ void main() {
     expect(sheet.lines.single.words.first.roman, 'qíng');
   });
 
+  test('逐字进度按行内时间线性计算（进度条式填充）', () {
+    final line = LyricLine(
+      Duration.zero,
+      '晴天',
+      words: [
+        LyricWord(start: Duration.zero, end: const Duration(milliseconds: 500), text: '晴'),
+        LyricWord(start: const Duration(milliseconds: 500), end: const Duration(seconds: 1), text: '天'),
+      ],
+    );
+
+    expect(line.progressAt(Duration.zero), 0.0);
+    expect(line.progressAt(const Duration(milliseconds: 250)), closeTo(0.25, 0.0001));
+    expect(line.progressAt(const Duration(milliseconds: 500)), closeTo(0.5, 0.0001));
+    expect(line.progressAt(const Duration(seconds: 2)), 1.0);
+  });
+
+  test('扫速按每个字的时间差算，不是整行匀速', () {
+    final line = LyricLine(
+      Duration.zero,
+      '晴天',
+      words: [
+        LyricWord(start: Duration.zero, end: const Duration(milliseconds: 900), text: '晴'),
+        LyricWord(start: const Duration(milliseconds: 900), end: const Duration(seconds: 1), text: '天'),
+      ],
+    );
+
+    // 时间过半了，但第一个字占一半宽度，所以只扫过 1/4
+    expect(line.progressAt(const Duration(milliseconds: 450)), closeTo(0.25, 0.0001));
+    expect(line.progressAt(const Duration(milliseconds: 900)), closeTo(0.5, 0.0001));
+    expect(line.progressAt(const Duration(milliseconds: 950)), closeTo(0.75, 0.0001));
+  });
+
+  test('字与字之间的空隙停住不扫', () {
+    final line = LyricLine(
+      Duration.zero,
+      '晴天',
+      words: [
+        LyricWord(start: Duration.zero, end: const Duration(milliseconds: 400), text: '晴'),
+        LyricWord(start: const Duration(milliseconds: 800), end: const Duration(seconds: 1), text: '天'),
+      ],
+    );
+
+    expect(line.progressAt(const Duration(milliseconds: 600)), closeTo(0.5, 0.0001));
+  });
+
+  test('没有逐字时间轴时按整行时间计算进度', () {
+    final line = LyricLine(const Duration(seconds: 2), '普通歌词');
+
+    expect(line.progressAt(const Duration(seconds: 1)), 0.0);
+    expect(line.progressAt(const Duration(seconds: 2)), 1.0);
+  });
+
   test('增强歌词没有 lines 时退回空', () {
     expect(LyricSheet.parseEnhanced({'ready': false}).lines, isEmpty);
     expect(LyricSheet.parseEnhanced(null).lines, isEmpty);

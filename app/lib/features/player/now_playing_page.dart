@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 
 import '../../core/api_client.dart';
 import '../../models/lyric.dart';
@@ -53,7 +54,7 @@ class NowPlayingPage extends StatefulWidget {
   State<NowPlayingPage> createState() => _NowPlayingPageState();
 }
 
-class _NowPlayingPageState extends State<NowPlayingPage> {
+class _NowPlayingPageState extends State<NowPlayingPage> with SingleTickerProviderStateMixin {
   final ScrollController _scroll = ScrollController();
   LyricSheet _sheet = LyricSheet.empty;
   String? _loadedSongId;
@@ -64,13 +65,21 @@ class _NowPlayingPageState extends State<NowPlayingPage> {
   /// 增强歌词已经到了；迟到的逐行 LRC 不许把它覆盖回去。
   bool _enhancedReady = false;
 
-  /// 卡拉OK着色时重绘的最低间隔（播放器的 position 流本身就够密了）。
+  /// 30fps 重绘歌词进度用的 Ticker（position 流本身只有 ~5Hz，直接用它画会一格一格跳）。
+  late final Ticker _ticker;
+
+  /// 卡拉OK重绘的最低间隔（毫秒）。
   int _lastPaintMs = 0;
 
-  /// 有逐字歌词时每行要显示原文 + 翻译 + 拼音，得给高一点。
+  /// 播放器最后一次上报的 position 和时间点，用来在两次上报之间插值。
+  Duration _lastRawPosition = Duration.zero;
+  DateTime _lastRawAt = DateTime.now();
+  bool _lastPlaying = false;
+
+  /// 有逐字歌词时每行要显示原文 + 翻译 + 拼音，但别留太多空。
   double get _lineExtent {
-    if (!_sheet.hasWords) return 46;
-    return _sheet.lines.any((line) => line.hasExtra) ? 84 : 64;
+    if (!_sheet.hasWords) return 40;
+    return _sheet.lines.any((line) => line.hasExtra) ? 72 : 46;
   }
 
   /// 手指拖进度条时的位置（毫秒）；不为 null 时进度条不跟播放进度。
@@ -79,15 +88,35 @@ class _NowPlayingPageState extends State<NowPlayingPage> {
   @override
   void initState() {
     super.initState();
+    _ticker = createTicker(_onTick)..start();
     widget.controller.addListener(_handlePlayer);
     _loadLyric();
   }
 
   @override
   void dispose() {
+    _ticker.dispose();
     widget.controller.removeListener(_handlePlayer);
     _scroll.dispose();
     super.dispose();
+  }
+
+  /// 两次 position 上报之间按真实时间插值，让进度条 30fps 连续走。
+  Duration get _displayPosition {
+    final raw = widget.controller.position;
+    if (!widget.controller.playing || raw == Duration.zero) return raw;
+    final value = raw + DateTime.now().difference(_lastRawAt);
+    final total = widget.controller.duration;
+    if (total != null && value > total) return total;
+    return value;
+  }
+
+  void _onTick(Duration _) {
+    if (!mounted || !widget.controller.playing || !_sheet.hasWords) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (now - _lastPaintMs < 33) return;
+    _lastPaintMs = now;
+    setState(() {});
   }
 
   void _handlePlayer() {
@@ -97,19 +126,21 @@ class _NowPlayingPageState extends State<NowPlayingPage> {
       _loadLyric();
       return;
     }
-    final index = _sheet.indexOf(widget.controller.position);
-    final lineChanged = index != _active;
-    if (lineChanged) {
+    final raw = widget.controller.position;
+    if (raw != _lastRawPosition) {
+      _lastRawPosition = raw;
+      _lastRawAt = DateTime.now();
+    }
+    final playing = widget.controller.playing;
+    if (playing != _lastPlaying) {
+      // 恢复播放时从当前真实位置重新起算，别把暂停的时长算进进度
+      _lastPlaying = playing;
+      _lastRawAt = DateTime.now();
+    }
+    final index = _sheet.indexOf(raw);
+    if (index != _active) {
       setState(() => _active = index);
       _autoScroll(index);
-    }
-    if (_sheet.hasWords && !lineChanged) {
-      // 逐字高亮要跟着 position 走；节流到 50ms，避免每个事件都整页重建。
-      final now = DateTime.now().millisecondsSinceEpoch;
-      if (now - _lastPaintMs >= 50) {
-        _lastPaintMs = now;
-        setState(() {});
-      }
     }
   }
 
@@ -364,7 +395,7 @@ class _NowPlayingPageState extends State<NowPlayingPage> {
     return ListView.builder(
       controller: _scroll,
       itemExtent: _lineExtent,
-      padding: const EdgeInsets.symmetric(vertical: 8),
+      padding: const EdgeInsets.symmetric(vertical: 4),
       itemCount: _sheet.lines.length,
       itemBuilder: (context, index) {
         final line = _sheet.lines[index];
@@ -373,7 +404,7 @@ class _NowPlayingPageState extends State<NowPlayingPage> {
           onTap: _sheet.synced ? () => widget.controller.seek(line.time) : null,
           child: Center(
             child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 2),
+              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 1),
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
@@ -391,48 +422,74 @@ class _NowPlayingPageState extends State<NowPlayingPage> {
     );
   }
 
-  /// 原文：有逐字时间轴就按进度给每个字着色，否则整行普通显示。
+  /// 原文：有逐字时间轴时，用一条从左往右扫的硬边渐变模拟卡拉OK进度条。
+  ///
+  /// 不用「每个字单独变红」是因为那样是一格一格的；这里给整行做 ShaderMask，
+  /// 填充边界跟着 position 连续移动，看起来才是进度条。
   Widget _lyricMain(BuildContext context, LyricLine line, bool active) {
     final scheme = Theme.of(context).colorScheme;
+    final text = line.text.isEmpty ? '♪' : line.text;
     final style = TextStyle(
       fontSize: active ? 17 : 15,
       fontWeight: active ? FontWeight.w600 : FontWeight.normal,
       color: active ? scheme.primary : scheme.onSurfaceVariant,
     );
-    if (!line.hasWords) {
+    if (!active || !line.hasWords) {
       return Text(
-        line.text.isEmpty ? '♪' : line.text,
+        text,
         textAlign: TextAlign.center,
         maxLines: 2,
         overflow: TextOverflow.ellipsis,
         style: style,
       );
     }
-    final position = widget.controller.position;
-    final spans = <TextSpan>[];
-    for (final word in line.words) {
-      final sung = active && position >= word.start;
-      final current = active && position >= word.start && position < word.end;
-      spans.add(
-        TextSpan(
-          text: word.text,
-          style: TextStyle(
-            color: sung ? scheme.primary : scheme.onSurfaceVariant,
-            fontWeight: current ? FontWeight.w800 : (active ? FontWeight.w600 : FontWeight.normal),
-          ),
-        ),
+
+    final progress = line.progressAt(_displayPosition).clamp(0.0, 1.0);
+    if (progress <= 0) {
+      return Text(
+        text,
+        textAlign: TextAlign.center,
+        maxLines: 2,
+        overflow: TextOverflow.ellipsis,
+        style: style.copyWith(color: scheme.onSurfaceVariant),
       );
     }
-    return Text.rich(
-      TextSpan(style: style, children: spans),
-      textAlign: TextAlign.center,
-      maxLines: 2,
-      overflow: TextOverflow.ellipsis,
+    if (progress >= 1) {
+      return Text(
+        text,
+        textAlign: TextAlign.center,
+        maxLines: 2,
+        overflow: TextOverflow.ellipsis,
+        style: style.copyWith(color: scheme.primary),
+      );
+    }
+
+    return ShaderMask(
+      blendMode: BlendMode.srcIn,
+      shaderCallback: (bounds) => LinearGradient(
+        begin: Alignment.centerLeft,
+        end: Alignment.centerRight,
+        colors: [
+          scheme.primary,
+          scheme.primary,
+          scheme.onSurfaceVariant,
+          scheme.onSurfaceVariant,
+        ],
+        // 两个相同 stop 之间就是硬边界：左边已唱、右边未唱
+        stops: [0.0, progress, progress, 1.0],
+      ).createShader(bounds),
+      child: Text(
+        text,
+        textAlign: TextAlign.center,
+        maxLines: 2,
+        overflow: TextOverflow.ellipsis,
+        style: style.copyWith(color: Colors.white),
+      ),
     );
   }
 
   Widget _lyricSub(BuildContext context, String text, Color color) => Padding(
-        padding: const EdgeInsets.only(top: 2),
+        padding: const EdgeInsets.only(top: 1),
         child: Text(
           text,
           textAlign: TextAlign.center,

@@ -77,6 +77,9 @@ class PlayerController extends ChangeNotifier {
   bool _usingDirect = false;
   Uri? _fallbackStream;
 
+  /// 已经在后台触发过增强歌词搜索的歌曲（服务端有缓存，这里只防重复请求）。
+  final Set<String> _lyricPrefetched = <String>{};
+
   /// 销毁之后不再通知（异步的点歌流程可能在页面已销毁后才跑完）。
   void _notify() {
     if (_disposed) return;
@@ -113,6 +116,8 @@ class PlayerController extends ChangeNotifier {
     final song = current;
     final api = _api;
     if (song == null || api == null) return;
+    // 一开始播放就触发歌词匹配，不要等用户打开播放页才去搜。
+    unawaited(_prefetchLyric(api, song));
     final gen = ++_generation;
     _error = null;
     _duration = null;
@@ -134,6 +139,16 @@ class PlayerController extends ChangeNotifier {
     _notify();
     unawaited(_reportPlay(api, song.id)); // 播放历史，失败不影响播放
     _resume();
+  }
+
+  /// 提前让服务端开始匹配增强歌词；拿不到也没关系，播放页打开后会再问。
+  Future<void> _prefetchLyric(ApiClient api, Song song) async {
+    if (song.id.isEmpty || !_lyricPrefetched.add(song.id)) return;
+    try {
+      await api.lyricEnhanced(song.id);
+    } catch (_) {
+      _lyricPrefetched.remove(song.id);
+    }
   }
 
   Future<void> _reportPlay(ApiClient api, String songId) async {

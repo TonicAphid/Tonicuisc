@@ -4,8 +4,9 @@ name: Build
 run-name: ${{ github.event.head_commit.message || github.ref_name }}
 
 on:
+  # 分支 push 不跑全平台（只构建 macOS，见 macos.yml）。
+  # 全平台构建留给 tag 和手动触发，避免每次提交都烧 Windows/Linux/macOS 三份 runner。
   push:
-    branches: [main, master]
     tags: ["v*"]
   workflow_dispatch:
     inputs:
@@ -119,16 +120,47 @@ jobs:
       - name: 打包 (Windows)
         if: matrix.platform == 'windows'
         shell: pwsh
-        run: Compress-Archive -Path "app/${{ matrix.bundle }}" -DestinationPath "tonicuisc-windows-x64.zip" -Force
+        run: |
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+
+          # 免安装 zip 保留一份，方便不想装的人直接用
+          Compress-Archive -Path "app/${{ matrix.bundle }}" `
+            -DestinationPath "dist/tonicuisc-windows-x64-portable.zip" -Force
+
+          # 版本号用 apply_version 刚写进 pubspec 的 x.y.z（Inno 只认数字三段）
+          $pubspec = Get-Content app/pubspec.yaml -Raw
+          if ($pubspec -notmatch '(?m)^version:\s*(\d+\.\d+\.\d+)') {
+            throw "pubspec.yaml 里找不到合法的 x.y.z 版本号"
+          }
+          $version = $Matches[1]
+
+          # windows-latest 自带 Inno Setup 6；万一镜像变了就临时装一个
+          $iscc = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup --no-progress -y
+            $iscc = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
+          }
+          if (-not (Test-Path $iscc)) { throw "找不到 ISCC.exe" }
+
+          & $iscc `
+            "/DAppVersion=$version" `
+            "/DSourceDir=$PWD\app\build\windows\x64\runner\Release" `
+            "/DOutputDir=$PWD\dist" `
+            "tool\installer\windows\tonicuisc.iss"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          Get-ChildItem dist | Select-Object Name, Length
 
       - name: 打包 (Linux)
         if: matrix.platform == 'linux'
-        run: tar -C "app/$(dirname ${{ matrix.bundle }})" -czf tonicuisc-linux-x64.tar.gz "$(basename ${{ matrix.bundle }})"
+        run: |
+          mkdir -p dist
+          tar -C "app/$(dirname ${{ matrix.bundle }})" -czf dist/tonicuisc-linux-x64.tar.gz "$(basename ${{ matrix.bundle }})"
 
       - uses: actions/upload-artifact@v5
         with:
           name: ${{ matrix.artifact }}
-          path: tonicuisc-*
+          path: dist/*
           if-no-files-found: error
 
   ios:
@@ -189,8 +221,8 @@ jobs:
     name: 发布 Release
     needs: [analyze, desktop, ios]
     # macOS 产物由 macos.yml 单独挂上去（workflow 之间不能互相 needs），
-    # 所以刚建好的 Release 里先只有 Windows / Linux / iOS 三个包，
-    # macOS 那两个（arm64 / x64）会在 macos.yml 跑完后补上。
+    # 所以刚建好的 Release 里先只有 Windows / Linux / iOS 的包，
+    # macOS 那两个 DMG（arm64 / x64）会在 macos.yml 跑完后补上。
     if: github.event_name == 'workflow_dispatch' || github.ref_type == 'tag' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     timeout-minutes: 15

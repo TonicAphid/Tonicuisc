@@ -40,6 +40,51 @@ class LyricLine {
   bool get hasWords => words.isNotEmpty;
 
   bool get hasExtra => translation.isNotEmpty || roman.isNotEmpty;
+
+  /// 当前播放位置在这行里的进度（0~1），用来做「进度条式」卡拉OK填充。
+  ///
+  /// 不是按整行时长匀速：每个字/词占的宽度按字数算，字的起止时间各算各的，
+  /// 所以短字扫得快、长字扫得慢，字与字之间的空隙会停住。
+  /// 没有逐字时间轴时退化成整行：到点前 0，到点后 1。
+  double progressAt(Duration position) {
+    if (words.isEmpty) {
+      return position >= time ? 1 : 0;
+    }
+    final start = words.first.start;
+    if (position <= start) return 0;
+
+    var total = 0;
+    for (final word in words) {
+      total += _weight(word.text);
+    }
+    if (total == 0) return position >= words.last.end ? 1 : 0;
+
+    var done = 0;
+    for (final word in words) {
+      final weight = _weight(word.text);
+      if (position >= word.end) {
+        done += weight;
+        continue;
+      }
+      if (position < word.start) {
+        // 落在字与字的空隙里：停在当前进度，不要继续扫
+        return (done / total).clamp(0.0, 1.0);
+      }
+      final span = (word.end - word.start).inMilliseconds;
+      if (span <= 0) {
+        done += weight;
+        continue;
+      }
+      final fraction = (position - word.start).inMilliseconds / span;
+      return ((done + fraction * weight) / total).clamp(0.0, 1.0);
+    }
+    return 1;
+  }
+
+  static int _weight(String text) {
+    final length = text.runes.length;
+    return length == 0 ? 1 : length;
+  }
 }
 
 class LyricSheet {

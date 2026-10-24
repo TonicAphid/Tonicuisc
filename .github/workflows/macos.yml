@@ -6,16 +6,20 @@ name: macOS Build
 #   1. macOS runner 计费是 Linux 的 10 倍，全平台 matrix 跑一次要 40 分钟，
 #      改客户端时想只验证 macOS，用这个 workflow_dispatch 手动触发就够了；
 #   2. **架构**：GitHub 的 macos-latest 现在是 Apple Silicon（arm64），
-#      只出 arm64 的话 Intel Mac 根本跑不起来——这里两个架构都出；
-#   3. 产物用 ditto 打包（保留符号链接与签名），并校验架构对不对。
+#      只出 arm64 的话 Intel Mac 根本跑不起来——所以默认出 arm64，手动勾 intel 再加 x64；
+#   3. 产物是 DMG（App + /Applications 快捷方式），打包前做 ad-hoc 签名并校验架构。
 #
-# 发布：tag 推送（v*）时会把两个架构的产物挂到 Release；
+# 发布：tag 推送（v*）时会把 macOS 产物挂到 Release；
 #       build.yml 负责 Windows / Linux / iOS，两边不会互相覆盖（文件名不同）。
 run-name: macOS · ${{ github.event.head_commit.message || github.ref_name }}
 
 on:
-  # Build 跑完且成功之后自动接上：这样「推 main → 自动建 Release」的流程里
-  # macOS 也能自动出包并挂上去。
+  # 分支 push 只构建 macOS：Windows/Linux/iOS 的全量构建留给 tag 和手动触发
+  # （build.yml 不再响应分支 push）。这样改 macOS 时不会白烧另外三个平台。
+  push:
+    branches: [main, master]
+  #
+  # Build 跑完且成功之后自动接上：tag / 手动全平台构建时，macOS 通过这里出包并挂 Release。
   #
   # 为什么必须用 workflow_run 而不是 push: tags：
   #   Release 是 build.yml 用 GITHUB_TOKEN 建的 tag，而 GitHub 规定
@@ -27,8 +31,6 @@ on:
   workflow_run:
     workflows: ["Build"]
     types: [completed]
-  push:
-    tags: ["v*"]
   workflow_dispatch:
     inputs:
       publish:
@@ -52,16 +54,34 @@ env:
   FLUTTER_VERSION: 3.47.5
 
 jobs:
+  plan:
+    name: 计算构建矩阵
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      include: ${{ steps.matrix.outputs.include }}
+    steps:
+      - name: 生成矩阵
+        id: matrix
+        env:
+          # 只有 workflow_dispatch 才有这个输入；其它触发方式为空
+          WANT_INTEL: ${{ inputs.intel }}
+        run: |
+          arm64='{"name":"Apple Silicon (arm64)","os":"macos-latest","arch":"arm64","asset":"tonicuisc-macos-arm64.dmg","artifact":"tonicuisc-macos-arm64","optional":false}'
+          intel='{"name":"Intel (x86_64)","os":"macos-13","arch":"x64","asset":"tonicuisc-macos-x64.dmg","artifact":"tonicuisc-macos-x64","optional":true}'
+          if [ "$WANT_INTEL" = "true" ]; then
+            echo "include=[$arm64,$intel]" >> "$GITHUB_OUTPUT"
+          else
+            echo "include=[$arm64]" >> "$GITHUB_OUTPUT"
+          fi
+
   build:
     name: macOS ${{ matrix.name }}
-    # 两道条件：
-    #   1. workflow_run 触发时，只在被触发的那个 Build 成功时才接着干；
-    #   2. Intel 那条腿**默认不跑**——macos-13 容量紧张（实测排队 1 小时以上还没动），
-    #      而 `needs: build` 要等**全部**矩阵腿，它会把 publish 一起卡死。
-    #      要 Intel 就手动触发并勾上 intel。
+    needs: plan
+    # 注意：job 级 if 不能引用 matrix（矩阵还没展开），所以 Intel 是否参与
+    # 由上面的 plan job 决定；这里只保留 workflow_run 的成功条件。
     if: >-
-      (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success')
-      && (matrix.optional != true || inputs.intel == true)
+      github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     # Intel 那条腿失败不该拖垮整个流程
@@ -69,20 +89,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: Apple Silicon (arm64)
-            os: macos-latest
-            arch: arm64
-            asset: tonicuisc-macos-arm64.zip
-            artifact: tonicuisc-macos-arm64
-            optional: false
-          - name: Intel (x86_64)
-            os: macos-13
-            arch: x64
-            asset: tonicuisc-macos-x64.zip
-            artifact: tonicuisc-macos-x64
-            # optional = 默认不跑 + 失败不算总失败（macos-13 容量紧张、随时可能下线）
-            optional: true
+        include: ${{ fromJSON(needs.plan.outputs.include) }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -186,9 +193,21 @@ jobs:
 
       - name: 打包
         run: |
-          cd app/build/macos/Build/Products/Release
-          # 用 ditto 而不是 zip：.app 里有符号链接，ditto 才能保住链接和签名
-          ditto -c -k --sequesterRsrc --keepParent tonicuisc.app "$GITHUB_WORKSPACE/${{ matrix.asset }}"
+          APP="app/build/macos/Build/Products/Release/tonicuisc.app"
+
+          # 没签名就做 ad-hoc 签名（保留沙盒/网络 entitlements）。
+          # 这只是让系统认得出「签名结构完整」，不等于 Apple 公证，Gatekeeper 仍会提示。
+          if ! codesign --verify --deep --strict "$APP" 2>/dev/null; then
+            echo "未签名，执行 ad-hoc 签名"
+            codesign --force --deep --sign - \
+              --entitlements app/macos/Runner/Release.entitlements "$APP"
+          fi
+          codesign --verify --deep --strict "$APP"
+          codesign -dv --verbose=2 "$APP" 2>&1 | sed -n '1,6p'
+
+          # DMG 里放 App + /Applications 快捷方式，用户拖进去就是安装
+          bash tool/installer/macos/make_dmg.sh "$APP" "$GITHUB_WORKSPACE/${{ matrix.asset }}" "Tonicuisc"
+          hdiutil verify "$GITHUB_WORKSPACE/${{ matrix.asset }}"
           ls -lh "$GITHUB_WORKSPACE/${{ matrix.asset }}"
 
       - name: 写使用说明
@@ -196,14 +215,15 @@ jobs:
           cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
           ### 装到 Mac 上
 
-          产物是**未签名**的，用浏览器下载后 Gatekeeper 会拦（提示「已损坏，无法打开」）。
-          装好后执行一次就行：
+          1. 下载 `tonicuisc-macos-*.dmg`，双击打开；
+          2. 把里面的 `tonicuisc` 拖到「应用程序」；
+          3. 第一次打开会被 Gatekeeper 拦（未公证）。右键 App → 打开，或执行一次：
 
           ```bash
           xattr -dr com.apple.quarantine /Applications/tonicuisc.app
           ```
 
-          或者右键 App → 打开 → 在弹窗里再点「打开」。
+          Intel 机器下 `arm64` 包跑不起来，请选 `x64`。
           EOF
 
       - uses: actions/upload-artifact@v5

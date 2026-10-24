@@ -52,6 +52,7 @@ redis/linux/*
 
 # ---- 其他 ----
 .tmp/
+dist/
 .DS_Store
 Thumbs.db
 *.log

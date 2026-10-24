@@ -721,39 +721,43 @@ python -m tonicuisc_server                        # 现在直接是 https://192.
 
 - **`server-ci.yml`**：安装依赖 → `compileall` → 模块 import 检查 → `pytest`（232 个用例，不联网、不需要 musicdl）。
 - **`build.yml`**：
-  1. `静态检查` job 先跑 `flutter analyze` + `flutter test`；
-  2. `Windows / Linux / iOS` **`needs: analyze`**，静态检查过了才开始烧构建时间（出错 1 分钟就能拿到反馈，不会几个平台白跑）；
-  3. Flutter 版本固定在 `env.FLUTTER_VERSION`（固定版本缓存才会命中，否则每次都要重新保存 1GB+ 缓存）；
-  4. 全部成功后由 `发布 Release` job 汇总产物上传到 GitHub Release。
+  1. 只在 **tag（`v*`）和手动触发**时跑全平台；普通分支 push 不触发，改由 `macos.yml` 只构建 macOS；
+  2. `静态检查` job 先跑 `flutter analyze` + `flutter test`；
+  3. `Windows / Linux / iOS` **`needs: analyze`**，静态检查过了才开始烧构建时间（出错 1 分钟就能拿到反馈，不会几个平台白跑）；
+  4. Flutter 版本固定在 `env.FLUTTER_VERSION`（固定版本缓存才会命中，否则每次都要重新保存 1GB+ 缓存）；
+  5. 全部成功后由 `发布 Release` job 汇总产物上传到 GitHub Release。
 - **`macos.yml`**（macOS 单独构建）：见下。
 
 ### 为什么 macOS 单独一个 workflow
 
 1. **架构**：GitHub 的 `macos-latest` 现在是 **Apple Silicon（arm64）**，只出 arm64 的话
-   **Intel Mac 跑不起来**。所以支持两个架构：`macos-latest` → `tonicuisc-macos-arm64.zip`，
-   `macos-13` → `tonicuisc-macos-x64.zip`。
+   **Intel Mac 跑不起来**。所以支持两个架构：`macos-latest` → `tonicuisc-macos-arm64.dmg`，
+   `macos-13` → `tonicuisc-macos-x64.dmg`。
    **Intel 那条默认不跑**（手动触发时勾 `intel` 才跑）：`macos-13` 容量紧张——实测排了一个多小时
    还在队列里，而 `needs: build` 要等**全部**矩阵腿，它会把挂包那步一起卡死。
    勾了 intel 就接受「挂包要等它」这个代价。
 2. **成本**：macOS runner 计费是 Linux 的 10 倍，全平台 matrix 跑一次要 40 分钟。改客户端时
    只想验证 macOS，用 `workflow_dispatch` 手动触发这个就够了。
-3. 产物用 **`ditto`** 打包而不是 `zip`：`.app` 里有符号链接，`ditto` 才能保住链接和签名；
-   构建完还会 `lipo -archs` 校验**产物名写的架构是不是真的在里面**。
+3. 产物是 **DMG**：里面是 `tonicuisc.app` + 指向 `/Applications` 的快捷方式，拖进去就是安装。
+   打包前会做一次 **ad-hoc 签名**（保留沙盒/网络 entitlements），再用 `lipo -archs` 校验
+   **产物名写的架构是不是真的在里面**。
 
 触发方式与产物：
 
 | 触发 | 行为 |
 | --- | --- |
+| 推送 `main` / `master` | **只构建 macOS arm64**，只出 artifact，不建 Release |
 | `Build` 成功之后（`workflow_run`） | 自动接上：构建 arm64 并**挂到 Release** |
 | 手动 `workflow_dispatch` | 只出 artifact；勾 `publish` 才挂 Release，勾 `intel` 才出 x64 |
-| 推送 `v*` tag | 自动构建 + 挂到 Release |
+| 推送 `v*` tag | `build.yml` 全平台构建，macOS 由 `workflow_run` 接上并挂 Release |
 
 > 为什么用 `workflow_run` 而不是 `push: tags`：Release 是 `build.yml` 用 **GITHUB_TOKEN**
 > 建的 tag，GitHub 规定「GITHUB_TOKEN 触发的事件不会再触发别的 workflow」，
 > 所以 `push: tags` **根本不会响**（实测：一次都没被触发）。`workflow_run` 不受这条限制，
 > 而且它在 `Build` **完全跑完**后才启动，天然不会和建 Release 抢。
 
-**未签名 + Gatekeeper**：产物没有开发者签名，用浏览器下载后 macOS 会拦（提示「已损坏，无法打开」）。
+**ad-hoc 签名 + Gatekeeper**：CI 会做一次 ad-hoc 签名（不需要 Apple 开发者账号），但没有 Apple
+公证，用浏览器下载后 macOS 仍会拦（可能提示「已损坏，无法打开」）。
 装好后执行一次即可（workflow 的 Summary 里也会打印这段）：
 
 ```bash
@@ -761,6 +765,10 @@ xattr -dr com.apple.quarantine /Applications/tonicuisc.app
 ```
 
 或者右键 App → 打开 → 弹窗里再点「打开」。要彻底不弹，得买 Apple Developer 账号做签名 + 公证。
+
+Windows 安装包用 **Inno Setup** 生成：装到 `Program Files\Tonicuisc`，带开始菜单快捷方式、
+可选桌面快捷方式和卸载项；没有代码签名证书，首次运行可能弹 SmartScreen，点「更多信息 → 仍要运行」即可。
+不想安装也可以下 `tonicuisc-windows-x64-portable.zip` 直接解压运行。
 
 版本号：`tool/apply_version.py` 从 **tag 或提交标题**里取 `v0.0.7` / `v0.1.0` / `v1.0.0`，后面跟 `fix` 也认（`v0.0.7fix`），写两处：
 
@@ -771,10 +779,12 @@ xattr -dr com.apple.quarantine /Applications/tonicuisc.app
 
 Release 命名：**标题 = 提交标题**（`run-name` 也是），**标签 = 提交标题里的 `v0.0.x`**。没写版本号时依次回退：推送的 tag → 手动输入 → `app/pubspec.yaml`。重复同一版本会更新标题并覆盖同名产物，不需要手动打 tag。
 
-产物：`tonicuisc-windows-x64.zip`、`tonicuisc-linux-x64.tar.gz`、`tonicuisc-macos-arm64.zip`、`tonicuisc-macos-x64.zip`、`tonicuisc-ios-unsigned.ipa`。
+产物：`tonicuisc-windows-x64-setup.exe`（安装包）、`tonicuisc-windows-x64-portable.zip`、
+`tonicuisc-linux-x64.tar.gz`、`tonicuisc-macos-arm64.dmg`、`tonicuisc-macos-x64.dmg`、`tonicuisc-ios-unsigned.ipa`。
 
-> `build.yml` 建 Release 时先挂 Windows / Linux / iOS 三个包，macOS 那两个由 `macos.yml`
-> 在自己跑完后补上去（workflow 之间不能互相 `needs`，所以两边都用了「没有就建、有就改」的幂等写法）。
+> `build.yml` 建 Release 时先挂 Windows / Linux / iOS 三个平台的包，macOS 那两个 DMG 由
+> `macos.yml` 在自己跑完后补上去（workflow 之间不能互相 `needs`，所以两边都用了
+> 「没有就建、有就改」的幂等写法）。
 
 iOS 产物为未签名 `.ipa`，安装需要自行用 Xcode 重签。
 
