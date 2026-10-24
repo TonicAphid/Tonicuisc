@@ -721,11 +721,12 @@ python -m tonicuisc_server                        # 现在直接是 https://192.
 
 - **`server-ci.yml`**：安装依赖 → `compileall` → 模块 import 检查 → `pytest`（232 个用例，不联网、不需要 musicdl）。
 - **`build.yml`**：
-  1. 只在 **tag（`v*`）和手动触发**时跑全平台；普通分支 push 不触发，改由 `macos.yml` 只构建 macOS；
-  2. `静态检查` job 先跑 `flutter analyze` + `flutter test`；
-  3. `Windows / Linux / iOS` **`needs: analyze`**，静态检查过了才开始烧构建时间（出错 1 分钟就能拿到反馈，不会几个平台白跑）；
+  1. 每个分支 push 都会进来，但先跑一个很便宜的 `gate`：**手动触发 / tag / 提交标题里带 `vX.Y.Z`** 才跑全平台；
+     普通 push 只跑静态检查，然后再由 `macos.yml` 接上 macOS；
+  2. `静态检查` job 跑 `flutter analyze` + `flutter test`（普通 push 也跑，保证质量）；
+  3. `Windows / Linux / iOS` 需要 `gate.full == true` 且 `needs: analyze`，静态检查过了才开始烧构建时间；
   4. Flutter 版本固定在 `env.FLUTTER_VERSION`（固定版本缓存才会命中，否则每次都要重新保存 1GB+ 缓存）；
-  5. 全部成功后由 `发布 Release` job 汇总产物上传到 GitHub Release。
+  5. 全平台构建成功后由 `发布 Release` job 汇总产物上传到 GitHub Release。
 - **`macos.yml`**（macOS 单独构建）：见下。
 
 ### 为什么 macOS 单独一个 workflow
@@ -746,9 +747,10 @@ python -m tonicuisc_server                        # 现在直接是 https://192.
 
 | 触发 | 行为 |
 | --- | --- |
-| 推送 `main` / `master` | **只构建 macOS arm64**，只出 artifact，不建 Release |
-| `Build` 成功之后（`workflow_run`） | 自动接上：构建 arm64 并**挂到 Release** |
-| 手动 `workflow_dispatch` | 只出 artifact；勾 `publish` 才挂 Release，勾 `intel` 才出 x64 |
+| 普通 push `main` / `master` | 只跑静态检查 + **macOS arm64**，只出 artifact，不建 Release |
+| 提交标题带 `vX.Y.Z` 的 push | **全平台构建 + Release**，macOS 由 `workflow_run` 接上并挂 DMG |
+| `Build` 成功之后（`workflow_run`） | 自动接上 macOS；有 Release 才上传，普通 push 只保留 artifact |
+| 手动 `workflow_dispatch` | 手动跑 `Build` 是全平台；手动跑 `macOS Build` 只出 macOS，勾 `publish` 才挂 Release，勾 `intel` 才出 x64 |
 | 推送 `v*` tag | `build.yml` 全平台构建，macOS 由 `workflow_run` 接上并挂 Release |
 
 > 为什么用 `workflow_run` 而不是 `push: tags`：Release 是 `build.yml` 用 **GITHUB_TOKEN**

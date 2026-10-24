@@ -14,12 +14,9 @@ name: macOS Build
 run-name: macOS · ${{ github.event.head_commit.message || github.ref_name }}
 
 on:
-  # 分支 push 只构建 macOS：Windows/Linux/iOS 的全量构建留给 tag 和手动触发
-  # （build.yml 不再响应分支 push）。这样改 macOS 时不会白烧另外三个平台。
-  push:
-    branches: [main, master]
-  #
-  # Build 跑完且成功之后自动接上：tag / 手动全平台构建时，macOS 通过这里出包并挂 Release。
+  # 不要直接监听分支 push：每个 push 都会触发 Build，Build 里的 gate 决定
+  # 是否全平台；Build 跑完后由下面的 workflow_run 接上 macOS。这样普通 push
+  # 只会出 macOS，版本提交/tag/手动触发则会全平台 + macOS。
   #
   # 为什么必须用 workflow_run 而不是 push: tags：
   #   Release 是 build.yml 用 GITHUB_TOKEN 建的 tag，而 GitHub 规定
@@ -273,6 +270,16 @@ jobs:
           TAG: ${{ steps.version.outputs.tag }}
           TITLE: ${{ steps.version.outputs.title }}
         run: |
+          # 普通 push 的 Build 只跑了 gate + 静态检查，不会建 Release；
+          # 这种情况只保留 artifact，别在 Release 列表里建出一个 "main"。
+          # 手动跑 macOS 并勾了 publish 时仍然允许新建。
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            if [ "${{ github.event_name }}" = "workflow_run" ] && [ "${{ inputs.publish }}" != "true" ]; then
+              echo "触发本次构建的 Build 没有创建 Release（普通 push），跳过上传。"
+              exit 0
+            fi
+          fi
+
           # build.yml 的 Release job 可能同时在跑：谁先到谁建，另一个重试即可
           for attempt in 1 2 3 4 5; do
             if gh release view "$TAG" >/dev/null 2>&1; then
