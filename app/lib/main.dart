@@ -6,6 +6,7 @@ import 'package:just_audio_media_kit/just_audio_media_kit.dart';
 
 import 'app/app.dart';
 import 'core/self_signed.dart';
+import 'core/temp_dir.dart';
 
 /// 入口：只做「平台相关的初始化」，界面本身在 `app/app.dart`。
 Future<void> main() async {
@@ -15,6 +16,11 @@ Future<void> main() async {
   // 公网域名走 Let's Encrypt，用不到它。
   SelfSignedOverrides.allow = await loadAllowSelfSigned();
   HttpOverrides.global = SelfSignedOverrides();
+
+  // media_kit 的 Debug 版要往 %TEMP% 写一个指针文件；写不进去会**卡死播放器创建**
+  // （界面永远转圈、无声音、无报错，详见 core/temp_dir.dart）。先探一次，
+  // 出问题时至少日志和错误提示里说得清楚。
+  await TempDirCheck.probe();
 
   // Windows / Linux 上 just_audio 需要 media_kit 作为后端。
   if (Platform.isWindows || Platform.isLinux) {

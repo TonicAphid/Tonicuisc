@@ -19,10 +19,16 @@ import requests
 
 from ..core.constants import AUDIO_SUFFIXES, SEARCH_RESIDUE_MAX_AGE, USER_AGENT
 from ..core.errors import DownloadFailed
+from ..core.logging import download_log
 from ..core.text import clean
 
 if TYPE_CHECKING:
     from ..storage import Storage
+
+
+def _megabytes(value: float) -> str:
+    """字节（或字节/秒）→ 保留一位小数的 MB。"""
+    return f"{value / (1024 * 1024):.1f}"
 
 
 class DownloadMixin:
@@ -165,28 +171,48 @@ class DownloadMixin:
             legacy = self._legacy_path(song)
             if legacy is not None and legacy.exists() and legacy.stat().st_size > 0:
                 return self._promote(legacy, target)
-            downloaded: list[Any] = []
-            last_error: Exception | None = None
-            for attempt in range(2):
-                try:
-                    downloaded = self.client.download(song_infos=[song]) or []
-                    last_error = None
-                except Exception as exc:  # 网络 / 音源侧失败
-                    downloaded, last_error = [], exc
-                # 找到能用的文件就收工；找不到（含 musicdl **静默返回空列表**）
-                # 也走一次「换直链再试」——以前只有抛异常才重试
-                for candidate in [*downloaded, song]:
-                    candidate_path = self._legacy_path(candidate)
-                    if candidate_path is not None and candidate_path.exists() and candidate_path.stat().st_size > 0:
-                        return self._promote(candidate_path, target)
-                refreshed = self._refresh(song)  # 直链过期就换一条再试
-                if attempt == 0 and refreshed is not song:
-                    song = refreshed
-                    continue
-                break
-            if last_error is not None:
-                raise DownloadFailed(str(last_error)) from last_error
-            raise DownloadFailed("下载失败：音源未返回可用文件")
+
+            name = clean(getattr(song, "song_name", "") or "") or item_id
+            started = time.perf_counter()
+            download_log(f"{name} 开始下载（{item_id}）")
+            try:
+                path = self._download_once(song, target)
+            except Exception as exc:
+                download_log(f"{name} 下载失败：{exc}")
+                raise
+            size = path.stat().st_size if path.exists() else 0
+            elapsed = max(time.perf_counter() - started, 0.001)
+            download_log(
+                f"{name} 下载完成 {_megabytes(size)} MB / {elapsed:.1f}s（{_megabytes(size / elapsed)} MB/s）"
+            )
+            return path
+
+    def _download_once(self, song: Any, target: Path) -> Path:
+        """真正去 musicdl 取文件（``ensure_file`` 负责日志 / 锁 / 缓存命中）。"""
+        last_error: Exception | None = None
+        for attempt in range(2):
+            try:
+                # musicdl 的 download() 里写死了 rich 进度条，先换成空实现，
+                # 日志统一由 [download] 那几行说明（见 core/logging.py）。
+                self.silence_progress()  # type: ignore[attr-defined]  # 宿主（SourceMixin）提供
+                downloaded = self.client.download(song_infos=[song]) or []
+                last_error = None
+            except Exception as exc:  # 网络 / 音源侧失败
+                downloaded, last_error = [], exc
+            # 找到能用的文件就收工；找不到（含 musicdl **静默返回空列表**）
+            # 也走一次「换直链再试」——以前只有抛异常才重试
+            for candidate in [*downloaded, song]:
+                candidate_path = self._legacy_path(candidate)
+                if candidate_path is not None and candidate_path.exists() and candidate_path.stat().st_size > 0:
+                    return self._promote(candidate_path, target)
+            refreshed = self._refresh(song)  # 直链过期就换一条再试
+            if attempt == 0 and refreshed is not song:
+                song = refreshed
+                continue
+            break
+        if last_error is not None:
+            raise DownloadFailed(str(last_error)) from last_error
+        raise DownloadFailed("下载失败：音源未返回可用文件")
 
     def cached_file(self, item_id: str) -> Path | None:
         """已经下载好的文件就返回路径，否则返回 None（不会再触发下载）。"""
@@ -232,10 +258,19 @@ class DownloadMixin:
         # 共用一个 .part 会把字节交错写坏缓存
         return response, target, target.with_name(f"{target.name}.{uuid.uuid4().hex[:8]}.part")
 
-    def _open_url(self, song: Any, url: str) -> Any:
+    def _open_url(
+        self,
+        song: Any,
+        url: str,
+        *,
+        timeout: tuple[float, float] = (10, 30),
+        extra_headers: dict[str, str] | None = None,
+    ) -> Any:
         headers = {str(k): str(v) for k, v in dict(getattr(song, "default_download_headers", None) or {}).items()}
+        if extra_headers:
+            headers.update(extra_headers)
         cookies = dict(getattr(song, "default_download_cookies", None) or {})
-        kwargs: dict[str, Any] = {"stream": True, "timeout": (10, 30)}
+        kwargs: dict[str, Any] = {"stream": True, "timeout": timeout}
         if headers:
             kwargs["headers"] = headers
         if cookies:
@@ -244,9 +279,30 @@ class DownloadMixin:
         if source_client is not None and hasattr(source_client, "get"):
             response = source_client.get(url, **kwargs)
         else:  # 兜底：至少带上 UA
-            response = requests.get(url, stream=True, timeout=(10, 30), headers=headers or {"User-Agent": USER_AGENT})
+            response = requests.get(url, stream=True, timeout=timeout, headers=headers or {"User-Agent": USER_AGENT})
         response.raise_for_status()
         return response
+
+    def url_alive(self, song: Any, url: str, *, timeout: tuple[float, float] = (4.0, 6.0)) -> str | None:
+        """探一下直链现在还能不能用；能用返回 ``None``，否则返回原因。
+
+        为什么要探：``/api/url`` 返回的是**搜索那一刻**缓存下来的 CDN 直链，酷我的
+        链接带时效，过一会儿就是 403。客户端拿到这种链接交给播放器，表现是
+        「一点声音都没有」——播放器的错误事件在部分后端上会被吞掉（见
+        `player_controller.dart` 的看门狗注释），所以必须在服务端先验一次。
+
+        只取 1 个字节（``Range: bytes=0-1``），拿到响应头就断开，代价很小。
+        """
+        if not isinstance(url, str) or not url.startswith("http"):
+            return "没有可用直链"
+        try:
+            response = self._open_url(song, url, timeout=timeout, extra_headers={"Range": "bytes=0-1"})
+        except Exception as exc:
+            return str(exc) or exc.__class__.__name__
+        try:
+            return None
+        finally:
+            response.close()
 
     def relay(self, response: Any, target: Path, temp_path: Path, chunk_size: int = 512 * 1024) -> Iterator[bytes]:
         """边吐给播放器边写缓存；中断就丢掉半截文件，不污染缓存。"""

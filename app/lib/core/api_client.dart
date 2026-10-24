@@ -204,6 +204,43 @@ class ApiClient {
     return DirectSource(url, headers);
   }
 
+  /// 试一下直链现在还能不能用：只请求 1 个字节，拿到响应头就断开。
+  ///
+  /// 为什么必须验：`/api/url` 给的是服务端缓存下来的 CDN 直链，可能早就过期；
+  /// 而把过期链接直接丢给播放器时，Windows 的 media_kit 后端会把错误**吞掉**
+  /// ——没有异常、没有声音，也不会走 [streamUri] 回退（见 player_controller 的看门狗）。
+  /// 在这里先失败，就能干净地回退。
+  ///
+  /// 走的是 `dart:io` 的 [HttpClient]，所以双栈 / 自签证书那套全局设置照样生效。
+  Future<void> verifyDirect(
+    DirectSource source, {
+    Duration timeout = const Duration(seconds: 4),
+  }) async {
+    final uri = Uri.tryParse(source.url);
+    if (uri == null || !uri.hasScheme) {
+      throw ApiException('直链格式不对');
+    }
+    final client = HttpClient()..connectionTimeout = timeout;
+    try {
+      final request = await client.getUrl(uri).timeout(timeout);
+      source.headers.forEach((key, value) {
+        try {
+          request.headers.set(key, value);
+        } catch (_) {
+          // 少数头（Host / Content-Length 之类）不让手动设，跳过就好
+        }
+      });
+      request.headers.set(HttpHeaders.rangeHeader, 'bytes=0-1');
+      final response = await request.close().timeout(timeout);
+      if (response.statusCode >= 400) {
+        throw ApiException('直链返回 ${response.statusCode}');
+      }
+    } finally {
+      // 不读 body：有的 CDN 不认 Range，会直接推整首；force 关掉比拉完整首歌快
+      client.close(force: true);
+    }
+  }
+
   Future<String> downloadTo(Song song, Directory dir) async {
     final resp = await http.get(downloadUri(song.id), headers: _headers).timeout(const Duration(minutes: 15));
     if (resp.statusCode != 200) {

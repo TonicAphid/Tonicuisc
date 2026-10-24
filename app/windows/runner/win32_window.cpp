@@ -208,7 +208,12 @@ Win32Window::MessageHandler(HWND hwnd,
     }
 
     case WM_ACTIVATE:
-      if (child_content_ != nullptr) {
+      // ⚠️ 只在窗口**获得**激活时把焦点交回 Flutter 的子窗口。
+      // 模板原来的写法不看 wparam：窗口被别的程序抢走激活时也强行 SetFocus 回来。
+      // 第三方输入法的候选窗 / 皮肤窗会短暂激活自己（甚至和宿主同线程），
+      // 于是就变成「SetFocus 回子窗口 → 引擎收到 WM_KILLFOCUS → 结束文本输入会话」，
+      // 组字打到一半被掐断，表现正是「第一个字母上屏后输入法就不动了，得再点一次」。
+      if (LOWORD(wparam) != WA_INACTIVE && child_content_ != nullptr) {
         SetFocus(child_content_);
       }
       return 0;

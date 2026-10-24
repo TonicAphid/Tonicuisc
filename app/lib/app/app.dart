@@ -1,4 +1,5 @@
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 
 import 'legacy_material_host.dart';
@@ -32,19 +33,24 @@ class TonicuiscApp extends StatelessWidget {
       // `WidgetsApp` 外面，整个 Navigator 都在它下面，页面里取到的是对的。
       builder: (context, child) {
         final dark = MediaQuery.platformBrightnessOf(context) == Brightness.dark;
+        final host = LegacyMaterialHost(
+          brightness: dark ? Brightness.dark : Brightness.light,
+          child: child ?? const SizedBox.shrink(),
+        );
+        // 「点空白处收起键盘」只在手机上需要：桌面端 `EditableText` 自带的
+        // `onTapOutside` 已经处理了（Windows 上多包一层反而会和第三方输入法抢焦点）。
+        final mobile = defaultTargetPlatform == TargetPlatform.iOS ||
+            defaultTargetPlatform == TargetPlatform.android;
         return CupertinoTheme(
           data: dark ? AppTheme.dark : AppTheme.light,
           // TODO(迁移): 页面全部迁到 Cupertino 后，这层过渡壳和 legacy_material_host.dart 一起删
-          child: GestureDetector(
-            // iOS 上点空白处收起键盘：TextField 默认只在点自己时才处理焦点，
-            // 外层补一个 translucent 的 tap 识别器，点到列表/空白就 unfocus。
-            behavior: HitTestBehavior.translucent,
-            onTap: () => FocusManager.instance.primaryFocus?.unfocus(),
-            child: LegacyMaterialHost(
-              brightness: dark ? Brightness.dark : Brightness.light,
-              child: child ?? const SizedBox.shrink(),
-            ),
-          ),
+          child: mobile
+              ? GestureDetector(
+                  behavior: HitTestBehavior.translucent,
+                  onTap: () => FocusManager.instance.primaryFocus?.unfocus(),
+                  child: host,
+                )
+              : host,
         );
       },
       home: const MainShell(),

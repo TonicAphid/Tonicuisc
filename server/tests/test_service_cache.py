@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from conftest import make_storage
-from tonicuisc_server.services import SEARCH_RESIDUE_MAX_AGE, MusicService
+from tonicuisc_server.services import SEARCH_RESIDUE_MAX_AGE, DownloadFailed, MusicService
 
 
 @pytest.fixture()
@@ -154,3 +154,45 @@ def test_cached_file_returns_none_when_missing(service: MusicService) -> None:
     )
     service._songs["MiguMusicClient:404"] = (song, time.time() + 60)
     assert service.cached_file("MiguMusicClient:404") is None
+
+def _song(name: str, url: str, *, identifier: str = "1") -> SimpleNamespace:
+    return SimpleNamespace(
+        source="KuwoMusicClient",
+        identifier=identifier,
+        song_name=name,
+        ext="mp3",
+        download_url=url,
+        default_download_headers={"user-agent": "test"},
+        default_download_cookies=None,
+    )
+
+
+def test_direct_url_returns_link_when_alive(service: MusicService) -> None:
+    song = _song("活着的歌", "https://cdn.example.com/a.mp3")
+    service.get_song = lambda item_id: song
+    service.url_alive = lambda target, url, **kwargs: None
+
+    result = service.direct_url("KuwoMusicClient:1")
+
+    assert result["url"] == "https://cdn.example.com/a.mp3"
+    assert result["headers"] == {"user-agent": "test"}
+
+
+def test_direct_url_refreshes_when_cached_link_is_stale(service: MusicService) -> None:
+    stale = _song("过期的歌", "https://cdn.example.com/old.mp3")
+    fresh = _song("过期的歌", "https://cdn.example.com/new.mp3")
+    service.get_song = lambda item_id: stale
+    service._refresh = lambda song: fresh
+    service.url_alive = lambda target, url, **kwargs: None if url.endswith("new.mp3") else "HTTP 403"
+
+    assert service.direct_url("KuwoMusicClient:1")["url"].endswith("new.mp3")
+
+
+def test_direct_url_gives_up_when_refresh_does_not_help(service: MusicService) -> None:
+    stale = _song("还是过期的歌", "https://cdn.example.com/old.mp3")
+    service.get_song = lambda item_id: stale
+    service._refresh = lambda song: stale
+    service.url_alive = lambda target, url, **kwargs: "HTTP 403"
+
+    with pytest.raises(DownloadFailed):
+        service.direct_url("KuwoMusicClient:1")

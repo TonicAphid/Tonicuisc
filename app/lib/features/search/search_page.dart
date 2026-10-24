@@ -5,6 +5,7 @@ import 'package:flutter/cupertino.dart';
 
 import '../../core/api_client.dart';
 import '../../core/download_target.dart';
+import '../../core/ime_debug.dart';
 import '../../models/song.dart';
 import '../player/player_controller.dart';
 import '../../shared/cover_cache.dart';
@@ -42,6 +43,9 @@ class _SearchPageState extends State<SearchPage> {
 
   final TextEditingController _keyword = TextEditingController();
   final ScrollController _scroll = ScrollController();
+  // 自己拿焦点节点（不依赖 CupertinoSearchTextField 内部那个）：输入法排查要能看到
+  // 「焦点什么时候丢的」，顺便以后要「搜索完自动收起键盘」也有地方下手。
+  final FocusNode _focus = FocusNode(debugLabel: 'search');
 
   List<Song> _results = const [];
 
@@ -64,12 +68,16 @@ class _SearchPageState extends State<SearchPage> {
   void initState() {
     super.initState();
     _scroll.addListener(_onScroll);
+    // Debug 构建里记录每一次文本 / 组字范围变化（Release 是空操作），
+    // 用来判断「只能输入一个字」是引擎没收到组字消息，还是组字被中途打断。
+    watchIme(_keyword, 'search', focus: _focus);
   }
 
   @override
   void dispose() {
     _scroll.dispose();
     _keyword.dispose();
+    _focus.dispose();
     super.dispose();
   }
 
@@ -237,6 +245,7 @@ class _SearchPageState extends State<SearchPage> {
           Expanded(
             child: CupertinoSearchTextField(
               controller: _keyword,
+              focusNode: _focus,
               placeholder: '搜索歌曲 / 歌手',
               onSubmitted: (_) => _search(),
             ),

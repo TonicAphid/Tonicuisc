@@ -145,11 +145,6 @@ jobs:
         shell: pwsh
         run: ./tool/apply_patches.ps1
 
-      - name: 修复 Windows 第三方输入法（IME 上下文）
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: python tool/patch_windows_ime.py
-
       - name: 应用原生补丁（Linux）
         if: runner.os != 'Windows'
         run: bash ./tool/apply_patches.sh

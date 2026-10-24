@@ -27,6 +27,7 @@ from ..core.constants import (  # noqa: F401 - compat re-export, api/tests use t
     USER_AGENT,
 )
 from ..core.errors import DownloadFailed, SongNotFound  # noqa: F401
+from ..core.logging import timing_log
 from ..core.text import clean  # noqa: F401
 from ..lyrics import LyricService
 from .song_item import song_to_item  # noqa: F401
@@ -160,9 +161,15 @@ class MusicService(SourceMixin, SearchMixin, ArtworkMixin, DownloadMixin):
         song = self.get_song(item_id)
         # 从 Redis 重建出来的 payload 可能缺字段（老数据 / 手工写过），一律取不到就当没有，
         # 不能直接属性访问抛 AttributeError → 500
-        url = getattr(song, "download_url", None)
-        if not isinstance(url, str) or not url.startswith("http"):
-            raise DownloadFailed("该歌曲没有可直接播放的链接")
+        url, problem = self._usable_url(song)
+        if problem is not None:
+            # 缓存里的直链过期了：重搜这一首换条新的，再验一次
+            refreshed = self._refresh(song)
+            if refreshed is not song:
+                song = refreshed
+                url, problem = self._usable_url(song)
+        if problem is not None or not isinstance(url, str):
+            raise DownloadFailed(f"直链不可用（{problem or '未知原因'}），请改用中转播放")
         headers = {str(k): str(v) for k, v in dict(getattr(song, "default_download_headers", None) or {}).items()}
         cookies = dict(getattr(song, "default_download_cookies", None) or {})
         if cookies:
@@ -172,3 +179,16 @@ class MusicService(SourceMixin, SearchMixin, ArtworkMixin, DownloadMixin):
             "headers": headers,
             "ext": clean(getattr(song, "ext", "") or "").lstrip("."),
         }
+
+    def _usable_url(self, song: Any) -> tuple[str | None, str | None]:
+        """返回 (直链, 不可用原因)。不可用时原因不为 None。"""
+        url = getattr(song, "download_url", None)
+        if not isinstance(url, str) or not url.startswith("http"):
+            return None, "该歌曲没有可直接播放的链接"
+        problem = self.url_alive(song, url)
+        if problem is not None:
+            timing_log(
+                f"直链失效，准备重搜: {clean(getattr(song, 'song_name', '') or '')}（{problem[:120]}）"
+            )
+            return url, problem
+        return url, None

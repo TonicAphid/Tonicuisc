@@ -168,7 +168,7 @@ class _ProfilePageState extends State<ProfilePage> {
           context: context,
           builder: (context) => AlertDialog(
             title: const Text('已是最新版本'),
-            content: Text('当前 $kAppVersion（build $kAppBuild）'),
+            content: const Text('当前 $kAppVersion（build $kAppBuild）'),
             actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text('好'))],
           ),
         );
@@ -202,7 +202,7 @@ class _ProfilePageState extends State<ProfilePage> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('当前 $kAppVersion（build $kAppBuild）'),
+                  const Text('当前 $kAppVersion（build $kAppBuild）'),
                   if (name.isNotEmpty) ...[
                     const SizedBox(height: 6),
                     Text('安装包：$name', style: const TextStyle(fontSize: 12)),

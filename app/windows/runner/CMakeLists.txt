@@ -34,8 +34,11 @@ target_compile_definitions(${BINARY_NAME} PRIVATE "NOMINMAX")
 # dependencies here.
 target_link_libraries(${BINARY_NAME} PRIVATE flutter flutter_wrapper_app)
 target_link_libraries(${BINARY_NAME} PRIVATE "dwmapi.lib")
-target_link_libraries(${BINARY_NAME} PRIVATE "imm32.lib")
 target_include_directories(${BINARY_NAME} PRIVATE "${CMAKE_SOURCE_DIR}")
+
+# 源码里有中文注释：不告诉 MSVC 源文件是 UTF-8，它按 GBK(936) 猜，
+# 猜不动的字节会变成 C4819 警告，而 runner 开了 /WX（警告=错误）→ 直接编译失败。
+target_compile_options(${BINARY_NAME} PRIVATE "/utf-8")
 
 # Run the Flutter tool portions of the build. This must not be removed.
 add_dependencies(${BINARY_NAME} flutter_assemble)

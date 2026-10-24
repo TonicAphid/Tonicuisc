@@ -97,12 +97,12 @@ void main() {
   });
 
   test('逐字进度按行内时间线性计算（进度条式填充）', () {
-    final line = LyricLine(
+    const line = LyricLine(
       Duration.zero,
       '晴天',
       words: [
-        LyricWord(start: Duration.zero, end: const Duration(milliseconds: 500), text: '晴'),
-        LyricWord(start: const Duration(milliseconds: 500), end: const Duration(seconds: 1), text: '天'),
+        LyricWord(start: Duration.zero, end: Duration(milliseconds: 500), text: '晴'),
+        LyricWord(start: Duration(milliseconds: 500), end: Duration(seconds: 1), text: '天'),
       ],
     );
 
@@ -113,12 +113,12 @@ void main() {
   });
 
   test('扫速按每个字的时间差算，不是整行匀速', () {
-    final line = LyricLine(
+    const line = LyricLine(
       Duration.zero,
       '晴天',
       words: [
-        LyricWord(start: Duration.zero, end: const Duration(milliseconds: 900), text: '晴'),
-        LyricWord(start: const Duration(milliseconds: 900), end: const Duration(seconds: 1), text: '天'),
+        LyricWord(start: Duration.zero, end: Duration(milliseconds: 900), text: '晴'),
+        LyricWord(start: Duration(milliseconds: 900), end: Duration(seconds: 1), text: '天'),
       ],
     );
 
@@ -129,12 +129,12 @@ void main() {
   });
 
   test('字与字之间的空隙停住不扫', () {
-    final line = LyricLine(
+    const line = LyricLine(
       Duration.zero,
       '晴天',
       words: [
-        LyricWord(start: Duration.zero, end: const Duration(milliseconds: 400), text: '晴'),
-        LyricWord(start: const Duration(milliseconds: 800), end: const Duration(seconds: 1), text: '天'),
+        LyricWord(start: Duration.zero, end: Duration(milliseconds: 400), text: '晴'),
+        LyricWord(start: Duration(milliseconds: 800), end: Duration(seconds: 1), text: '天'),
       ],
     );
 
@@ -142,7 +142,7 @@ void main() {
   });
 
   test('没有逐字时间轴时按整行时间计算进度', () {
-    final line = LyricLine(const Duration(seconds: 2), '普通歌词');
+    const line = LyricLine(Duration(seconds: 2), '普通歌词');
 
     expect(line.progressAt(const Duration(seconds: 1)), 0.0);
     expect(line.progressAt(const Duration(seconds: 2)), 1.0);

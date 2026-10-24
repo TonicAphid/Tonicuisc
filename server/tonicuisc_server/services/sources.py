@@ -5,13 +5,126 @@ musicdl 是懒加载的，这样没装 musicdl 时 ``/api/health`` 也能用。
 
 from __future__ import annotations
 
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 from ..core.config import SETTINGS, resolve_sources
 from ..core.logging import timing_log
+
+
+class _SilentProgress:
+    """``rich.progress.Progress`` 的空实现。
+
+    musicdl 的 ``download()`` 里写死了 ``with Progress(...) as progress``，**没有**
+    参数能关掉它，于是日志里会冒出::
+
+        KuwoMusicClient.download >>> Completed (1/1) SongInfos ━━━ 100% 1/1 audios
+        KuwoMusicClient._download >>> 生僻字 (Success) ━━━ 100% 25.8/25.8 MB ...
+
+    这些把本项目自己的 ``[timing]`` / ``[access]`` / ``[download]`` 日志冲得看不见。
+    这里把 musicdl 模块里的 ``Progress`` 换成一个不画任何东西、但接口够它用的替代品
+    （``add_task`` / ``update`` / ``advance`` / ``tasks`` / 上下文管理器）。
+
+    只替换 musicdl 模块里的符号，不动 ``rich`` 本身——本项目自己的
+    ``_quiet_progress()`` 还是真的 ``Progress(disable=True)``。
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        self.tasks: list[Any] = []
+        self._lock = threading.Lock()
+
+    def __enter__(self) -> _SilentProgress:
+        return self
+
+    def __exit__(self, *exc: Any) -> bool:
+        return False
+
+    def start(self) -> None:
+        pass
+
+    def stop(self) -> None:
+        pass
+
+    def refresh(self) -> None:
+        pass
+
+    def add_task(self, description: str = "", total: int | None = None, **fields: Any) -> int:
+        with self._lock:
+            self.tasks.append(
+                SimpleNamespace(description=description, total=total, completed=0, fields=dict(fields))
+            )
+            return len(self.tasks) - 1
+
+    def _task(self, task_id: int) -> Any | None:
+        with self._lock:
+            if 0 <= task_id < len(self.tasks):
+                return self.tasks[task_id]
+        return None
+
+    def update(
+        self,
+        task_id: int,
+        *,
+        total: int | None = None,
+        completed: int | None = None,
+        advance: int | None = None,
+        description: str | None = None,
+        **fields: Any,
+    ) -> None:
+        task = self._task(task_id)
+        if task is None:
+            return
+        if total is not None:
+            task.total = total
+        if description is not None:
+            task.description = description
+        if advance is not None:
+            task.completed += advance
+        if completed is not None:
+            task.completed = completed
+        if fields:
+            task.fields.update(fields)
+
+    def advance(self, task_id: int, advance: int = 1) -> None:
+        task = self._task(task_id)
+        if task is not None:
+            task.completed += advance
+
+    def reset(self, task_id: int = 0, total: int | None = None, completed: int = 0, **fields: Any) -> None:
+        task = self._task(task_id)
+        if task is None:
+            return
+        if total is not None:
+            task.total = total
+        task.completed = completed
+        if fields:
+            task.fields.update(fields)
+
+    def remove_task(self, task_id: int) -> None:
+        with self._lock:
+            if 0 <= task_id < len(self.tasks):
+                self.tasks[task_id] = SimpleNamespace(description="", total=0, completed=0, fields={})
+
+
+def silence_musicdl_progress() -> None:
+    """把已经导入的 musicdl 模块里的 ``Progress`` 换成 [_SilentProgress]。
+
+    每次调用都扫一遍 ``sys.modules``（而不是只做一次）：musicdl 的音源模块是懒加载的，
+    创建 client 之后还可能再导入新的模块。
+    """
+    for name, module in list(sys.modules.items()):
+        if name != "musicdl" and not name.startswith("musicdl."):
+            continue
+        if getattr(module, "Progress", None) is None:
+            continue
+        try:
+            module.Progress = _SilentProgress
+        except Exception:  # pragma: no cover - 只读模块之类的极端情况
+            continue
 
 
 def _empty_song(source: str) -> Any:
@@ -102,7 +215,20 @@ class SourceMixin:
                         _prefer_official_parser(source_client)
                     except Exception as exc:  # 调顺序失败不能影响服务启动
                         timing_log(f"{name}: 解析顺序调整失败（忽略）: {exc}")
+                # client 一建好就把音源模块里的 rich 进度条换掉（search / download 都受影响）
+                silence_musicdl_progress()
             return self._client
+
+    def silence_progress(self) -> None:
+        """关掉 musicdl 自己的 rich 进度条。
+
+        放在公开方法里是因为下载走的是 ``DownloadMixin``：那边调 ``client.download()``
+        之前要再调一次——musicdl 的音源模块可能是在 client 建好之后才懒加载的。
+        """
+        try:
+            silence_musicdl_progress()
+        except Exception:
+            pass
 
     def _quiet_progress(self) -> Any:
         """musicdl 的 search() 会自己建进度条；给它一个禁止渲染的就不会刷屏。"""

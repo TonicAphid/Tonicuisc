@@ -6,6 +6,8 @@ import 'package:just_audio/just_audio.dart';
 import 'package:just_audio_background/just_audio_background.dart';
 
 import '../../core/api_client.dart';
+import '../../core/debug_log.dart';
+import '../../core/temp_dir.dart';
 import '../../models/song.dart';
 import '../../shared/cover_cache.dart';
 
@@ -32,6 +34,8 @@ class PlayerController extends ChangeNotifier {
     // 流回调还可能在 ChangeNotifier 已经销毁之后调 notifyListeners()（debug 下直接断言崩溃）
     _subscriptions.addAll([
       _player.positionStream.listen((value) {
+        // 真的走起来了：把「起播看门狗」撤掉（0 是刚 setAudioSource 后的正常值）
+        if (value > Duration.zero) _watchdog?.cancel();
         _position = value;
         _notify();
       }),
@@ -41,6 +45,9 @@ class PlayerController extends ChangeNotifier {
       }),
       _player.playerStateStream.listen((value) {
         _playing = value.playing;
+        // 卡死时这行日志是唯一能看出「播放器停在哪一步」的东西：
+        // 一直 loading 说明 mpv 还没打开文件；ready 但位置不动说明解码/输出卡住。
+        _log('state=${value.processingState.name} playing=${value.playing}');
         if (value.processingState == ProcessingState.completed) {
           _playing = false;
           unawaited(_handleCompleted());
@@ -68,6 +75,15 @@ class PlayerController extends ChangeNotifier {
   int _generation = 0;
 
   bool _disposed = false;
+  Timer? _watchdog;
+
+  /// 正在从「直连」切到「中转」：期间播放器抛的错别再重复处理一遍。
+  bool _recovering = false;
+
+  /// 装载超时（见 [_load]）：直连是 CDN，12 秒还没回应基本就是死了；
+  /// 中转流要经过隧道 + 家里上行，给到 30 秒。
+  static const Duration _directLoadBudget = Duration(seconds: 12);
+  static const Duration _streamLoadBudget = Duration(seconds: 30);
 
   Duration _position = Duration.zero;
   Duration? _duration;
@@ -119,6 +135,8 @@ class PlayerController extends ChangeNotifier {
     // 一开始播放就触发歌词匹配，不要等用户打开播放页才去搜。
     unawaited(_prefetchLyric(api, song));
     final gen = ++_generation;
+    _watchdog?.cancel();
+    _recovering = false;
     _error = null;
     _duration = null;
     _position = Duration.zero;
@@ -128,7 +146,9 @@ class PlayerController extends ChangeNotifier {
       await _start(song, api);
     } catch (err) {
       if (gen != _generation) return; // 已经被下一次点歌接管，别把上一首的错误报到这一首上
-      _error = '播放失败：$err';
+      _error = err is TimeoutException
+          ? '播放失败：音源${_usingDirect ? '直连' : '中转'}一直没回应，可能是链接失效或网络不通'
+          : '播放失败：$err';
       _playing = false;
       _loading = false;
       _notify();
@@ -139,6 +159,7 @@ class PlayerController extends ChangeNotifier {
     _notify();
     unawaited(_reportPlay(api, song.id)); // 播放历史，失败不影响播放
     _resume();
+    _armWatchdog(gen);
   }
 
   /// 提前让服务端开始匹配增强歌词；拿不到也没关系，播放页打开后会再问。
@@ -160,41 +181,153 @@ class PlayerController extends ChangeNotifier {
   }
 
   Future<void> _start(Song song, ApiClient api) async {
+    // Debug 版 media_kit 一定要能写 %TEMP%，否则**创建播放器就卡死**，
+    // 连装载超时都等不到（卡的是 player 创建，不是装载）。提前失败，给句人话。
+    if (kDebugMode && !TempDirCheck.writable) {
+      throw StateError(
+        '系统临时目录（%TEMP%）不可写，Debug 版播放器会卡死；'
+        '修好目录权限，或改用 Release / 安装包版本',
+      );
+    }
     _fallbackStream = api.streamUri(song.id);
     // 封面和直链一起要：列表页早就在后台查封面了，这里最多再等 600ms。
     // just_audio_background 的 MediaItem 只在 setAudioSource 时取一次，先拿到 QQ 封面
     // 才不会让控制中心锁死酷我原图（之后 UI 换图也带不动它）。
     final coverReady = CoverCache.ensure(api, song);
-    // 直连 CDN：不用等服务端把整首下完，第一次点歌也几乎立刻出声
+    // 直连 CDN：不用等服务端把整首下完，第一次点歌也几乎立刻出声。
+    // 但**必须先验一遍**：过期直链交给播放器时，错误会被后端吞掉（没有声音也没回退）。
+    DirectSource? direct;
     try {
-      final direct = await api.directUrl(song.id);
-      await coverReady;
-      await _player.setAudioSource(
-        AudioSource.uri(Uri.parse(direct.url), headers: direct.headers, tag: _mediaItem(song)),
-      );
-      _usingDirect = true;
-      return;
-    } catch (_) {
-      // 直链不可用（过期 / 需要额外鉴权）时走服务端代理
+      direct = await api.directUrl(song.id);
+      await api.verifyDirect(direct);
+    } catch (err) {
+      _log('直连不可用（$err），改走服务端中转');
+      direct = null;
+    }
+    if (direct != null) {
+      try {
+        await coverReady;
+        await _load(
+          AudioSource.uri(Uri.parse(direct.url), headers: direct.headers, tag: _mediaItem(song)),
+          _directLoadBudget,
+          '直连',
+        );
+        _usingDirect = true;
+        _log('直连 ${Uri.parse(direct.url).host}');
+        return;
+      } catch (err) {
+        _log('直连装载失败（$err），改走服务端中转');
+      }
     }
     // 回退到服务端代理流：必须带上 X-API-Key，否则服务端开着鉴权时就是 401
     await coverReady;
-    await _player.setAudioSource(
+    await _load(
       AudioSource.uri(_fallbackStream!, headers: api.streamHeaders, tag: _mediaItem(song)),
+      _streamLoadBudget,
+      '中转流',
     );
     _usingDirect = false;
+    _log('中转流 ${_fallbackStream!.path}');
+  }
+
+  /// 装载一个音源，**带超时**。
+  ///
+  /// ⚠️ 这是「点歌没声音、界面一直转圈」的真正原因：just_audio 只在**平台事件通道
+  /// 本身报错**时才把错误抛出来，而 Windows 的 media_kit 后端把 `Failed to open ...`
+  /// 当成一条普通事件发出来（见 `just_audio_media_kit` 的 `mediakit_player.dart`）。
+  /// 于是 `setAudioSource` 返回的 Future **既不完成也不报错**，`_loading` 永远收不掉，
+  /// 看门狗又是在 `_start` 返回之后才武装的 —— 整条回退链路根本走不到。
+  ///
+  /// 所以这里自己设上限：超时就当这条路不通，让调用方回退。
+  Future<void> _load(AudioSource source, Duration budget, String label) async {
+    final watch = Stopwatch()..start();
+    try {
+      await _player.setAudioSource(source).timeout(budget);
+      _log('$label 装载完成 ${watch.elapsedMilliseconds} ms');
+    } on TimeoutException {
+      _log('$label 装载超时（${budget.inSeconds}s 没有任何回应）');
+      rethrow;
+    }
+  }
+
+  /// 起播看门狗：`setAudioSource` 成功 ≠ 真的出声。
+  ///
+  /// Windows 的 media_kit 后端把「Failed to open xxx」当成一条普通事件发出来，
+  /// just_audio 只把它塞进 PlaybackEvent、不会抛异常（`just_audio.dart` 里只在
+  /// **事件通道本身报错**时才 addError）。结果就是：过期直链 / CDN 拒绝 → 界面
+  /// 一直停在「正在播放」，没有声音、没有报错、也不会回退。
+  ///
+  /// 所以这里用「播放位置有没有真的动过」当判据：直连 10 秒没动静就换中转流，
+  /// 中转流 25 秒还没动静才认输（家里宽带 + frp 首次拉流可能要等）。
+  ///
+  /// 只认位置、不认「拿到时长」：media_kit 解析完文件头就能给出时长，但解码 / 出声音
+  /// 仍可能卡住 —— 用它当「起来了」的判断会漏掉这种卡死。
+  void _armWatchdog(int gen) {
+    _watchdog?.cancel();
+    final budget = _usingDirect ? const Duration(seconds: 10) : const Duration(seconds: 25);
+    _watchdog = Timer(budget, () {
+      if (_disposed || gen != _generation) return;
+      if (_position > Duration.zero) return; // 位置在走 = 真的出声了
+      unawaited(_recoverPlayback('${budget.inSeconds} 秒没有出声'));
+    });
+  }
+
+  /// 直连放不出来时换中转流；中转流也不行才报错。
+  Future<void> _recoverPlayback(String reason) async {
+    if (_recovering) return;
+    final song = current;
+    final api = _api;
+    final fallback = _fallbackStream;
+    _watchdog?.cancel();
+    if (song == null || api == null || fallback == null) return;
+    final gen = _generation;
+    if (!_usingDirect) {
+      // 已经在中转流上了：这条路也放不出来，只能报错
+      if (_disposed || gen != _generation) return;
+      _error = '播放失败：音源没有出声（$reason）';
+      _playing = false;
+      _loading = false;
+      _notify();
+      return;
+    }
+    _recovering = true;
+    _usingDirect = false;
+    _log('直连没有出声（$reason），回退到服务端中转');
+    try {
+      await _load(
+        AudioSource.uri(fallback, headers: api.streamHeaders, tag: _mediaItem(song)),
+        _streamLoadBudget,
+        '中转流（回退）',
+      );
+      if (_disposed || gen != _generation) return;
+      _resume();
+      _armWatchdog(gen);
+      return;
+    } catch (err) {
+      _log('中转流也装不上（$err）');
+      _error = '播放失败：$err';
+    } finally {
+      _recovering = false;
+    }
+    if (_disposed || gen != _generation) return;
+    _playing = false;
+    _loading = false;
+    _notify();
   }
 
   /// 播放（不等待 Future 完成，否则会一直卡在 loading 状态）。
   void _resume() {
     unawaited(
       _player.play().catchError((Object error) {
+        _log('play() 报错：$error');
         _error = '播放失败：$error';
         _playing = false;
         _notify();
       }),
     );
   }
+
+  void _log(String message) => debugLog('play', message);
 
   // ------------------------------------------------------------- 上一个/下一个
   /// 下一个：手动点会循环，自动播完在「顺序播放」模式下会停下。
@@ -314,11 +447,14 @@ class PlayerController extends ChangeNotifier {
     _api = api;
     _fallbackStream = null; // 旧地址的流不能再拿来当回退
     _usingDirect = false;
+    _watchdog?.cancel();
     _notify();
   }
 
   void stop() {
     ++_generation; // 让还在飞的那次点歌别在 stop 之后又 resume 起来
+    _watchdog?.cancel();
+    _recovering = false;
     unawaited(_player.stop());
     _queue = const [];
     _index = -1;
@@ -334,27 +470,17 @@ class PlayerController extends ChangeNotifier {
 
   // ------------------------------------------------------------------ 出错
   Future<void> _handlePlaybackError(Object error) async {
+    _log('播放器报错：$error');
+    if (_recovering) return; // 正在切中转流，这次报错多半是上一条直连的余波
     final song = current;
     if (song == null) return; // 队列空了（stop 过 / 还没点歌），没什么好回退的
-    final gen = _generation;
-    final fallback = _fallbackStream;
-    final api = _api;
-    if (_usingDirect && fallback != null && api != null) {
-      _usingDirect = false;
-      try {
-        await _player.setAudioSource(
-          AudioSource.uri(fallback, headers: api.streamHeaders, tag: _mediaItem(song)),
-        );
-        if (gen != _generation) return; // 期间已经切歌了，别把上一首接管过来
-        _resume();
-        return;
-      } catch (err) {
-        _error = '播放失败：$err';
-      }
-    } else {
-      _error = '播放失败：$error';
+    if (_usingDirect) {
+      await _recoverPlayback('播放器报错');
+      return;
     }
-    if (gen != _generation) return;
+    if (_disposed) return;
+    _watchdog?.cancel();
+    _error = '播放失败：$error';
     _playing = false;
     _notify();
   }
@@ -380,6 +506,7 @@ class PlayerController extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    _watchdog?.cancel();
     for (final subscription in _subscriptions) {
       subscription.cancel();
     }

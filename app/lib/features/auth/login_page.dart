@@ -8,6 +8,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../../core/api_errors.dart';
 import '../../core/credentials.dart';
+import '../../core/ime_debug.dart';
 import '../../core/server_config.dart';
 import 'device_login.dart';
 
@@ -71,6 +72,9 @@ class _LoginPageState extends State<LoginPage> {
   void initState() {
     super.initState();
     _begin(); // 进页面就登记，用户只需要去浏览器点一下
+    // 对照组：这里是 Material 的 TextField，搜索页是 Cupertino 的。两边都打日志，
+    // 就能分清「只有 Cupertino 控件坏」还是「整个引擎在这台机器上都收不到组字」。
+    watchIme(_name, 'login');
   }
 
   @override

@@ -109,7 +109,6 @@ app/                               Flutter 客户端
 tool/                              构建与自检脚本
   bootstrap_platforms.ps1/.sh      生成各平台原生工程 + 打补丁 + pub get
   apply_patches.ps1/.sh            覆盖 macOS 权限、iOS Info.plist
-  patch_windows_ime.py             给生成的 Windows runner 打 IME 上下文补丁
   installer/windows/tonicuisc.iss  Inno Setup 安装包脚本
   installer/macos/make_dmg.sh      把 .app 打成 DMG
   apply_version.py                 从 tag / 提交标题写版本号
@@ -174,9 +173,10 @@ flutter build windows --release
 > 客户端**优先 IPv6**（`app/lib/core/dual_stack.dart`：v6 先连，250ms 没连上就把 v4 也发出去，
 > 谁先连上算谁；**要是 TCP 连上了但握手被掐，还会换个家族整套重来**）——正好是「v6 走直连、v6 不通走隧道」。
 >
-> ⚠️ **节点别选大陆的**（2026-10-18 实测）：大陆机器上跑**未备案**域名的 443 会被阿里云
-> **备案拦截**——现象正是「浏览器能打开、App 连不上」。详见 `deploy/free-frp-relay.md`
-> 的「大陆节点会被备案拦截」一节。
+> ✅ **大陆节点现在可以用**（2026-10-24 更新）：备案号 `蒙ICP备2026011401号-1` 已经下来，
+> 阿里云对 `uisc.tonicaphid.cn` 的 443 备案拦截**已停止**（80 端口现在是普通 404）。
+> 之前「浏览器能打开、App 连不上」正是拦截造成的，这一层现在不用再担心。
+> 详见 `deploy/free-frp-relay.md` 的「大陆节点」一节。
 >
 > ⚠️ 这套要求 **DDNS 只刷 AAAA**（`ddns install --only v6`）：A 得一直指着节点；被刷成家里的 v4（家里 443 被运营商封）的话，没 v6 的客户端就**全连不上**。详见下面「HTTPS → 家里的两个坑」。
 
@@ -190,7 +190,12 @@ flutter build windows --release
 
 另外一个**不用管**的噪音：控制台刷 `[ERROR:flutter/shell/platform/common/accessibility_bridge.cc(114)] Failed to update ui::AXTree, error: N will not be in the tree and is not the new root`。这是 Flutter 引擎在 Windows 上的已知 bug（[#98099](https://github.com/flutter/flutter/issues/98099)、[#182444](https://github.com/flutter/flutter/issues/182444)，后者给的复现条件是 **`ListView` + Material `Tooltip`**），**只是 debug 控制台的日志**，界面和功能都不受影响，release 版没有控制台。仓库里的 `Tooltip` 全部来自还没迁到 Cupertino 的 `IconButton(tooltip: ...)`，**逐页迁移做完它自然就没了**。
 
-**第三方输入法**：Flutter Windows engine 有一个已知 bug（[#190042](https://github.com/flutter/flutter/issues/190042)）——窗口失焦再回来后 IMM 输入上下文可能变陈旧，搜狗 / 微信输入法会表现为完全打不出中文。仓库在 CI 的 `flutter create` 之后会跑 [`tool/patch_windows_ime.py`](tool/patch_windows_ime.py)：**只有离开窗口超过 60 秒再回来**才恢复一次默认输入上下文（普通 alt-tab 不碰 IME，避免把第一次组合打断），并链接 `imm32`。**本机重新生成 Windows 工程后也要手动跑一次这个脚本**，否则 `flutter run` 出来的窗口没有这个补丁。它不能修 Flutter 另一个「切换输入框时 composing 泄漏」（#191196），那个要等 engine 修复。
+**Windows 第三方输入法**：这是 Flutter Windows 嵌入层的已知问题（[#190042](https://github.com/flutter/flutter/issues/190042)、[#191196](https://github.com/flutter/flutter/issues/191196)，修复 PR [#190043](https://github.com/flutter/flutter/pull/190043) 至今仍是 draft），**换输入框 Widget（Material `TextField` ↔ `CupertinoTextField`）不会有任何区别**。踩过的两次：
+
+- 在窗口焦点变化时调 `ImmAssociateContextEx` 重置 IMM 上下文 → 候选窗直接错乱、打一个字就断，**补丁已删除**（`tool/patch_windows_ime.py` 一并删掉，CI 也不再跑）。
+- 模板自带的 `WM_ACTIVATE` 处理**不看 `wparam`**：窗口被别的程序（包括输入法候选窗 / 皮肤窗）抢走激活时也强行 `SetFocus` 回 Flutter 子窗口，等于在组字途中结束一次文本输入会话 → 现象就是「第一个字母上屏后输入法不动了，再点一次输入框才恢复」。现在**只在真正获得激活时**才设置焦点（`app/windows/runner/win32_window.cpp`）。
+
+Debug 构建里两个输入框会把每一次文本 / 组字变化写进 `%TEMP%\tonicuisc-ime.log`（`app/lib/core/ime_debug.dart`，Release 空操作）：`composing` 一直是 `(-1, -1)` = 引擎根本没收到组字消息（Dart 侧无解，只能等上游）；先有 `composing=(a, b)` 再突然变回 `(-1, -1)` 且字只上屏一个 = 组字被 App 打断，这类能在我们这边修。
 
 ### 第一次登录
 
