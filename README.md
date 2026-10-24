@@ -190,7 +190,7 @@ flutter build windows --release
 
 另外一个**不用管**的噪音：控制台刷 `[ERROR:flutter/shell/platform/common/accessibility_bridge.cc(114)] Failed to update ui::AXTree, error: N will not be in the tree and is not the new root`。这是 Flutter 引擎在 Windows 上的已知 bug（[#98099](https://github.com/flutter/flutter/issues/98099)、[#182444](https://github.com/flutter/flutter/issues/182444)，后者给的复现条件是 **`ListView` + Material `Tooltip`**），**只是 debug 控制台的日志**，界面和功能都不受影响，release 版没有控制台。仓库里的 `Tooltip` 全部来自还没迁到 Cupertino 的 `IconButton(tooltip: ...)`，**逐页迁移做完它自然就没了**。
 
-**第三方输入法**：Flutter Windows engine 有一个已知 bug（[#190042](https://github.com/flutter/flutter/issues/190042)）——窗口失焦再回来后 IMM 输入上下文可能变陈旧，搜狗 / 微信输入法会表现为完全打不出中文。仓库在 CI 的 `flutter create` 之后会跑 [`tool/patch_windows_ime.py`](tool/patch_windows_ime.py)：**只在真正离开窗口再回来之后**恢复一次默认输入上下文（不会在输入过程中重置，否则会把正在拼写的 IME 打断），并链接 `imm32`。**本机重新生成 Windows 工程后也要手动跑一次这个脚本**，否则 `flutter run` 出来的窗口没有这个补丁。它不能修 Flutter 另一个「切换输入框时 composing 泄漏」（#191196），那个要等 engine 修复。
+**第三方输入法**：Flutter Windows engine 有一个已知 bug（[#190042](https://github.com/flutter/flutter/issues/190042)）——窗口失焦再回来后 IMM 输入上下文可能变陈旧，搜狗 / 微信输入法会表现为完全打不出中文。仓库在 CI 的 `flutter create` 之后会跑 [`tool/patch_windows_ime.py`](tool/patch_windows_ime.py)：**只有离开窗口超过 60 秒再回来**才恢复一次默认输入上下文（普通 alt-tab 不碰 IME，避免把第一次组合打断），并链接 `imm32`。**本机重新生成 Windows 工程后也要手动跑一次这个脚本**，否则 `flutter run` 出来的窗口没有这个补丁。它不能修 Flutter 另一个「切换输入框时 composing 泄漏」（#191196），那个要等 engine 修复。
 
 ### 第一次登录
 
