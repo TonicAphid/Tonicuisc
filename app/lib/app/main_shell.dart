@@ -5,7 +5,6 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../core/api_client.dart';
 import '../core/credentials.dart';
-import '../core/desktop_lifecycle.dart';
 import '../core/self_signed.dart';
 import '../core/update_installer.dart';
 import '../features/auth/device_login.dart';
@@ -50,16 +49,12 @@ class _MainShellState extends State<MainShell> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    // 桌面端把 `inactive` 拦掉了（见 core/desktop_lifecycle.dart），所以「窗口失活」
-    // 这条信号得从 DesktopLifecycle 拿，否则 alt-tab 之后常亮会一直开着。
-    DesktopLifecycle.foreground.addListener(_onForegroundChanged);
     unawaited(_keepScreenAwake(true));
     _bootstrap();
   }
 
   @override
   void dispose() {
-    DesktopLifecycle.foreground.removeListener(_onForegroundChanged);
     WidgetsBinding.instance.removeObserver(this);
     unawaited(_keepScreenAwake(false));
     _player.dispose();
@@ -74,8 +69,6 @@ class _MainShellState extends State<MainShell> with WidgetsBindingObserver {
       // 平台不支持就算了，不影响使用
     }
   }
-
-  void _onForegroundChanged() => unawaited(_keepScreenAwake(DesktopLifecycle.foreground.value));
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {

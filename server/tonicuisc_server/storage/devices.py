@@ -8,6 +8,16 @@ from typing import Any
 
 from .base import _integer, _number, _text
 
+#: 一台设备最多同时保留几把有效 key。
+#:
+#: App 重新配对是「换 key、旧 key 作废」，所以一台设备正常只有一把。但网页播放器在服务端
+#: 重启后是按浏览器指纹**重新签发** key 的——同一个人开着两个标签页，两个标签会各自恢复一次，
+#: 如果沿用「换 key」的语义，它们就会互相把对方的 key 踢掉，然后无限互踢。
+#: 所以这里允许一台设备挂多把 key（只保留最近 8 把），多标签才能各用各的。
+#: 吊销设备时 ``verify`` 会按 ``revoked`` 全拒，删设备时这些 key 一并清掉。
+DEVICE_KEYS_KEEP = 8
+
+
 class DeviceMixin:
     # ---------------------------------------------------------------- devices
     def create_device(
@@ -31,6 +41,7 @@ class DeviceMixin:
         pipe = self.client.pipeline(transaction=False)
         if reused:
             pipe.delete(self._k("devicehash", str(old.get("key_hash") or "")))  # 旧 key 作废
+            pipe.zrem(self._device_keys_key(device_id), str(old.get("key_hash") or ""))
         pipe.hset(
             self._k("device", device_id),
             mapping={
@@ -44,8 +55,10 @@ class DeviceMixin:
             },
         )
         pipe.set(self._k("devicehash", key_hash), device_id)
+        pipe.zadd(self._device_keys_key(device_id), {key_hash: now})
         pipe.zadd(self._devices_key, {device_id: now})
         pipe.execute()
+        self._trim_device_keys(device_id)
         return {
             "id": device_id,
             "name": name,
@@ -54,6 +67,43 @@ class DeviceMixin:
             "revoked": 0,
             "user_id": user_id,
         }
+
+    def reissue_device_key(self, device_id: str, key_hash: str) -> bool:
+        """给已有设备**再加**一把 key，旧的不动。
+
+        网页播放器按指纹恢复登录时用它：同一个人开多个标签页会各恢复一次，
+        「换 key」的语义会让它们互相踢下线，这里只追加、不吊销。
+        """
+        row = self._device(device_id)
+        if row is None:
+            return False
+        now = time.time()
+        pipe = self.client.pipeline(transaction=False)
+        pipe.hset(
+            self._k("device", device_id),
+            mapping={"key_hash": key_hash, "last_seen": repr(now), "revoked": "0"},
+        )
+        pipe.set(self._k("devicehash", key_hash), device_id)
+        pipe.zadd(self._device_keys_key(device_id), {key_hash: now})
+        pipe.execute()
+        self._trim_device_keys(device_id)
+        return True
+
+    # -------------------------------------------------------- key 索引（内部）
+    def _device_keys_key(self, device_id: str) -> str:
+        return self._k("devicekeys", device_id)
+
+    def _trim_device_keys(self, device_id: str, keep: int = DEVICE_KEYS_KEEP) -> None:
+        """只保留最近 ``keep`` 把 key，剩下的连反查一起删掉。"""
+        index = self._device_keys_key(device_id)
+        stale = self.client.zrange(index, 0, -(keep + 1))
+        if not stale:
+            return
+        pipe = self.client.pipeline(transaction=False)
+        for key_hash in stale:
+            pipe.delete(self._k("devicehash", key_hash))
+            pipe.zrem(index, key_hash)
+        pipe.execute()
 
     def _device_row(self, data: dict[str, Any]) -> dict[str, Any]:
         row = dict(data)
@@ -66,6 +116,10 @@ class DeviceMixin:
     def _device(self, device_id: str) -> dict[str, Any] | None:
         data = self.client.hgetall(self._k("device", device_id))
         return None if not data else self._device_row(data)
+
+    def get_device(self, device_id: str) -> dict[str, Any] | None:
+        """按 ID 取设备记录（网页「记住这台浏览器」恢复登录时用）。"""
+        return self._device(device_id)
 
     def _username_of(self, user_id: str | None) -> str | None:
         if not user_id:
@@ -116,6 +170,8 @@ class DeviceMixin:
         if not self.client.exists(self._k("device", device_id)):
             return False
         self.client.hset(self._k("device", device_id), "revoked", "1")
+        # 吊销 = 这台浏览器下次不能再靠指纹自动登录
+        self.forget_web_logins_for_device(device_id)
         return True
 
     def delete_device(self, device_id: str, user_id: str | None = None, *, own_only: bool = True) -> bool:
@@ -132,9 +188,14 @@ class DeviceMixin:
         pipe = self.client.pipeline(transaction=False)
         pipe.delete(self._k("device", device_id))
         pipe.zrem(self._devices_key, device_id)
-        if row.get("key_hash"):
-            pipe.delete(self._k("devicehash", row["key_hash"]))
+        # 这台设备挂过的所有 key（App 一把，网页每恢复一次多一把）全部作废
+        index = self._device_keys_key(device_id)
+        for key_hash in self.client.zrange(index, 0, -1):
+            pipe.delete(self._k("devicehash", key_hash))
+        pipe.delete(index)
         pipe.execute()
+        # 网页「记住这台浏览器」的绑定跟着走，否则删掉的设备还能被指纹复活
+        self.forget_web_logins_for_device(device_id)
         return True
 
     def delete_devices(self, *, without_user: bool = False, revoked: bool = False) -> int:

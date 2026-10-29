@@ -1,0 +1,574 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>网页播放器 · Tonicuisc</title>
+<meta name="description" content="Tonicuisc 网页播放器：搜索、播放、逐字歌词、喜欢与收藏，和客户端共用同一个音乐库。">
+<meta name="theme-color" content="#ffffff" id="themeColor">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%230a6cf1'/%3E%3Crect x='6' y='6' width='9' height='9' rx='3' fill='%23fff' opacity='.85'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/music/music.css">
+</head>
+<body>
+
+<!-- 图标库：全部内联，不加载任何外部字体 / 图标 CDN -->
+<svg class="sprite" aria-hidden="true" focusable="false">
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.5 15.5 21 21"/></symbol>
+  <symbol id="i-music" viewBox="0 0 24 24"><path d="M9 18V6l10-2v12"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="16.5" cy="16" r="2.5"/></symbol>
+  <symbol id="i-heart" viewBox="0 0 24 24"><path d="M12 20s-7-4.4-7-9a4 4 0 0 1 7-2.6A4 4 0 0 1 19 11c0 4.6-7 9-7 9z"/></symbol>
+  <symbol id="i-heart-fill" viewBox="0 0 24 24"><path d="M12 20s-7-4.4-7-9a4 4 0 0 1 7-2.6A4 4 0 0 1 19 11c0 4.6-7 9-7 9z" fill="currentColor" stroke="none"/></symbol>
+  <symbol id="i-bookmark" viewBox="0 0 24 24"><path d="M6 4h12v16l-6-4-6 4z"/></symbol>
+  <symbol id="i-bookmark-fill" viewBox="0 0 24 24"><path d="M6 4h12v16l-6-4-6 4z" fill="currentColor" stroke="none"/></symbol>
+  <symbol id="i-history" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 7v5l3 2"/></symbol>
+  <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3v11"/><path d="m7 10 5 5 5-5"/><path d="M4 20h16"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5.5v13l11-6.5z" fill="currentColor" stroke="none"/></symbol>
+  <symbol id="i-pause" viewBox="0 0 24 24"><rect x="7" y="5" width="3.6" height="14" rx="1.4" fill="currentColor" stroke="none"/><rect x="13.4" y="5" width="3.6" height="14" rx="1.4" fill="currentColor" stroke="none"/></symbol>
+  <symbol id="i-prev" viewBox="0 0 24 24"><path d="M18 6v12L8 12z" fill="currentColor" stroke="none"/><rect x="5" y="5" width="2.2" height="14" rx="1" fill="currentColor" stroke="none"/></symbol>
+  <symbol id="i-next" viewBox="0 0 24 24"><path d="M6 6v12l10-6z" fill="currentColor" stroke="none"/><rect x="16.8" y="5" width="2.2" height="14" rx="1" fill="currentColor" stroke="none"/></symbol>
+  <symbol id="i-queue" viewBox="0 0 24 24"><path d="M4 6h11M4 12h11M4 18h7"/><path d="M17 14v5"/><circle cx="15.5" cy="19" r="1.8"/></symbol>
+  <symbol id="i-volume" viewBox="0 0 24 24"><path d="M4 10v4h4l5 4V6L8 10H4z"/><path d="M16 9a4 4 0 0 1 0 6"/><path d="M18.5 6.5a8 8 0 0 1 0 11"/></symbol>
+  <symbol id="i-mute" viewBox="0 0 24 24"><path d="M4 10v4h4l5 4V6L8 10H4z"/><path d="m16 10 4 4M20 10l-4 4"/></symbol>
+  <symbol id="i-chevron-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+  <symbol id="i-chevron-right" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></symbol>
+  <symbol id="i-close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v5h-5"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16"/><path d="M9 7V5h6v2"/><path d="m6 7 1 13h10l1-13"/><path d="M10 11v6M14 11v6"/></symbol>
+  <symbol id="i-user" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 4-6 8-6s8 2 8 6"/></symbol>
+  <symbol id="i-devices" viewBox="0 0 24 24"><rect x="3" y="5" width="13" height="10" rx="2"/><rect x="17" y="9" width="4" height="10" rx="1.4"/><path d="M7 19h5"/></symbol>
+  <symbol id="i-logout" viewBox="0 0 24 24"><path d="M15 4h4v16h-4"/><path d="m10 8-4 4 4 4"/><path d="M6 12h10"/></symbol>
+  <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></symbol>
+  <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 14.5A8 8 0 0 1 9.5 4 8 8 0 1 0 20 14.5z"/></symbol>
+  <symbol id="i-monitor" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5h10"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 13 4 4L19 7"/></symbol>
+  <symbol id="i-link" viewBox="0 0 24 24"><path d="M10 13a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1.2 1.2"/><path d="M14 11a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1.2-1.2"/></symbol>
+  <symbol id="i-shuffle" viewBox="0 0 24 24"><path d="M16 3h5v5"/><path d="M4 20 21 3"/><path d="M21 16v5h-5"/><path d="m15 15 6 6"/><path d="m4 4 5 5"/></symbol>
+  <symbol id="i-repeat" viewBox="0 0 24 24"><path d="m17 2 4 4-4 4"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><path d="m7 22-4-4 4-4"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></symbol>
+  <symbol id="i-order" viewBox="0 0 24 24"><path d="M4 6h16M4 12h10M4 18h6"/><path d="m16 14 4 4-4 4"/><path d="M20 18H12"/></symbol>
+  <symbol id="i-expand" viewBox="0 0 24 24"><path d="M8 3H3v5M16 3h5v5M21 16v5h-5M3 16v5h5"/><path d="m3 3 5 5M21 3l-5 5M21 21l-5-5M3 21l5-5"/></symbol>
+  <symbol id="i-arrow-left" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></symbol>
+  <symbol id="i-spark" viewBox="0 0 24 24"><path d="M12 3v4M12 17v4M3 12h4M17 12h4M5.6 5.6l2.8 2.8M15.6 15.6l2.8 2.8M18.4 5.6l-2.8 2.8M8.4 15.6l-2.8 2.8"/></symbol>
+</svg>
+
+<!-- ============================================================ 登录闸门 -->
+<div class="gate" id="gate">
+  <div class="gate-glow" aria-hidden="true"></div>
+  <div class="gate-card">
+    <div class="gate-brand">
+      <span class="brand-mark lg" aria-hidden="true"></span>
+      <span>Tonicuisc</span>
+    </div>
+    <h1>登录网页播放器</h1>
+    <p class="gate-lead">用设备码把这块浏览器接到你的音乐库。批准一次，之后自动登录；API Key 只保存在服务端。</p>
+
+    <div class="gate-state" id="gateLoading">
+      <span class="spinner" aria-hidden="true"></span>
+      <span>正在准备设备码…</span>
+    </div>
+
+    <div class="gate-code-wrap" id="gateCodeWrap" hidden>
+      <div class="code-box">
+        <span class="code-label">设备码</span>
+        <strong id="gateCode">----</strong>
+        <button class="icon-btn" id="copyCode" type="button" title="复制设备码">
+          <svg class="ic"><use href="#i-copy"></use></svg>
+        </button>
+      </div>
+      <a class="btn btn-primary btn-block" id="gateLoginLink" href="/login" target="_blank" rel="noopener">
+        <svg class="ic"><use href="#i-link"></use></svg>
+        打开登录页批准
+      </a>
+      <div class="gate-status">
+        <span class="pulse" aria-hidden="true"></span>
+        <span id="gateStatus">等待批准…</span>
+      </div>
+      <div class="gate-actions">
+        <button class="link-btn" id="gateRefresh" type="button">刷新状态</button>
+        <span class="dot-sep">·</span>
+        <button class="link-btn" id="gateRestart" type="button">换一个设备码</button>
+      </div>
+      <p class="gate-hint">登录页会打开新标签页。批准后回到这里，会自动进入播放器。</p>
+    </div>
+
+    <div class="gate-error" id="gateError" hidden>
+      <p id="gateErrorText"></p>
+      <button class="btn btn-ghost" id="gateRetry" type="button">重试</button>
+    </div>
+
+    <details class="manual">
+      <summary>已有 API Key？手动粘贴</summary>
+      <form id="manualForm" autocomplete="off">
+        <label for="manualKey">API Key</label>
+        <div class="manual-row">
+          <input id="manualKey" type="password" placeholder="粘贴客户端里保存的 Key" autocomplete="off" spellcheck="false">
+          <button class="btn btn-primary" type="submit">登录</button>
+        </div>
+        <p class="manual-hint">在 App 的「我的」页面可以找到，或者用设备码登录一次后从浏览器开发者工具里取。</p>
+      </form>
+    </details>
+
+    <p class="gate-foot">
+      <a href="/">返回首页</a><span class="dot-sep">·</span><a href="/download/windows">下载客户端</a>
+    </p>
+  </div>
+</div>
+
+<!-- ============================================================ 主界面 -->
+<div class="app" id="app" hidden>
+
+  <aside class="sidebar">
+    <a class="brand" href="/" aria-label="Tonicuisc 首页">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <span>Tonicuisc</span>
+    </a>
+
+    <nav class="side-nav" aria-label="主导航">
+      <button class="nav-item is-active" type="button" data-nav="search">
+        <svg class="ic"><use href="#i-search"></use></svg><span>搜索</span>
+      </button>
+      <button class="nav-item" type="button" data-nav="library">
+        <svg class="ic"><use href="#i-bookmark"></use></svg><span>列表</span>
+        <span class="nav-count" id="navLibCount" hidden>0</span>
+      </button>
+      <button class="nav-item" type="button" data-nav="profile">
+        <svg class="ic"><use href="#i-user"></use></svg><span>我的</span>
+      </button>
+    </nav>
+
+    <div class="side-foot">
+      <button class="nav-item" type="button" id="themeBtn" title="切换主题">
+        <svg class="ic" id="themeIcon"><use href="#i-monitor"></use></svg>
+        <span id="themeLabel">跟随系统</span>
+      </button>
+      <button class="account-chip" type="button" data-nav="profile" id="accountChip">
+        <span class="avatar" id="sideAvatar">T</span>
+        <span class="account-text">
+          <b id="sideUser">未登录</b>
+          <small>网页播放器</small>
+        </span>
+        <svg class="ic"><use href="#i-chevron-right"></use></svg>
+      </button>
+    </div>
+  </aside>
+
+  <main class="main" id="main">
+
+    <!-- 移动端顶栏 -->
+    <header class="mobile-head">
+      <a class="brand" href="/">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <span>Tonicuisc</span>
+      </a>
+      <button class="icon-btn" type="button" data-nav="profile" aria-label="我的">
+        <span class="avatar sm" id="mobileAvatar">T</span>
+      </button>
+    </header>
+
+    <!-- ------------------------------------------------------------ 搜索 -->
+    <section class="view" id="view-search" data-view="search">
+      <div class="page-head">
+        <p class="eyebrow">Search</p>
+        <h1>搜索</h1>
+        <p class="lead">酷我音源，搜到就能听。喜欢、收藏和历史与客户端共用同一个账户。</p>
+      </div>
+
+      <form class="searchbar" id="searchForm" autocomplete="off">
+        <svg class="ic" aria-hidden="true"><use href="#i-search"></use></svg>
+        <input id="searchInput" type="search" placeholder="搜索歌曲 / 歌手" enterkeyhint="search"
+               aria-label="搜索歌曲或歌手" autocomplete="off" spellcheck="false">
+        <button class="btn btn-primary" type="submit" id="searchSubmit">搜索</button>
+      </form>
+
+      <div class="source-row" id="sourceRow" hidden>
+        <span class="source-label">音源</span>
+        <div class="chips" id="sourceChips"></div>
+      </div>
+
+      <div class="status-line" id="searchStatus" role="status"></div>
+
+      <div class="history-block" id="historyBlock">
+        <div class="block-head">
+          <h2>最近搜索</h2>
+          <button class="link-btn" type="button" id="historyRefresh">刷新</button>
+        </div>
+        <div class="chips" id="historyChips"></div>
+        <p class="block-empty" id="historyEmpty" hidden>还没有搜索记录。</p>
+      </div>
+
+      <div class="song-list" id="searchList" role="list"></div>
+
+      <div class="empty-state" id="searchEmpty" hidden>
+        <div class="empty-icon"><svg class="ic"><use href="#i-search"></use></svg></div>
+        <h3>输入关键词开始搜索</h3>
+        <p>搜歌名、歌手或专辑都行。结果滑到底会自动加载下一页。</p>
+      </div>
+
+      <div class="load-more" id="searchMore" hidden>
+        <button class="btn btn-ghost" type="button" id="searchMoreBtn">加载更多</button>
+        <span class="load-note" id="searchMoreNote"></span>
+      </div>
+    </section>
+
+    <!-- ------------------------------------------------------------ 列表 -->
+    <section class="view" id="view-library" data-view="library" hidden>
+      <div class="page-head">
+        <p class="eyebrow">Library</p>
+        <h1>列表</h1>
+        <p class="lead">播放队列、红心和收藏，还有最近听过的歌。</p>
+      </div>
+
+      <div class="lib-grid">
+        <button class="lib-card lib-queue" type="button" id="openQueueCard">
+          <span class="lib-icon"><svg class="ic"><use href="#i-queue"></use></svg></span>
+          <span class="lib-text">
+            <b>播放列表</b>
+            <small id="queueCardSub">还没有在播的歌</small>
+          </span>
+          <svg class="ic chev"><use href="#i-chevron-right"></use></svg>
+        </button>
+
+        <button class="lib-card" type="button" data-lib="like">
+          <span class="lib-icon like"><svg class="ic"><use href="#i-heart-fill"></use></svg></span>
+          <span class="lib-text">
+            <b>我喜欢</b>
+            <small>点过红心的歌 · <span data-count="like">0</span> 首</small>
+          </span>
+          <svg class="ic chev"><use href="#i-chevron-right"></use></svg>
+        </button>
+
+        <button class="lib-card" type="button" data-lib="favorite">
+          <span class="lib-icon fav"><svg class="ic"><use href="#i-bookmark-fill"></use></svg></span>
+          <span class="lib-text">
+            <b>收藏</b>
+            <small>单独存的歌 · <span data-count="favorite">0</span> 首</small>
+          </span>
+          <svg class="ic chev"><use href="#i-chevron-right"></use></svg>
+        </button>
+
+        <button class="lib-card" type="button" data-lib="history">
+          <span class="lib-icon hist"><svg class="ic"><use href="#i-history"></use></svg></span>
+          <span class="lib-text">
+            <b>播放历史</b>
+            <small>最近听过的歌 · <span data-count="history">0</span> 首</small>
+          </span>
+          <svg class="ic chev"><use href="#i-chevron-right"></use></svg>
+        </button>
+      </div>
+
+      <div class="tip-card">
+        <svg class="ic"><use href="#i-spark"></use></svg>
+        <p>这里的列表和 App 完全同步。在网页里点的红心，客户端刷新后也能看到。</p>
+        <button class="link-btn" type="button" id="libraryRefresh">刷新</button>
+      </div>
+    </section>
+
+    <!-- ------------------------------------------------------------ 单个列表 -->
+    <section class="view" id="view-list" data-view="list" hidden>
+      <div class="page-head compact">
+        <button class="icon-btn back" type="button" id="listBack" aria-label="返回">
+          <svg class="ic"><use href="#i-arrow-left"></use></svg>
+        </button>
+        <div class="head-copy">
+          <p class="eyebrow" id="listEyebrow">Library</p>
+          <h1 id="listTitle">我喜欢</h1>
+        </div>
+        <div class="head-actions">
+          <button class="btn btn-ghost btn-sm" type="button" id="listPlayAll">
+            <svg class="ic"><use href="#i-play"></use></svg>全部播放
+          </button>
+          <button class="icon-btn danger" type="button" id="listClear" title="清空这个列表">
+            <svg class="ic"><use href="#i-trash"></use></svg>
+          </button>
+        </div>
+      </div>
+      <div class="status-line" id="listStatus" role="status"></div>
+      <div class="song-list" id="listSongs" role="list"></div>
+      <div class="empty-state" id="listEmpty" hidden>
+        <div class="empty-icon"><svg class="ic"><use href="#i-music"></use></svg></div>
+        <h3>这里还是空的</h3>
+        <p>去搜索页听几首，或者点一下红心。</p>
+      </div>
+    </section>
+
+    <!-- ------------------------------------------------------------ 我的 -->
+    <section class="view" id="view-profile" data-view="profile" hidden>
+      <div class="page-head">
+        <p class="eyebrow">Account</p>
+        <h1>我的</h1>
+        <p class="lead">账户、设备与外观。所有数据都在你自己的服务器上。</p>
+      </div>
+
+      <div class="profile-grid">
+        <div class="card account-card">
+          <div class="account-main">
+            <span class="avatar xl" id="profileAvatar">T</span>
+            <div>
+              <h2 id="profileUser">未登录</h2>
+              <p id="profileDevice">网页播放器</p>
+              <p class="mono" id="profileDeviceId">设备 ID：-</p>
+            </div>
+          </div>
+          <div class="account-stats">
+            <span><b data-count="like">0</b><small>喜欢</small></span>
+            <span><b data-count="favorite">0</b><small>收藏</small></span>
+            <span><b data-count="history">0</b><small>历史</small></span>
+          </div>
+          <div class="account-actions">
+            <button class="btn btn-ghost btn-sm" type="button" id="reloginBtn">
+              <svg class="ic"><use href="#i-refresh"></use></svg>重新配对
+            </button>
+            <button class="btn btn-ghost btn-sm danger-text" type="button" id="logoutBtn">
+              <svg class="ic"><use href="#i-logout"></use></svg>退出登录
+            </button>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <h2>外观</h2>
+            <p>默认跟随系统。</p>
+          </div>
+          <div class="segmented" id="themeSegment" role="group" aria-label="主题">
+            <button type="button" data-theme-choice="auto"><svg class="ic"><use href="#i-monitor"></use></svg>跟随系统</button>
+            <button type="button" data-theme-choice="light"><svg class="ic"><use href="#i-sun"></use></svg>浅色</button>
+            <button type="button" data-theme-choice="dark"><svg class="ic"><use href="#i-moon"></use></svg>深色</button>
+          </div>
+        </div>
+
+        <div class="card devices-card">
+          <div class="card-head row">
+            <div>
+              <h2>已登录设备</h2>
+              <p>吊销后，那台设备需要重新配对。</p>
+            </div>
+            <button class="icon-btn" type="button" id="devicesRefresh" title="刷新设备列表">
+              <svg class="ic"><use href="#i-refresh"></use></svg>
+            </button>
+          </div>
+          <div class="device-list" id="deviceList"></div>
+          <p class="block-empty" id="deviceEmpty" hidden>还没有其他设备。</p>
+        </div>
+
+        <div class="card about-card">
+          <div class="card-head">
+            <h2>关于</h2>
+            <p>网页播放器与客户端共用同一个服务端。</p>
+          </div>
+          <dl class="about-list">
+            <div><dt>网页播放器</dt><dd id="aboutVersion">-</dd></div>
+            <div><dt>服务端</dt><dd id="aboutServer">-</dd></div>
+            <div><dt>最新客户端</dt><dd id="aboutLatest">检查中…</dd></div>
+          </dl>
+          <div class="about-actions">
+            <a class="btn btn-ghost btn-sm" href="/download/windows">
+              <svg class="ic"><use href="#i-download"></use></svg>下载 Windows 版
+            </a>
+            <a class="btn btn-ghost btn-sm" href="/">
+              <svg class="ic"><use href="#i-link"></use></svg>返回首页
+            </a>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ------------------------------------------------------------ 歌手 -->
+    <section class="view" id="view-artist" data-view="artist" hidden>
+      <div class="page-head compact">
+        <button class="icon-btn back" type="button" id="artistBack" aria-label="返回">
+          <svg class="ic"><use href="#i-arrow-left"></use></svg>
+        </button>
+        <div class="head-copy">
+          <p class="eyebrow">Artist</p>
+          <h1 id="artistName">歌手</h1>
+        </div>
+        <div class="head-actions">
+          <button class="btn btn-ghost btn-sm" type="button" id="artistPlayAll">
+            <svg class="ic"><use href="#i-play"></use></svg>全部播放
+          </button>
+          <button class="icon-btn" type="button" id="artistRefresh" title="刷新">
+            <svg class="ic"><use href="#i-refresh"></use></svg>
+          </button>
+        </div>
+      </div>
+      <div class="status-line" id="artistStatus" role="status"></div>
+      <div class="song-list" id="artistSongs" role="list"></div>
+      <div class="empty-state" id="artistEmpty" hidden>
+        <div class="empty-icon"><svg class="ic"><use href="#i-user"></use></svg></div>
+        <h3>没有搜到歌</h3>
+        <p>换个音源或者稍后再试。</p>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- ------------------------------------------------------------ 右侧正在播放 / 歌词 -->
+  <aside class="now-panel" id="nowPanel" aria-label="正在播放">
+    <div class="now-head">
+      <span>正在播放</span>
+      <button class="icon-btn mobile-only" type="button" id="nowClose" aria-label="收起">
+        <svg class="ic"><use href="#i-chevron-down"></use></svg>
+      </button>
+    </div>
+
+    <div class="now-body">
+      <div class="now-cover" id="nowCoverWrap">
+        <span class="cover-fallback"><svg class="ic"><use href="#i-music"></use></svg></span>
+        <img id="nowCover" alt="" hidden>
+        <span class="now-vinyl" aria-hidden="true"></span>
+      </div>
+
+      <div class="now-meta">
+        <h2 id="nowTitle">未在播放</h2>
+        <button class="now-singer" type="button" id="nowSinger">搜一首歌开始</button>
+      </div>
+
+      <div class="now-actions">
+        <button class="pill-action" type="button" id="nowLike">
+          <svg class="ic"><use href="#i-heart"></use></svg><span>喜欢</span>
+        </button>
+        <button class="pill-action" type="button" id="nowFav">
+          <svg class="ic"><use href="#i-bookmark"></use></svg><span>收藏</span>
+        </button>
+        <button class="pill-action" type="button" id="nowDownload">
+          <svg class="ic"><use href="#i-download"></use></svg><span>下载</span>
+        </button>
+        <button class="pill-action" type="button" id="nowQueue">
+          <svg class="ic"><use href="#i-queue"></use></svg><span>队列</span>
+        </button>
+      </div>
+
+      <div class="lyrics" id="lyrics" tabindex="0" aria-label="歌词">
+        <div class="lyric-empty" id="lyricEmpty">
+          <svg class="ic"><use href="#i-music"></use></svg>
+          <p>播放后显示歌词</p>
+        </div>
+        <div class="lyric-lines" id="lyricLines"></div>
+      </div>
+    </div>
+
+    <div class="now-controls mobile-only">
+      <div class="mini-progress">
+        <span id="nowCur">0:00</span>
+        <input type="range" id="nowSeek" min="0" max="1000" value="0" step="1" aria-label="播放进度">
+        <span id="nowDur">0:00</span>
+      </div>
+      <div class="now-buttons">
+        <button class="icon-btn" type="button" id="nowMode" title="播放模式">
+          <svg class="ic"><use href="#i-repeat"></use></svg>
+        </button>
+        <button class="icon-btn lg" type="button" id="nowPrev" aria-label="上一首">
+          <svg class="ic"><use href="#i-prev"></use></svg>
+        </button>
+        <button class="play-btn lg" type="button" id="nowPlay" aria-label="播放 / 暂停">
+          <svg class="ic"><use href="#i-play"></use></svg>
+        </button>
+        <button class="icon-btn lg" type="button" id="nowNext" aria-label="下一首">
+          <svg class="ic"><use href="#i-next"></use></svg>
+        </button>
+        <button class="icon-btn" type="button" id="nowQueue2" title="播放队列">
+          <svg class="ic"><use href="#i-queue"></use></svg>
+        </button>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ------------------------------------------------------------ 底部播放条 -->
+  <footer class="playerbar" id="playerBar">
+    <div class="pb-left">
+      <button class="pb-cover" type="button" id="pbCoverBtn" aria-label="展开正在播放">
+        <span class="cover-fallback"><svg class="ic"><use href="#i-music"></use></svg></span>
+        <img id="pbCover" alt="" hidden>
+      </button>
+      <div class="pb-meta">
+        <b id="pbTitle">未在播放</b>
+        <small id="pbSinger">搜一首歌开始</small>
+      </div>
+      <button class="icon-btn" type="button" id="pbLike" title="喜欢">
+        <svg class="ic"><use href="#i-heart"></use></svg>
+      </button>
+    </div>
+
+    <div class="pb-center">
+      <div class="pb-buttons">
+        <button class="icon-btn mode-btn" type="button" id="pbMode" title="播放模式">
+          <svg class="ic"><use href="#i-repeat"></use></svg>
+          <span class="mode-badge" id="modeBadge" hidden>1</span>
+        </button>
+        <button class="icon-btn" type="button" id="pbPrev" aria-label="上一首">
+          <svg class="ic"><use href="#i-prev"></use></svg>
+        </button>
+        <button class="play-btn" type="button" id="pbPlay" aria-label="播放 / 暂停">
+          <svg class="ic"><use href="#i-play"></use></svg>
+        </button>
+        <button class="icon-btn" type="button" id="pbNext" aria-label="下一首">
+          <svg class="ic"><use href="#i-next"></use></svg>
+        </button>
+        <button class="icon-btn" type="button" id="pbQueue" title="播放队列">
+          <svg class="ic"><use href="#i-queue"></use></svg>
+        </button>
+      </div>
+      <div class="pb-progress">
+        <span id="pbCur">0:00</span>
+        <input type="range" id="pbSeek" min="0" max="1000" value="0" step="1" aria-label="播放进度">
+        <span id="pbDur">0:00</span>
+      </div>
+    </div>
+
+    <div class="pb-right">
+      <button class="icon-btn" type="button" id="pbMute" title="静音">
+        <svg class="ic"><use href="#i-volume"></use></svg>
+      </button>
+      <input class="volume" type="range" id="pbVolume" min="0" max="100" value="100" step="1" aria-label="音量">
+      <button class="icon-btn" type="button" id="pbDownload" title="下载当前歌曲">
+        <svg class="ic"><use href="#i-download"></use></svg>
+      </button>
+      <button class="icon-btn" type="button" id="pbExpand" title="展开正在播放">
+        <svg class="ic"><use href="#i-expand"></use></svg>
+      </button>
+    </div>
+  </footer>
+
+  <!-- ------------------------------------------------------------ 移动端 tab -->
+  <nav class="tabbar" aria-label="底部导航">
+    <button class="tab-item is-active" type="button" data-nav="search">
+      <svg class="ic"><use href="#i-search"></use></svg><span>搜索</span>
+    </button>
+    <button class="tab-item" type="button" data-nav="library">
+      <svg class="ic"><use href="#i-bookmark"></use></svg><span>列表</span>
+    </button>
+    <button class="tab-item" type="button" data-nav="profile">
+      <svg class="ic"><use href="#i-user"></use></svg><span>我的</span>
+    </button>
+  </nav>
+</div>
+
+<!-- ------------------------------------------------------------ 队列抽屉 -->
+<div class="drawer" id="queueDrawer" hidden>
+  <div class="drawer-backdrop" data-close="queue"></div>
+  <aside class="drawer-panel" role="dialog" aria-modal="true" aria-labelledby="queueTitle">
+    <header class="drawer-head">
+      <div>
+        <p class="eyebrow">Queue</p>
+        <h2 id="queueTitle">播放队列 <span id="queueCount">0</span></h2>
+      </div>
+      <button class="icon-btn" type="button" data-close="queue" aria-label="关闭">
+        <svg class="ic"><use href="#i-close"></use></svg>
+      </button>
+    </header>
+    <div class="drawer-sub">
+      <span id="queueNow">还没有在播的歌</span>
+      <button class="link-btn danger-text" type="button" id="queueClear">清空</button>
+    </div>
+    <div class="queue-list" id="queueList"></div>
+  </aside>
+</div>
+
+<!-- ------------------------------------------------------------ 通用弹窗 / 提示 -->
+<div class="modal-host" id="modalHost" hidden></div>
+<div class="toast-host" id="toastHost" aria-live="polite" aria-atomic="false"></div>
+
+<audio id="audio" preload="metadata"></audio>
+
+<script src="/music/music.js" defer></script>
+</body>
+</html>

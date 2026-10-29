@@ -5,7 +5,7 @@ $ErrorActionPreference = 'Stop'
 Set-Location -Path $PSScriptRoot
 
 if (-not (Test-Path '.env')) {
-    Write-Host "Note: no .env found, using defaults (0.0.0.0:8000, sources migu,kuwo)"
+    Write-Host "Note: no .env found, using defaults (127.0.0.1:8000, sources kuwo)"
 }
 
 $port = if ($env:TONICUISC_PORT) { $env:TONICUISC_PORT } else { '8000' }

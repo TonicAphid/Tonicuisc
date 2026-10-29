@@ -40,6 +40,8 @@ hr { border: 0; border-top: 1px solid #e5e7eb; margin: 24px 0 4px; }
 .footer { max-width: 420px; margin: 18px auto 0; text-align: center; font-size: 12px; line-height: 1.6; color: #9ca3af; }
 .footer a { color: inherit; text-decoration: none; }
 .footer a:hover, .footer a:focus { text-decoration: underline; }
+.cta { display: inline-block; margin-top: 18px; padding: 11px 26px; border-radius: 999px; background: #3f51b5;
+       color: #fff; text-decoration: none; font-weight: 600; font-size: 14px; }
 @media (prefers-color-scheme: dark) {
   body { background: #111114; color: #e5e7eb; }
   .card { background: #1c1c1f; box-shadow: none; }
@@ -221,3 +223,20 @@ def rate_limited_step(retry_after: int) -> str:
 <div class="error">密码错误次数过多，请在 {retry_after} 秒后再试。</div>
 """,
     )
+
+
+def message_page(title: str, detail: str, *, href: str = "/", action: str = "返回首页") -> str:
+    """通用提示页：404、下载失败、内置网页缺文件时用。
+
+    以前这些是 Node 入口自己拼的一页 HTML（``sendErrorPage``）；现在网页由 Python
+    托管，错误页也就跟着搬到这里，样式和登录页共用一套。
+    """
+    return page(
+        title,
+        f"""
+<h1>{html.escape(title)}</h1>
+<p class="sub">{html.escape(detail)}</p>
+<a class="cta" href="{html.escape(href)}">{html.escape(action)}</a>
+""",
+    )
+

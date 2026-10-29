@@ -5,8 +5,10 @@
 #     python -m tonicuisc_server caddy --generate      # 只生成，打印路径
 #     python -m tonicuisc_server caddy --start         # 生成 + 校验 + 启动
 # 占位符（生成时会被替换）：DOMAIN 对外域名、SITE 站点地址（带非标端口时是
-# 「域名:端口」，默认就是域名）、UPSTREAM 反代目标、LOG 日志文件、STORAGE 证书目录、
-# TLS 证书指令（用 lego 签好证书时才非空）。
+# 「域名:端口」，默认就是域名）、UPSTREAM 反代目标（Python）、WEB_UPSTREAM 网页入口
+# （默认和 UPSTREAM 一样，就是 Python 自己；只有设了 TONICUISC_WEB_BUILTIN=0
+# 还在用 Node 的 webapp/server.js 时才是 127.0.0.1:8080）、LOG 日志文件、
+# STORAGE 证书目录、TLS 证书指令（用 lego 签好证书时才非空）。
 #
 # 注意：这里**不要写出带花括号的占位符原文**——替换是纯文本的，
 # 连注释里的也会被换掉，把注释行拆坏（实测踩过：校验报
@@ -33,9 +35,12 @@
 
 # ── 拓扑（家里部署）──────────────────────────────────────────────────────
 #
-#   手机 / 浏览器 ──公网 v4 或 v6 : 443（或非标端口）──► Caddy ──IPv4 127.0.0.1:8000──► tonicuisc_server
+#   手机 / 浏览器 ──公网 v4 或 v6 : 443（或非标端口）──► Caddy
+#        ──IPv4 127.0.0.1:8080──► Node（webapp/server.js，落地页 + /music）
+#        ──IPv4 127.0.0.1:8000──► tonicuisc_server（/api、/login、音频）
 #
-#   服务端只监听 IPv4 回环，外面只能从 Caddy 的 443 进来。
+#   两个服务都只监听 IPv4 回环，外面只能从 Caddy 的 443 进来。
+#   只跑 Python、不要 Node 时，把 TONICUISC_WEB_PORT 设成和 TONICUISC_PORT 一样。
 #
 # ── 准备（详见 README「HTTPS」一节）──────────────────────────────────────
 #
@@ -61,8 +66,10 @@
 	# 证书：有 lego 签好的 Let's Encrypt 证书时由生成脚本填进来
 	# （走 DNS-01，**不需要入站 80/443**；没有这行时 Caddy 会自己申请，那就要入站）
 {TLS}
-	# 反代到 IPv4 回环：服务端只在 127.0.0.1:8000 上，外界碰不到它
-	reverse_proxy {UPSTREAM} {
+	# 反代到 IPv4 回环上的 Python 服务（127.0.0.1:8000）：
+	# 接口 + 落地页 + 网页播放器 + 网页会话都在同一个进程里
+	# （TONICUISC_WEB_BUILTIN=0 时才改成 Node 的 127.0.0.1:8080）
+	reverse_proxy {WEB_UPSTREAM} {
 		# 音频流可能比较大，别让反代提前断开
 		flush_interval -1
 	}

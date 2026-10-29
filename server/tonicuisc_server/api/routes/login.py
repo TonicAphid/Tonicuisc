@@ -8,6 +8,7 @@ from urllib.parse import parse_qs
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
 
+from ...auth import DeviceStatus, normalize_user_code
 from ...web import login as weblogin
 from ...web import pages
 from ..deps import client_key, get_auth
@@ -29,9 +30,27 @@ LOGIN_HEADERS = {
 
 
 @router.get("/login", response_class=HTMLResponse)
-async def login_page() -> HTMLResponse:
-    """设备码登录页（浏览器打开）。"""
-    return HTMLResponse(pages.code_step(), headers=LOGIN_HEADERS)
+async def login_page(code: str = "") -> HTMLResponse:
+    """设备码登录页（浏览器打开）。
+
+    带 ``?code=A1B1-C1D1`` 时**直接跳到「登录 / 注册」表单**——网页播放器的
+    「打开登录页批准」按钮就是这么拼链接的（以前这一步是 Node 入口替用户提交一次
+    lookup 表单，现在 Python 自己就能算，少一次往返）。
+    """
+    if not code:
+        return HTMLResponse(pages.code_step(), headers=LOGIN_HEADERS)
+
+    user_code = normalize_user_code(code)
+    if not user_code:
+        return HTMLResponse(pages.code_step(code, "设备码格式不对，应该是 A1B1-C1D1 这样。"), headers=LOGIN_HEADERS)
+    pending = await asyncio.to_thread(get_auth().pending_request, user_code)
+    if pending is None:
+        return HTMLResponse(
+            pages.code_step(user_code, "这个设备码不存在或已过期，请重新生成。"), headers=LOGIN_HEADERS
+        )
+    if pending["status"] != DeviceStatus.PENDING:
+        return HTMLResponse(pages.already_handled_step(), headers=LOGIN_HEADERS)
+    return HTMLResponse(pages.account_step(user_code), headers=LOGIN_HEADERS)
 
 
 @router.post("/login", response_class=HTMLResponse)

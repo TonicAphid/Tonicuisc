@@ -2,14 +2,110 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
 import sys
 
 import uvicorn
 
-from ..core.config import ENVIRONMENT, SETTINGS
-from ..core.environment import ENVIRONMENTS, apply_environment
+from ..core.config import ENVIRONMENT, EXTERNAL_ENV_KEYS, SETTINGS
+from ..core.environment import ENV_PATH, ENVIRONMENTS, apply_environment, parse_env_file
 from ..core.tls import ssl_kwargs
 from .console import attach, detach
+
+#: 控制台 ``restart`` 让子进程用这个退出码退出，外面的守护进程看到它就再拉一次。
+#: 选 75（EX_TEMPFAIL）只是习惯，和 0 / 1 / 2 区分开即可。
+RESTART_EXIT_CODE = 75
+
+#: 守护进程给子进程打的标记，避免子进程也去当守护进程（套娃）。
+SUPERVISED_ENV = "TONICUISC_SUPERVISED"
+
+
+def console_available() -> bool:
+    """stdin 是不是一个真终端——只有这时才有 ``>``，也才需要守护进程。"""
+    return sys.stdin is not None and sys.stdin.isatty()
+
+
+def should_supervise() -> bool:
+    """当前进程该不该只当守护进程（真正的服务放到子进程里跑）。
+
+    只在**交互式终端**里这么做：普通 ``python -m tonicuisc_server`` 由 shell 直接
+    等一个 PID，守护进程也等同一个 PID，所以 ``restart`` 换掉子进程后 shell 不会
+    提前把提示符还回来；systemd / 计划任务 / 管道这些非交互场景照旧原地跑，不引入
+    额外进程。
+
+    ``TONICUISC_RELOAD=1``（uvicorn 自己管 reloader）也不套：那层的子进程不是我们
+    的，硬套会让 reloader 找不到门。
+    """
+    if os.environ.get(SUPERVISED_ENV) == "1":
+        return False
+    if os.getenv("TONICUISC_RELOAD", "").strip().lower() in {"1", "true", "yes"}:
+        return False
+    return console_available()
+
+
+def restart_argv() -> list[str]:
+    """重新拉起自己时要敲的命令（保留原参数 / 解释器开关）。
+
+    ``sys.orig_argv``（3.10+）连 ``-u``、``-X utf8`` 这些都保留；只有在确认它确实是
+    ``-m tonicuisc_server`` 时才用，避免从测试 / 别的入口进来时把 pytest 的命令抄走。
+    """
+    original = list(getattr(sys, "orig_argv", []) or [])
+    if "tonicuisc_server" in original:
+        original[0] = sys.executable
+        return original
+    return [sys.executable, "-m", "tonicuisc_server", *sys.argv[1:]]
+
+
+def child_env() -> dict[str, str]:
+    """给服务子进程的环境变量：保留真正的 shell / systemd 覆盖，摘掉「只来自 .env」的键。
+
+    这一步是改 ``server/.env`` 后 ``restart`` 能生效的关键：父进程启动时已经把旧
+    ``.env`` 灌进了自己的 ``os.environ``，如果原样传给子进程，子进程的
+    ``load_env_file()`` 会因为「真环境变量优先」而拒绝覆盖——改了文件也白改。
+    摘掉之后再让子进程重新读文件，同时不碰用户显式设的外部变量。
+    """
+    env = dict(os.environ)
+    try:
+        values = parse_env_file(ENV_PATH.read_text(encoding="utf-8-sig", errors="replace"))
+    except OSError:
+        values = {}
+    for key in values:
+        if key not in EXTERNAL_ENV_KEYS:
+            env.pop(key, None)
+    return env
+
+
+def supervise() -> None:
+    """守护循环：拉起一个服务子进程并等它；子进程要求重启（退出码 75）时再拉一次。
+
+    为什么不在原进程里 ``os.execv``：Windows 上 ``execv`` 是「另起一个进程 + 原进程
+    退出」，shell 会立刻拿回提示符，而新服务还在同一个控制台里抢 stdin。这里让原
+    进程一直等着，shell 就始终卡在 ``python -m tonicuisc_server`` 这一条命令上；
+    也避免了反复重启时 exec 失败 / 端口被抢的竞态。
+    """
+    argv = restart_argv()
+
+    while True:
+        env = child_env()
+        env[SUPERVISED_ENV] = "1"  # 每轮都重读 .env，改完文件 restart 才有效
+        process = subprocess.Popen(argv, env=env)  # stdin/stdout/stderr 全继承
+        try:
+            code = process.wait()
+        except KeyboardInterrupt:
+            # Ctrl+C 是发给整个控制台进程组的，子进程也收到了；别自己先跑，
+            # 等它把 uvicorn / Redis / Caddy 收干净。
+            while process.poll() is None:
+                try:
+                    process.wait()
+                except KeyboardInterrupt:
+                    pass
+            code = process.returncode
+
+        if code == RESTART_EXIT_CODE:
+            print("[restart] 正在重新启动…", flush=True)
+            continue
+        raise SystemExit(code)
 
 
 def choose_environment(*, interactive: bool | None = None) -> bool:
@@ -85,6 +181,13 @@ def run_server(*, interactive: bool | None = None) -> None:
     """起服务；stdin 是控制台的话，顺手挂一个 ``>`` 命令提示符。"""
     choose_environment(interactive=interactive)
 
+    # 交互式终端：当前进程只当守护，真正的服务放到子进程里跑。这样控制台的
+    # restart 只要让子进程以 75 退出，shell 一直等的那个 PID 不会变，也不会出现
+    # 「shell 提示符回来了、服务还在同一个控制台里抢输入」。
+    if should_supervise():
+        supervise()
+        return
+
     # 环境可能是刚选的。Settings 的默认值是「类定义时」读环境变量的，选完再设 os.environ
     # 不会自动生效，所以这里显式重建一次（否则横幅 / 登录链接会退回 host:port）。
     # api.app 是 uvicorn 启动时才 import 的，能拿到重建后的对象。
@@ -126,5 +229,22 @@ def run_server(*, interactive: bool | None = None) -> None:
         # 一起收摊：不然 Caddy 会留着占 443，下次启动报「端口被占」
         caddy_runtime.stop_caddy(caddy_process)
 
+    # 控制台的 restart：uvicorn / Redis / Caddy 都收干净后再用退出码告诉守护进程
+    # 「再拉一次」。非交互场景没有控制台，这个分支走不到。
+    if getattr(server, "restart_requested", False):
+        raise SystemExit(RESTART_EXIT_CODE)
 
-__all__ = ["run_server", "choose_environment", "ENVIRONMENT", "SETTINGS"]
+
+__all__ = [
+    "RESTART_EXIT_CODE",
+    "SUPERVISED_ENV",
+    "console_available",
+    "should_supervise",
+    "child_env",
+    "supervise",
+    "restart_argv",
+    "run_server",
+    "choose_environment",
+    "ENVIRONMENT",
+    "SETTINGS",
+]

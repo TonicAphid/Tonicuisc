@@ -2,10 +2,11 @@
 
 声明顺序有意义：``/api/library/summary`` 必须在 ``/api/library/{kind}`` 之前，
 所以 ``create_app`` 里的 include 顺序 = 路由匹配优先级，改动时要留意。
+``site``（内置网页）带一条兜底静态路由，**永远排最后**。
 """
 
 from __future__ import annotations
 
-from . import account, health, library, login, media, search, update
+from . import account, health, library, login, media, search, site, update
 
-__all__ = ["account", "health", "library", "login", "media", "search", "update"]
+__all__ = ["account", "health", "library", "login", "media", "search", "site", "update"]

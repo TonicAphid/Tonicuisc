@@ -31,7 +31,7 @@
 命令压根没出现过）。
 
 服务启动后，如果 stdin 是控制台，底部会一直留一个 ``>`` 提示符（像 MC 服务端那样），
-``h`` 看帮助、``q`` 停服务。实现都在 ``tonicuisc_server.cli`` 里。
+``h`` 看帮助、``restart`` 重载代码 / ``.env``、``q`` 停服务。实现都在 ``tonicuisc_server.cli`` 里。
 """
 
 from __future__ import annotations

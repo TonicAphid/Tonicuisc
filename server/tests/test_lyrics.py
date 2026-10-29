@@ -150,6 +150,212 @@ def test_header_line_is_removed() -> None:
     assert cleaned[0].text == "故事的小黄花"
 
 
+# ------------------------------------------------------- 署名行（「简介」）不能被吞
+def _line(start: int, text: str) -> LyricsLine:
+    return LyricsLine(start, start + 1000, (LyricsWord(start, start + 1000, text),))
+
+
+def test_credit_lines_are_kept() -> None:
+    """``词：周杰伦`` 这类署名行以前会因为含歌手名被当成头部删掉。"""
+    lines = (
+        _line(0, "词：周杰伦"),
+        _line(1000, "曲：周杰伦"),
+        _line(2000, "编曲：洪敬尧"),
+        _line(3000, "故事的小黄花"),
+    )
+
+    cleaned = strip_header(lines, "晴天", "周杰伦")
+
+    assert [line.text for line in cleaned] == ["词：周杰伦", "曲：周杰伦", "编曲：洪敬尧", "故事的小黄花"]
+
+
+def test_title_only_line_is_kept() -> None:
+    """只有歌名、没有歌手的一行不敢删：正文第一句也可能正好是歌名。"""
+    lines = (_line(0, "晴天"), _line(1000, "故事的小黄花"))
+    assert len(strip_header(lines, "晴天", "周杰伦")) == 2
+
+
+def test_two_line_header_is_removed() -> None:
+    """「歌名」一行 + 「歌手」一行的老式头部照删。"""
+    lines = (_line(0, "晴天"), _line(1000, "周杰伦"), _line(2000, "故事的小黄花"))
+    cleaned = strip_header(lines, "晴天", "周杰伦")
+    assert [line.text for line in cleaned] == ["故事的小黄花"]
+
+
+#: 截图里那行：歌名带影视说明，两位歌手各自还带括号英文名
+_MULTI_ARTIST_HEADER = "缘分一道桥 (《长城》电影片尾曲) - 王力宏 (Leehom Wang)/谭维维 (Sitar Tan)"
+
+
+@pytest.mark.parametrize(
+    "artists",
+    [
+        "王力宏/谭维维",
+        "王力宏、谭维维",
+        "王力宏 (Leehom Wang)/谭维维 (Sitar Tan)",
+        "王力宏",  # 元信息只给了第一歌手，也要能认出来
+    ],
+)
+def test_header_with_multiple_artists_and_latin_names(artists: str) -> None:
+    """``王力宏`` 和 ``谭维维`` 中间夹着 ``(Leehom Wang)/``，整串匹配不到，要按单个名字比。"""
+    lines = (_line(0, _MULTI_ARTIST_HEADER), _line(1000, "秦时明月汉时关"))
+    cleaned = strip_header(lines, "缘分一道桥", artists)
+
+    assert [line.text for line in cleaned] == ["秦时明月汉时关"]
+
+
+def test_artist_keys_split() -> None:
+    from tonicuisc_server.lyrics.clean import artist_keys
+
+    assert "王力宏" in artist_keys("王力宏 (Leehom Wang)/谭维维 (Sitar Tan)")
+    assert "谭维维" in artist_keys("王力宏、谭维维")
+    assert "周杰伦" in artist_keys("周杰伦 feat. 杨瑞代")
+    assert artist_keys("") == set()
+
+
+# ---------------------------------------------- 制作名单块（按结构，不靠角色词表）
+#: 《天地龙鳞》开头那一整块（截图里被注音的就是它）
+_CREDIT_BLOCK = (
+    "词：方文山",
+    "曲：王力宏",
+    "编曲：唐达",
+    "制作人：王力宏",
+    "录音室：西东音乐 北京",
+    "特别鸣谢：西东音乐（王力宏工作室）",
+    "主题歌音乐专辑工作团队",
+    "总策划：张洋",
+    "海报设计团队：本真工作室：李贞（海报设计总监）/段冰洋",
+    "MV团队：",
+    "承制：北京龙生堂文化传媒有限公司",
+    "音乐发行：太合麦田",
+    "项目总统筹：闫曼嘉",
+    "项目/艺人统筹：李艺佳/李靖",
+    "项目/艺人协力：张靓琳/肖晰美（实习）/陈尧天（实习）",
+    "北京很有可能文化传播有限公司：",
+    "金朝顺/沈雨娟/张倩玉/夏童/田贝贝/汪斯遥/丁敏",
+    "独家短视频平台：抖音",
+)
+
+
+def _block_lines() -> tuple[LyricsLine, ...]:
+    lines = tuple(_line(index * 1000, text) for index, text in enumerate(_CREDIT_BLOCK))
+    return lines + (_line(99_000, "这江山我起笔 民族血脉又几万里"), _line(100_000, "几世纪六百年里"))
+
+
+def test_credit_block_is_detected_without_a_word_list() -> None:
+    """「承制」「音乐发行」「项目总统筹」「海报设计团队」这些词不在任何表里，也要认出来。"""
+    from tonicuisc_server.lyrics.clean import credit_prefix_length
+
+    lines = _block_lines()
+
+    assert credit_prefix_length(lines) == len(_CREDIT_BLOCK)
+
+
+def test_credit_block_stops_at_first_lyric() -> None:
+    from tonicuisc_server.lyrics.clean import credit_prefix_length
+
+    assert credit_prefix_length((_line(0, "故事的小黄花"), _line(1000, "从出生那年就飘着"))) == 0
+    assert credit_prefix_length((_line(0, "词：周杰伦"), _line(1000, "故事的小黄花"))) == 1
+
+
+def test_placeholder_timing_counts_as_credit() -> None:
+    """KRC 给不唱的行按每字 ~27ms 铺时间，正文一行 3~9 秒。"""
+    from tonicuisc_server.lyrics.clean import looks_like_credit_line
+
+    credit = LyricsLine(0, 162, (LyricsWord(0, 162, "无名小卒甲"),))
+    lyric = LyricsLine(0, 7000, (LyricsWord(0, 7000, "无名小卒甲"),))
+
+    assert looks_like_credit_line(credit) is True
+    assert looks_like_credit_line(lyric) is False
+
+
+def test_parenthesized_notice_counts_as_credit() -> None:
+    from tonicuisc_server.lyrics.clean import looks_like_credit_line
+
+    assert looks_like_credit_line(_line(0, "（未经著作人许可，不得翻唱翻录或使用）")) is True
+    assert looks_like_credit_line(_line(0, "这一路上走走停停")) is False
+
+
+def test_pinyin_skips_whole_credit_block() -> None:
+    """整块署名都不注音，正文照常注音——而且一个字都不删。"""
+    pytest.importorskip("pypinyin")
+    from tonicuisc_server.lyrics.clean import credit_prefix_length
+    from tonicuisc_server.lyrics.pinyin import fill_pinyin
+
+    lines = _block_lines()
+    credits = credit_prefix_length(lines)
+    filled = fill_pinyin(lines, credit_count=credits)
+
+    assert len(filled) == len(lines), "不能删行"
+    assert all(line.roman == "" for line in filled[:credits])
+    assert filled[credits].text == "这江山我起笔 民族血脉又几万里"
+    assert filled[credits].roman.startswith("zhè")
+
+
+# ------------------------------------------------------------------ 拼音的适配
+def test_pinyin_skips_credit_lines() -> None:
+    """``词：周杰伦`` 不该被注成 ``ci zhou jie lun``。"""
+    pytest.importorskip("pypinyin")
+    from tonicuisc_server.lyrics.pinyin import fill_pinyin
+
+    lines = (_line(0, "词：周杰伦"), _line(1000, "故事的小黄花"))
+    filled = fill_pinyin(lines)
+
+    assert filled[0].roman == ""
+    assert filled[0].text == "词：周杰伦"
+    assert filled[1].roman  # 正文照常注音
+
+
+def test_pinyin_skips_english_lines_with_stray_chinese() -> None:
+    """英语歌里夹一句中文不该整行注音。"""
+    pytest.importorskip("pypinyin")
+    from tonicuisc_server.lyrics.pinyin import fill_pinyin
+
+    lines = (_line(0, "I love you 我爱你"), _line(1000, "Baby 我爱你"))
+    filled = fill_pinyin(lines)
+
+    assert filled[0].roman == "", "英文为主的句子不注音"
+    assert filled[1].roman, "中文占一半以上的句子照注"
+
+
+def test_pinyin_skips_japanese_and_single_char_lines() -> None:
+    """日文行（pypinyin 读的是中文音）和「啊」这种单字行都不注。"""
+    pytest.importorskip("pypinyin")
+    from tonicuisc_server.lyrics.pinyin import fill_pinyin
+
+    lines = (_line(0, "君の名は"), _line(1000, "啊"), _line(2000, "晴天"))
+    filled = fill_pinyin(lines)
+
+    assert [line.roman for line in filled][:2] == ["", ""]
+    assert filled[2].roman
+
+
+def test_credit_line_roman_is_stripped() -> None:
+    """KRC 自带的那档 roman 也会给「作词：」注音，一样要清掉（不依赖 pypinyin）。"""
+    from tonicuisc_server.lyrics.pinyin import fill_pinyin
+
+    lines = (
+        LyricsLine(0, 1000, (LyricsWord(0, 1000, "作词：米津玄師", roman="sa ku shi"),), roman="sa ku shi"),
+        _line(1000, "晴天"),
+    )
+    filled = fill_pinyin(lines)
+
+    assert filled[0].text == "作词：米津玄師", "原文不动"
+    assert filled[0].roman == ""
+    assert all(word.roman == "" for word in filled[0].words)
+
+
+def test_pinyin_never_changes_original_text() -> None:
+    """注音只加附加行，原文一个字都不能动。"""
+    pytest.importorskip("pypinyin")
+    from tonicuisc_server.lyrics.pinyin import fill_pinyin
+
+    lines = (_line(0, "故事的小黄花"),)
+    filled = fill_pinyin(lines)
+
+    assert filled[0].text == "故事的小黄花"
+    assert "".join(word.text for word in filled[0].words) == "故事的小黄花"
+
+
 def test_matcher_prefers_title_and_duration() -> None:
     good = score(
         title="晴天", artists="周杰伦", duration_s=269,

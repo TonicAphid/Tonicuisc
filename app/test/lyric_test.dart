@@ -191,4 +191,23 @@ void main() {
 
     expect(sheet.lines.length, 3, reason: '掐头不掐中间');
   });
+
+  test('逐词进度：每个词各算各的（折行也不受影响）', () {
+    const word = LyricWord(
+      start: Duration(milliseconds: 1000),
+      end: Duration(milliseconds: 2000),
+      text: 'animals',
+    );
+
+    expect(word.progressAt(const Duration(milliseconds: 500)), 0);
+    expect(word.progressAt(const Duration(milliseconds: 1500)), closeTo(0.5, 1e-9));
+    expect(word.progressAt(const Duration(milliseconds: 2000)), 1);
+    expect(word.progressAt(const Duration(milliseconds: 9000)), 1);
+  });
+
+  test('零时长的词不会算出 NaN', () {
+    const word = LyricWord(start: Duration(seconds: 1), end: Duration(seconds: 1), text: '啊');
+    expect(word.progressAt(const Duration(milliseconds: 999)), 0);
+    expect(word.progressAt(const Duration(seconds: 1)), 1);
+  });
 }

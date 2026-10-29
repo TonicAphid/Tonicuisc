@@ -226,23 +226,27 @@ class DownloadMixin:
         return None
 
     # ------------------------------------------------------- 边下边播（未缓存时用）
-    def open_upstream(self, item_id: str) -> tuple[Any, Path, Path]:
+    def open_upstream(self, item_id: str, *, range_header: str | None = None) -> tuple[Any, Path, Path]:
         """连上音源直链，返回 (响应, 缓存目标, 临时文件)。
 
         先拿到响应头再交给 StreamingResponse，这样上游报错还能正常返回 502。
         请求走 musicdl 自己的会话（UA / cookies / 代理都已就绪），
         直接用裸 requests 会被 CDN 403。
         403/404 多半是直链过期，会自动重搜一次换新链接再试。
+
+        ``range_header`` 是浏览器/播放器要跳转时带来的 ``Range``：透给音源，
+        能拿到 206 就直接从中途开始放（见 ``api/routes/media.py``）。
         """
         song = self.get_song(item_id)
         response: Any = None
         last_error: Exception | None = None
+        extra = {"Range": range_header} if range_header else None
         for attempt in range(2):
             url = getattr(song, "download_url", None)
             if not isinstance(url, str) or not url.startswith("http"):
                 raise DownloadFailed("该歌曲没有可用下载链接")
             try:
-                response = self._open_url(song, url)
+                response = self._open_url(song, url, extra_headers=extra)
                 break
             except Exception as exc:
                 last_error = exc
@@ -301,6 +305,19 @@ class DownloadMixin:
             return str(exc) or exc.__class__.__name__
         try:
             return None
+        finally:
+            response.close()
+
+    def forward(self, response: Any, chunk_size: int = 512 * 1024) -> Iterator[bytes]:
+        """把上游的分段响应原样转发，**不写缓存**。
+
+        只用于「未缓存 + 客户端要跳转」那种 206：这段字节是从中间开始的，
+        拼进缓存文件会错位。
+        """
+        try:
+            for chunk in response.iter_content(chunk_size=chunk_size):
+                if chunk:
+                    yield chunk
         finally:
             response.close()
 

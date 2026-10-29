@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Tonicuisc · 把想听的歌，留在自己手里</title>
+<meta name="description" content="Tonicuisc 是一个自用的音乐客户端：酷我音源、直链下载、逐字歌词、静默更新。没有广告，没有会员墙。">
+<meta name="theme-color" content="#ffffff">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%230a6cf1'/%3E%3Crect x='6' y='6' width='9' height='9' rx='3' fill='%23fff' opacity='.85'/%3E%3C/svg%3E">
+<meta property="og:title" content="Tonicuisc · 把想听的歌，留在自己手里">
+<meta property="og:description" content="酷我音源、直链下载、逐字歌词、静默更新。">
+<meta property="og:type" content="website">
+<link rel="stylesheet" href="style.css">
+<noscript><style>.reveal { opacity: 1; transform: none; }</style></noscript>
+</head>
+<body>
+
+<!-- 顶部导航：滚过首屏后加毛玻璃底 -->
+<header class="nav" id="nav">
+  <a class="brand" href="#top" aria-label="Tonicuisc 首页">
+    <span class="brand-mark" aria-hidden="true"></span>
+    <span class="brand-name">Tonicuisc</span>
+  </a>
+  <nav class="nav-links" aria-label="页面导航">
+    <a href="#features">功能</a>
+    <a href="#ui">界面</a>
+    <a href="/music">网页播放</a>
+    <a href="#download">下载</a>
+    <a href="#faq">问答</a>
+  </nav>
+  <a class="btn btn-primary btn-sm nav-cta" href="#download">获取客户端</a>
+</header>
+
+<main id="top">
+
+  <!-- 首屏 -->
+  <section class="hero">
+    <!-- 背景等高线：和主站一样，很淡，只在左侧露出来 -->
+    <svg class="hero-contour" viewBox="0 0 1200 900" preserveAspectRatio="xMinYMid slice" aria-hidden="true">
+      <g fill="none" stroke="currentColor" stroke-width="1.1">
+        <path d="M-40 640c90-40 150 10 230-30s120-120 90-190-140-70-190-20-40 130 20 160 160 0 220-50 60-150 0-190-170-10-210 60-10 150 70 180 180 0 240-70 50-170-30-200-190-20-250 50"/>
+        <path d="M-60 720c120-50 200 20 300-30s160-150 110-240-200-90-270-20-50 170 30 210 210 0 290-70 80-190 0-240-220-20-280 70-20 190 80 230 240 0 320-90 70-220-40-260-250-30-330 60"/>
+        <path d="M120 830c120-70 220 0 320-60s150-180 80-270-230-80-310 0-40 190 60 230 240-10 320-90 70-210-30-260"/>
+        <path d="M-30 420c80-20 130 30 210 0s100-110 60-160-140-40-180 10 0 120 70 140 170-10 220-60"/>
+      </g>
+      <g fill="none" stroke="currentColor" stroke-width="1.1" opacity=".55">
+        <path d="M-20 980c140-80 250 10 360-70s140-220 60-320-260-90-350 10-40 220 70 270 280-10 370-100 80-250-40-310"/>
+        <path d="M260 160c70-40 150-10 190 50s10 150-70 170-170-20-190-90 10-100 70-130"/>
+      </g>
+    </svg>
+
+    <div class="hero-copy">
+      <h1 class="hero-title">你好，我是 Tonicuisc</h1>
+      <p class="hero-sub">自用音乐客户端 · 酷我音源 · 直链下载</p>
+      <p class="hero-desc">
+        把想听的歌搜出来、听下去、存到本地。<br>
+        没有广告，没有会员墙，只有你自己的音乐库。
+      </p>
+      <div class="hero-actions">
+        <a class="btn btn-primary" href="#download">下载 Windows 版</a>
+        <a class="btn btn-ghost" href="#features">看看能做什么</a>
+      </div>
+      <p class="hero-note">Windows 10/11 · Linux · 免安装可用</p>
+    </div>
+
+    <!-- 右侧的等距方块云，由 app.js 生成 -->
+    <div class="hero-art" aria-hidden="true">
+      <div class="hero-glow"></div>
+      <div class="cubes" id="cubes"></div>
+    </div>
+  </section>
+
+  <!-- 功能 -->
+  <section class="section" id="features">
+    <div class="section-head reveal">
+      <p class="eyebrow">Features</p>
+      <h2>够用，而且不打扰</h2>
+      <p class="section-desc">只做听歌真正会用到的几件事，剩下的交给你的耳朵。</p>
+    </div>
+
+    <div class="cards">
+      <article class="card reveal">
+        <span class="card-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+            <circle cx="10.5" cy="10.5" r="6.5"></circle>
+            <path d="M15.5 15.5 21 21"></path>
+          </svg>
+        </span>
+        <h3>酷我搜索</h3>
+        <p>直接查酷我音源，结果按相关度排。搜不到的歌，换个关键词再试一次就好。</p>
+      </article>
+
+      <article class="card reveal">
+        <span class="card-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 3v12"></path>
+            <path d="m7 11 5 5 5-5"></path>
+            <path d="M4 20h16"></path>
+          </svg>
+        </span>
+        <h3>直链下载</h3>
+        <p>拿到的是原始音频直链，不是转码后的碎片。下载进度、速度、落盘位置都看得见。</p>
+      </article>
+
+      <article class="card reveal">
+        <span class="card-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M4 6h10M4 12h16M4 18h7"></path>
+            <circle cx="18" cy="6" r="2"></circle>
+            <circle cx="15" cy="18" r="2"></circle>
+          </svg>
+        </span>
+        <h3>逐字歌词</h3>
+        <p>支持 KRC 逐字时间轴：唱到哪个字，哪一行就亮到哪个字。没有逐字就退回整行高亮。</p>
+      </article>
+
+      <article class="card reveal">
+        <span class="card-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M20 12a8 8 0 1 1-2.34-5.66"></path>
+            <path d="M20 4v5h-5"></path>
+          </svg>
+        </span>
+        <h3>静默更新</h3>
+        <p>启动时顺手检查新版本，下载、校验、换装，全程不打断你正在听的歌。</p>
+      </article>
+    </div>
+  </section>
+
+  <!-- 界面预览 -->
+  <section class="section section-split" id="ui">
+    <div class="split-copy reveal">
+      <p class="eyebrow">Interface</p>
+      <h2>苹果风，但不花哨</h2>
+      <p class="section-desc">
+        侧边栏三个入口，搜索、列表、我的。播放条常驻底部，切歌不用离开当前页面。
+      </p>
+      <ul class="ticks">
+        <li>窄屏自动切成底部胶囊 tab，宽屏才是侧边栏</li>
+        <li>深浅色跟随系统，卡片、弹窗、提示都是同一套圆角</li>
+        <li>列表、播放器、歌词页之间的过渡带一点点动效</li>
+      </ul>
+    </div>
+
+    <div class="split-art reveal">
+      <!-- 纯 CSS 画的界面示意，不加载任何截图 -->
+      <div class="mock" role="img" aria-label="Tonicuisc 界面示意">
+        <div class="mock-bar">
+          <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+          <span class="mock-title">tonicuisc</span>
+        </div>
+        <div class="mock-body">
+          <aside class="mock-side">
+            <div class="mock-logo"><span class="brand-mark sm"></span>Tonicuisc</div>
+            <div class="mock-nav active">搜索</div>
+            <div class="mock-nav">列表</div>
+            <div class="mock-nav">我的</div>
+          </aside>
+          <div class="mock-main">
+            <div class="mock-search">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                <circle cx="10.5" cy="10.5" r="6.5"></circle><path d="M15.5 15.5 21 21"></path>
+              </svg>
+              <span>搜索歌曲 / 歌手</span>
+            </div>
+            <div class="mock-row">
+              <span class="mock-cover c1"></span>
+              <span class="mock-lines"><i class="w60"></i><i class="w35"></i></span>
+              <span class="mock-tag">FLAC</span>
+            </div>
+            <div class="mock-row">
+              <span class="mock-cover c2"></span>
+              <span class="mock-lines"><i class="w48"></i><i class="w28"></i></span>
+              <span class="mock-tag">MP3</span>
+            </div>
+            <div class="mock-row">
+              <span class="mock-cover c3"></span>
+              <span class="mock-lines"><i class="w66"></i><i class="w30"></i></span>
+              <span class="mock-tag">FLAC</span>
+            </div>
+            <div class="mock-row">
+              <span class="mock-cover c4"></span>
+              <span class="mock-lines"><i class="w42"></i><i class="w24"></i></span>
+              <span class="mock-tag">MP3</span>
+            </div>
+          </div>
+        </div>
+        <div class="mock-player">
+          <span class="mock-cover c2 sm"></span>
+          <span class="mock-lines"><i class="w40"></i><i class="w24"></i></span>
+          <span class="mock-controls" aria-hidden="true">
+            <i></i><i class="play"></i><i></i>
+          </span>
+          <span class="mock-progress"><i></i></span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 下载 -->
+  <section class="section" id="download">
+    <div class="download reveal">
+      <div class="download-glow" aria-hidden="true"></div>
+      <p class="eyebrow">Download</p>
+      <h2>装上就能听</h2>
+      <p class="section-desc">
+        桌面端免登录试用，登录一次之后密钥存在本机安全存储里，下次打开直接用。
+      </p>
+
+      <div class="download-actions">
+        <a class="btn btn-primary btn-lg" id="dl-win" href="download/windows">
+          下载 Windows 版
+        </a>
+        <a class="btn btn-ghost btn-lg" href="/music">
+          网页播放器
+        </a>
+      </div>
+
+      <p class="download-meta">
+        <span class="chip" id="dl-version">最新版</span>
+        <span>Windows 10/11 x64</span>
+        <span class="sep">·</span>
+        <span id="dl-size">约 40 MB</span>
+        <span class="sep meta-extra">·</span>
+        <span class="meta-extra">安装版 / 便携版都在里面</span>
+      </p>
+    </div>
+  </section>
+
+  <!-- 问答 -->
+  <section class="section" id="faq">
+    <div class="section-head reveal">
+      <p class="eyebrow">FAQ</p>
+      <h2>可能会问</h2>
+    </div>
+    <div class="faq">
+      <details class="reveal">
+        <summary>需要注册账号吗？</summary>
+        <p>要，但只用一次。客户端会生成一个设备码，在网页里批准之后，这台设备就记住了，之后不再打扰你。</p>
+      </details>
+      <details class="reveal">
+        <summary>我的听歌记录存在哪？</summary>
+        <p>存在自己的服务器上，跟任何第三方平台都没关系。换设备时用设备码重新批准一次就行。</p>
+      </details>
+      <details class="reveal">
+        <summary>支持哪些系统？</summary>
+        <p>Windows 10/11 和 Linux 桌面是主力，Android 可以用同一份代码自己构建。iOS 需要自己签名。</p>
+      </details>
+      <details class="reveal">
+        <summary>为什么下载的不是官方 App？</summary>
+        <p>因为这就是个自用的小项目：一个服务端 + 一个客户端，没有上架任何商店，也不打算上架。</p>
+      </details>
+    </div>
+  </section>
+
+</main>
+
+<footer class="footer">
+  <div class="footer-inner">
+    <span class="brand-mark sm" aria-hidden="true"></span>
+    <span>Tonicuisc · 自用音乐服务</span>
+    <span class="sep">·</span>
+    <a href="/login">登录 / 设备批准</a>
+    <span class="sep">·</span>
+    <a href="https://beian.miit.gov.cn/" target="_blank" rel="noopener noreferrer">蒙ICP备2026011401号-1</a>
+  </div>
+</footer>
+
+<script src="app.js" defer></script>
+</body>
+</html>

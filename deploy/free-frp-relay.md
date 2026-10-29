@@ -376,7 +376,7 @@ REQ='GET /api/health HTTP/1.1\r\nHost: uisc.tonicaphid.cn\r\nConnection: close\r
 # ① 浏览器式（openssl 3.5 默认带 PQ 混合密钥）：拿到完整 HTTP 响应
 printf "$REQ" | openssl s_client -connect uisc.tonicaphid.cn:443 -4 \
   -servername uisc.tonicaphid.cn -quiet -ign_eof
-# → {"status":"ok","sources":["MiguMusicClient","KuwoMusicClient"],...}
+# → {"status":"ok","sources":["KuwoMusicClient"],...}
 
 # ② App 式（只给 X25519，就是 dart:io 的 hello）：连接直接被打掉
 printf "$REQ" | openssl s_client -connect uisc.tonicaphid.cn:443 -4 \

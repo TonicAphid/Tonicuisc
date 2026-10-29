@@ -73,19 +73,60 @@ async def lyric(item_id: str, fmt: str = Query("text", alias="format")):
         raise HTTPException(status_code=404, detail="歌曲不存在或已过期，请重新搜索")
 
 
+def _range_start(header: str | None) -> int | None:
+    """取 ``Range: bytes=N-`` 的起点；``N == 0`` 当没带。
+
+    播放器几乎每个请求都会带 ``Range``，第一次放歌带的是 ``bytes=0-``（就是「整段」）。
+    只有从中间开始（用户拖了进度条 / 点了某句歌词）才是真的「跳转」。
+    """
+    if not header or not header.startswith("bytes="):
+        return None
+    spec = header[len("bytes=") :].split(",")[0].strip()
+    start = spec.partition("-")[0].strip()
+    if not start.isdigit():
+        return None
+    value = int(start)
+    return value if value > 0 else None
+
+
 @router.get("/api/stream/{item_id:path}")
 async def stream(item_id: str, request: Request) -> StreamingResponse:
     """播放流。
 
     已缓存：按 Range 读本地文件（206，支持拖动进度）。
     未缓存：边从音源拉边播，同时写入缓存，所以第一次点歌不用等整首下完。
+    **未缓存时的跳转**：把客户端的 ``Range`` 原样透给音源，直接从中途开始拉（206）。
+    以前这里不管 ``Range`` 一律返回 200 + ``Accept-Ranges: none``，播放器没法跳，
+    只能把进度条弹回 0——表现就是「拖一下就回到开头」。
     """
     service = get_service()
     try:
         path = await asyncio.to_thread(service.cached_file, item_id)
         upstream = None
         if path is None:
-            upstream = await asyncio.to_thread(service.open_upstream, item_id)
+            range_header = request.headers.get("range")
+            start = _range_start(range_header)
+            upstream = await asyncio.to_thread(
+                service.open_upstream,
+                item_id,
+                range_header=range_header if start else None,
+            )
+            response, target, temp_path = upstream
+            # 音源认了 Range（206）就直接透传，不写缓存：这段是从中间开始的，
+            # 拼进缓存文件会把字节错位。
+            if start and getattr(response, "status_code", 200) == 206:
+                content_range = str(response.headers.get("content-range") or "")
+                if content_range:
+                    headers = {"Accept-Ranges": "bytes", "Content-Range": content_range}
+                    length = response.headers.get("content-length")
+                    if length:
+                        headers["Content-Length"] = str(length)
+                    return StreamingResponse(
+                        service.forward(response),
+                        status_code=206,
+                        media_type=_mime_of(target),
+                        headers=headers,
+                    )
     except SongNotFound:
         raise HTTPException(status_code=404, detail="歌曲不存在或已过期，请重新搜索")
     except DownloadFailed as exc:

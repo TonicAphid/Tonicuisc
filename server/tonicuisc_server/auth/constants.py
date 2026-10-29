@@ -13,7 +13,9 @@ API_KEY_HEADER = "x-api-key"
 
 #: 不需要 API Key 的路径（**只对 ``/api`` 前缀生效**，见 ``api/middleware.py``）。
 #: ``/login`` 和 ``/health`` 不在 ``/api`` 下，本来就不经过鉴权中间件，别往这里加。
-PUBLIC_PATHS = frozenset({"/api/health", "/api/device/start", "/api/device/status"})
+#: ``/api/update`` 只返回版本号和安装包地址（都是公开的 Release 信息），
+#: 落地页要在登录前显示版本号，所以放行。
+PUBLIC_PATHS = frozenset({"/api/health", "/api/device/start", "/api/device/status", "/api/update"})
 
 #: 设备码格式：A1B1-C1D1（8 位大写字母数字 + 中间一个横杠）
 USER_CODE_RE = re.compile(r"^[A-Z0-9]{4}-[A-Z0-9]{4}$")

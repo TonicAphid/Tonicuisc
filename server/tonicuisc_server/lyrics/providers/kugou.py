@@ -17,7 +17,7 @@ from typing import Any
 import requests
 
 from ...core.logging import timing_log
-from ..clean import strip_header
+from ..clean import credit_prefix_length, strip_header
 from ..krc import decode_krc, parse_krc
 from ..matcher import clean_text, duration_seconds, score
 from ..models import EnhancedLyrics
@@ -64,10 +64,13 @@ class KugouProvider:
         if raw is None:
             return None
         text = decode_krc(raw)
-        lines = fill_pinyin(strip_header(parse_krc(text), title, artists))
+        parsed = strip_header(parse_krc(text), title, artists)
+        # 开头那一整块制作名单（可能有几十行）不注音；文字照留
+        credits = credit_prefix_length(parsed)
+        lines = fill_pinyin(parsed, credit_count=credits)
         if not lines:
             return None
-        timing_log(f"[lyric] 酷狗命中「{matched_title} - {matched_artists}」{len(lines)} 行")
+        timing_log(f"[lyric] 酷狗命中「{matched_title} - {matched_artists}」{len(lines)} 行（署名 {credits} 行）")
         return EnhancedLyrics(provider=self.name, lines=lines)
 
     # ------------------------------------------------------------------ 搜索

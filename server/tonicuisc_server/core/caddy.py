@@ -205,6 +205,22 @@ def download_caddy() -> Path:
     )
 
 
+def web_upstream() -> str:
+    """Caddy 的反代目标。
+
+    默认（``TONICUISC_WEB_BUILTIN=1``）就是 **Python 自己的端口**：落地页、``/music``、
+    网页会话都在 FastAPI 进程里，一条命令跑完，不需要 Node。
+
+    只有显式设了 ``TONICUISC_WEB_BUILTIN=0``（还在用 Node 的 ``webapp/server.js``）
+    才反代到 ``TONICUISC_WEB_PORT``；没配那个端口就退回 Python 端口。
+    """
+    if bool(getattr(SETTINGS, "web_builtin", True)):
+        port = SETTINGS.port
+    else:
+        port = int(getattr(SETTINGS, "web_port", 0) or SETTINGS.port)
+    return f"{display_host(SETTINGS.host)}:{port}"
+
+
 def generate_config(*, force: bool = False) -> Path:
     """按当前环境生成实际要跑的 Caddyfile。
 
@@ -225,6 +241,9 @@ def generate_config(*, force: bool = False) -> Path:
     # 「所有网卡」，拿去连是错的。display_host 会把它换成 127.0.0.1（和横幅同一套逻辑，
     # 避免两处各写一份、日后漂移）。
     upstream = f"{display_host(SETTINGS.host)}:{SETTINGS.port}"
+    # 网页入口：默认就是上面这个 Python 端口（内置网页）；只有设了
+    # TONICUISC_WEB_BUILTIN=0 才回到「反代到 Node 的 TONICUISC_WEB_PORT」。
+    entry = web_upstream()
 
     # 站点地址：默认就是裸域名（Caddy 按 443 处理）。住宅宽带 80/443 常被运营商
     # 封掉，被封时设 TONICUISC_HTTPS_PORT=8443 —— 站点地址就变成
@@ -251,6 +270,7 @@ def generate_config(*, force: bool = False) -> Path:
         template.replace("{DOMAIN}", ENVIRONMENT.domain)
         .replace("{SITE}", site)
         .replace("{UPSTREAM}", upstream)
+        .replace("{WEB_UPSTREAM}", entry)
         .replace("{LOG}", "caddy.log")
         .replace("{TLS}", tls_block)
         # 证书 / ACME 账号落在项目里，不碰 %AppData%（受限令牌下建不了目录，
@@ -266,7 +286,7 @@ def generate_config(*, force: bool = False) -> Path:
             pass
 
     target.write_text(rendered, encoding="utf-8", newline="\n")
-    _log(f"已生成配置：{target}（站点 {site} → {upstream}；{tls_note}）")
+    _log(f"已生成配置：{target}（站点 {site} → {entry}；{tls_note}）")
     return target
 
 
@@ -364,6 +384,32 @@ def validate_config(path: Path, config: Path) -> tuple[bool, str]:
         return False, f"{type(exc).__name__}: {exc}"
     if result.returncode == 0:
         return True, "配置有效"
+    detail = (result.stderr or result.stdout or "").strip().splitlines()
+    return False, detail[-1] if detail else f"退出码 {result.returncode}"
+
+
+def reload_config(path: Path, config: Path, *, timeout: float = 60.0) -> tuple[bool, str]:
+    """把**已经在跑**的 Caddy 切到 ``config``（``caddy reload``，走本机管理端点）。
+
+    为什么需要：``ensure_running`` 以前发现 2019 有响应就直接返回，配置根本不重新
+    生成/加载。于是从 uisc 切到 tuisc 后，Python 这边横幅已经是 tuisc，Caddy 却还
+    在按 uisc 的站点配置干活——表现就是「服务起来了，但 tuisc 域名打不开」。重载不会
+    重启进程，443 上的连接不受影响。
+    """
+    try:
+        result = subprocess.run(
+            [str(path), "reload", "--config", str(config)],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            env=caddy_env(),
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+    if result.returncode == 0:
+        return True, "配置已重载"
     detail = (result.stderr or result.stdout or "").strip().splitlines()
     return False, detail[-1] if detail else f"退出码 {result.returncode}"
 
@@ -467,14 +513,10 @@ def ensure_running(*, auto_download: bool | None = None) -> subprocess.Popen | N
 
     服务端不该因为「Caddy 起不来」就整个起不来——多半是端口被占 / 没权限 /
     入站没放行，这些都是可以边跑边修的。所以这里把原因讲清楚，然后返回 ``None``。
-    """
-    # 已经有一个在跑（比如你手动开的）：**不再起第二个**，管理端口会打架。
-    # 返回 None 表示「不是我们起的」，退出时也就不会去停它。
-    if admin_alive():
-        _log("已经有一个 Caddy 在跑了（管理端点 127.0.0.1:2019 有响应），不重复启动")
-        _log("如果你想让它用新配置：先停掉那个，再重启本服务（或用 caddy reload）")
-        return None
 
+    已经有一个 Caddy 在跑时不会起第二个（管理端口 2019 会打架），但会**重载配置**：
+    否则刚切过环境（uisc ↔ tuisc）时，Caddy 还按旧域名干活，新域名看起来就是「打不开」。
+    """
     try:
         path = find_caddy(auto_download=SETTINGS.caddy_download if auto_download is None else auto_download)
     except (RuntimeError, OSError, urllib.error.URLError) as exc:
@@ -501,6 +543,18 @@ def ensure_running(*, auto_download: bool | None = None) -> subprocess.Popen | N
         config = generate_config()
     except Exception as exc:
         _log(f"生成 Caddyfile 失败：{exc}")
+        return None
+
+    # 已经有一个在跑（比如你手动开的 / 上次没退干净）：**不再起第二个**，管理端口会打架。
+    # 但配置要重载成当前环境的，否则切环境后域名还是旧的。
+    # 返回 None 表示「不是我们起的」，退出时也就不会去停它。
+    if admin_alive():
+        ok, detail = reload_config(path, config)
+        if ok:
+            _log(f"已有 Caddy 在跑，已重载配置：{ENVIRONMENT.domain} → {web_upstream()}")
+        else:
+            _log(f"已有 Caddy 在跑，但配置重载失败：{detail}")
+            _log("旧配置可能还停在别的域名上。手动重启那个 Caddy，或跑 python -m tonicuisc_server caddy --start")
         return None
 
     ok, detail = validate_config(path, config)

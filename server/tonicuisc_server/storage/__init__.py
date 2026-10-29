@@ -6,6 +6,7 @@
 * ``searches``    —— 搜索历史（按关键词聚合）
 * ``library``     —— 喜欢 / 收藏 / 播放历史（按账户）
 * ``devices`` / ``users`` / ``device_requests`` —— 设备与账户
+* ``weblogin``    —— 网页「记住这台浏览器」：``sha256(浏览器指纹)`` → 设备 ID（重启后自动恢复登录）
 * ``sc``          —— 搜索结果缓存（默认 24 小时，**重启后依然命中**，不用重新联网搜）
 * ``lyric``       —— 增强（逐字）歌词缓存，命中后 30 天，没找到的负缓存 6 小时
 
@@ -31,6 +32,7 @@ from .lyrics import LyricsCacheMixin
 from .search_cache import SearchCacheMixin
 from .songs import SongMixin
 from .users import UserMixin
+from .web_logins import WebLoginMixin
 
 
 class Storage(
@@ -43,6 +45,7 @@ class Storage(
     LibraryMixin,
     LyricsCacheMixin,
     SearchCacheMixin,
+    WebLoginMixin,
 ):
     """Redis 后端：按领域拆开的一堆 mixin 在这里拼成一个对象。
 

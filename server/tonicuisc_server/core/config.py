@@ -18,6 +18,11 @@ from typing import Any
 from .constants import DEFAULT_THREAD_POOL_SIZE
 from .environment import ENV_KEY, ENVIRONMENTS, Environment, SERVER_DIR, get_environment, load_env_file
 
+#: 加载 ``.env`` **之前**就存在的真实环境变量（shell / systemd / 临时覆盖）。
+#: 重启时子进程要保留这些、同时把「只来自 .env」的键摘掉，让它重新读文件——
+#: 否则改了 server/.env 再 restart，子进程拿到的还是父进程里的旧值。
+EXTERNAL_ENV_KEYS = frozenset(os.environ)
+
 #: 先把 .env 灌进 os.environ，下面的 os.getenv 才读得到它
 ENV_FILE_VALUES = load_env_file()
 
@@ -86,6 +91,31 @@ class Settings:
     #: 想让局域网 / 外网直连（不装 Caddy）时再显式改成 0.0.0.0 或 ::。
     host: str = os.getenv("TONICUISC_HOST", "127.0.0.1")
     port: int = int(os.getenv("TONICUISC_PORT", "8000"))
+    #: 网页（落地页 + 播放器）由 **Python 自己托管**：`/`、`/music`、`/music/api/session`
+    #: 都在同一个进程里，`python -m tonicuisc_server` 一条命令就全跑起来。
+    #: 设 0 回到老拓扑：Caddy 反代到下面的 ``web_port``（Node 的 webapp/server.js），
+    #: Node 再把 `/api` 转给本进程。
+    web_builtin: bool = os.getenv("TONICUISC_WEB_BUILTIN", "1").lower() not in {"0", "false", "no", "off"}
+    #: Node 网页入口的端口。**只在 `web_builtin=0` 时有意义**（Caddy 反代到这里）；
+    #: 不设就退回 Python 自己的端口。以前这里默认 8080，单跑 Python 时会把 Caddy
+    #: 指到一个没人监听的端口，所以默认值改成了 0。
+    web_port: int = int(os.getenv("TONICUISC_WEB_PORT", "0") or 0)
+    #: 内置网页的静态目录（落地页 / 播放器的 HTML/CSS/JS）。默认仓库里的 webapp/public，
+    #: 单独打包部署时可以用这个变量指过去。
+    web_public_dir: Path = field(
+        default_factory=lambda: Path(
+            os.getenv("TONICUISC_WEB_PUBLIC", SERVER_DIR.parent / "webapp" / "public")
+        ).resolve()
+    )
+    #: 网页会话（HttpOnly Cookie）有效期（秒），默认 7 天；进程重启会清空内存会话
+    web_session_ttl: int = int(os.getenv("TONICUISC_WEB_SESSION_TTL", str(7 * 24 * 3600)))
+    #: 「记住这台浏览器」：浏览器带一枚长期指纹 Cookie（``tuisc_web_id``），服务端把它绑到
+    #: 一台设备记录上。进程重启后内存会话没了，靠这条绑定**自动重新签发 key**，
+    #: 所以网页播放器不用每次重启都重新配对；同一个浏览器也只会占设备列表里的一条。
+    web_remember: bool = os.getenv("TONICUISC_WEB_REMEMBER", "1").lower() not in {"0", "false", "no", "off"}
+    #: 上面那条绑定的有效期（秒），默认 30 天；每次成功恢复登录都会续期。
+    #: 设备被吊销 / 从设备列表删掉时绑定立刻失效。
+    web_remember_ttl: int = int(os.getenv("TONICUISC_WEB_REMEMBER_TTL", str(30 * 24 * 3600)))
     #: 对外地址，用来在启动横幅里打印登录链接，例如 https://106-35-196-104.nip.io
     public_url: str = os.getenv("TONICUISC_PUBLIC_URL", "").strip()
     #: Caddy 对外监听的 HTTPS 端口。住宅宽带常被运营商封掉 80/443 —— 被封时改成

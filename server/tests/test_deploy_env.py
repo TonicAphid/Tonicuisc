@@ -207,6 +207,51 @@ def test_generate_config_uses_environment_domain() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_generate_config_reverse_proxies_to_python_entry() -> None:
+    """默认（内置网页）Caddy 直接反代 Python 自己的端口，一条命令跑完，不需要 Node。"""
+    import shutil
+
+    root = _scratch_dir()
+    try:
+        (root / "Caddyfile.template").write_text(
+            "{DOMAIN} {\n\treverse_proxy {WEB_UPSTREAM}\n}\n",
+            encoding="utf-8",
+        )
+        settings = _fake_settings(root)
+        settings.web_builtin = True
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(caddy, "SETTINGS", settings)
+            patch.setattr(caddy, "ENVIRONMENT", env_mod.ENVIRONMENTS["tuisc"])
+            text = caddy.generate_config().read_text(encoding="utf-8")
+            assert "reverse_proxy 127.0.0.1:8000" in text
+            assert "8080" not in text
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_generate_config_reverse_proxies_to_node_when_web_builtin_off() -> None:
+    """``TONICUISC_WEB_BUILTIN=0`` 回到老拓扑：反代到 Node 的 8080。"""
+    import shutil
+
+    root = _scratch_dir()
+    try:
+        (root / "Caddyfile.template").write_text(
+            "{DOMAIN} {\n\treverse_proxy {WEB_UPSTREAM}\n}\n",
+            encoding="utf-8",
+        )
+        settings = _fake_settings(root)
+        settings.web_builtin = False
+        settings.web_port = 8080
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(caddy, "SETTINGS", settings)
+            patch.setattr(caddy, "ENVIRONMENT", env_mod.ENVIRONMENTS["tuisc"])
+            text = caddy.generate_config().read_text(encoding="utf-8")
+            assert "reverse_proxy 127.0.0.1:8080" in text
+            assert "8000" not in text
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def test_generate_config_uses_nonstandard_https_port() -> None:
     """住宅宽带 443 被运营商封了就换非标端口：站点地址要变成「域名:8443」。"""
     import shutil
@@ -359,10 +404,12 @@ def test_login_banner_uses_domain_and_avoids_wildcard() -> None:
     with_domain = login_banner(
         SimpleNamespace(public_url="https://uisc.tonicaphid.cn", host="0.0.0.0", port=8000, scheme="http")
     )
+    assert "https://uisc.tonicaphid.cn/" in with_domain
     assert "https://uisc.tonicaphid.cn/login" in with_domain
 
     without = login_banner(SimpleNamespace(public_url="", host="0.0.0.0", port=8000, scheme="http"), enabled=True)
     assert "0.0.0.0" not in without, without
+    assert "http://127.0.0.1:8000/" in without
     assert "http://127.0.0.1:8000/login" in without
 
 
@@ -786,16 +833,64 @@ def test_admin_alive_detects_existing_caddy(monkeypatch) -> None:
     assert caddy.admin_alive() is False
 
 
-def test_ensure_running_skips_when_already_up(monkeypatch, capsys) -> None:
-    """已有 Caddy 在跑时不再起第二个，并且返回 None（表示「不是我们起的」）。"""
-    called: list[str] = []
-    monkeypatch.setattr(caddy, "admin_alive", lambda **kw: True)
-    monkeypatch.setattr(caddy, "find_caddy", lambda **kw: called.append("find") or Path("caddy"))
-    monkeypatch.setattr(caddy, "start_caddy", lambda *a, **kw: called.append("start"))
+def test_ensure_running_reloads_when_already_up(monkeypatch, capsys) -> None:
+    """已有 Caddy 在跑时不再起第二个，但要把配置重载成当前环境的。
 
-    assert caddy.ensure_running() is None
-    assert called == [], "已经在跑就不该再去找/再启动"
-    assert "已经有一个 Caddy 在跑" in capsys.readouterr().out
+    实测踩过：从 uisc 切到 tuisc 后只重启 Python，Caddy 还按 uisc 的配置干活，
+    于是「服务起来了，域名却打不开」。这里断言 find → generate → reload 这条链。
+    """
+    import shutil
+
+    root = _scratch_dir()
+    try:
+        settings = _fake_settings(root)
+        called: list[str] = []
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(caddy, "SETTINGS", settings)
+            patch.setattr(caddy, "admin_alive", lambda **kw: True)
+            patch.setattr(caddy, "find_caddy", lambda **kw: called.append("find") or Path("caddy"))
+            patch.setattr(caddy, "generate_config", lambda **kw: called.append("config") or root / "Caddyfile")
+            patch.setattr(caddy, "reload_config", lambda *a, **kw: called.append("reload") or (True, "ok"))
+            patch.setattr(caddy, "start_caddy", lambda *a, **kw: called.append("start"))
+
+            assert caddy.ensure_running() is None
+
+        assert called == ["find", "config", "reload"], "已经有一个在跑：不重复启动，但要重载配置"
+        out = capsys.readouterr().out
+        assert "已重载配置" in out, out
+        assert caddy.ENVIRONMENT.domain in out, out
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_ensure_running_reports_reload_failure(monkeypatch, capsys) -> None:
+    """重载失败时把原因说清楚，别让用户以为域名已经切过去了。"""
+    import shutil
+
+    root = _scratch_dir()
+    try:
+        settings = _fake_settings(root)
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(caddy, "SETTINGS", settings)
+            patch.setattr(caddy, "admin_alive", lambda **kw: True)
+            patch.setattr(caddy, "find_caddy", lambda **kw: Path("caddy"))
+            patch.setattr(caddy, "generate_config", lambda **kw: root / "Caddyfile")
+            patch.setattr(caddy, "reload_config", lambda *a, **kw: (False, "admin endpoint refused"))
+
+            assert caddy.ensure_running() is None
+
+        out = capsys.readouterr().out
+        assert "配置重载失败" in out, out
+        assert "admin endpoint refused" in out, out
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_reload_config_survives_missing_binary(monkeypatch) -> None:
+    """caddy 二进制跑不起来也不该抛——服务端还要继续跑。"""
+    ok, detail = caddy.reload_config(Path("definitely-not-caddy"), Path("Caddyfile"))
+    assert ok is False
+    assert detail
 
 
 def test_ensure_running_survives_start_failure(monkeypatch, capsys) -> None:

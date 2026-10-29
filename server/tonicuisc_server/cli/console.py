@@ -5,7 +5,8 @@
     h  帮助          l   看设备和账户        r <ID>  吊销设备（ID 可只输前几位）
     p <用户> 重置密码  c <用户> 生成恢复码    x   清理无主 / 已吊销的设备记录
     rd  Redis 状态    cc  清搜索缓存          env 看当前环境   acme 看证书状态
-    log off 关掉请求日志                      q   停止服务
+    log off 关掉请求日志                      restart 重启服务（重新读代码 / .env）
+    q  停止服务
 
 命令表就是本模块的 ``COMMANDS``（唯一出处，``h`` 直接遍历它打印）。
 """
@@ -161,9 +162,10 @@ COMMANDS: dict[str, tuple[tuple[str, ...], str, str]] = {
     "cleanup": (("x", "clean"), "", "清理无主 / 已吊销的设备记录"),
     "redis": (("rd",), "", "看 Redis 状态"),
     "clear": (("cc",), "", "清掉搜索结果缓存"),
-    "env": ((), "", "看当前环境（切环境要停服务后跑 env <uisc|tuisc>）"),
+    "env": ((), "", "看当前环境（改 .env 后 restart 生效）"),
     "acme": ((), "", "看证书状态（签发：acme --issue）"),
     "log": ((), "on|off", "开 / 关请求日志（关掉控制台更清净）"),
+    "restart": (("rs", "rt"), "", "重启服务（重新读代码 / .env，像重开一样）"),
     "stop": (("q", "quit", "s"), "", "停止服务"),
 }
 
@@ -245,6 +247,14 @@ def console_command(line: str, server, store) -> bool:
         commands.acme_command(["--status"])
     elif name == "log":
         set_access_log(args)
+    elif name == "restart":
+        # 真正的重启（换进程），不是原地重建 uvicorn：改过的代码 / .env 只有重新
+        # import 才会生效。这里只立 flag、让 server.run() 正常收尾；launch 的守护
+        # 进程看到子进程以 75 退出后，会重新拉起一个全新的服务进程。
+        print("正在重启服务…（会重新读取代码和 .env）")
+        server.restart_requested = True
+        server.should_exit = True
+        return True
     elif name == "stop":
         print("正在停止服务…")
         server.should_exit = True

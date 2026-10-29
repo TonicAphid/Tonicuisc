@@ -318,6 +318,7 @@ def env_command(args: list[str]) -> int:
             print(f"  {key:<6} {env.label:<16} {env.public_url}{mark}")
         print()
         print("切换：python -m tonicuisc_server env tuisc     （写进 .env，重启生效）")
+        print("      服务跑着时也可以改 .env，然后在控制台输 restart")
         print("现场问一遍：python -m tonicuisc_server env --ask")
         return 0
 

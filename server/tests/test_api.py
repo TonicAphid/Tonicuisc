@@ -247,3 +247,124 @@ def test_search_validation_after_auth(app_env) -> None:
     headers = {"X-API-Key": _status()["api_key"]}
     assert client.get("/api/search", params={"keyword": ""}, headers=headers).status_code == 422
     assert client.get("/api/lyric/migu:0", headers=headers).status_code == 404
+
+
+def test_update_endpoint_is_public(app_env, monkeypatch) -> None:
+    """落地页在登录前就要显示版本号，所以 /api/update 不能要设备 key。"""
+    from tonicuisc_server.api.routes import update as update_route
+
+    class _FakeUpdates:
+        def check(self, *args, **kwargs) -> dict:
+            return {"supported": True, "latest": "1.0.0", "asset": None}
+
+    monkeypatch.setattr(update_route, "get_update_service", lambda: _FakeUpdates())
+    resp = client.get("/api/update", params={"platform": "windows", "arch": "x64"})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["latest"] == "1.0.0"
+
+
+# ------------------------------------------------------- 播放流：未缓存时的跳转
+class _FakeUpstream:
+    """假的音源响应：只为验证 Range 有没有透传、206 有没有原样转发。"""
+
+    def __init__(self, status_code: int, body: bytes = b"", headers: dict | None = None) -> None:
+        self.status_code = status_code
+        self.headers = headers or {}
+        self._body = body
+        self.closed = False
+
+    def iter_content(self, chunk_size: int = 1024):
+        yield self._body
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_stream_seek_forwards_range_when_not_cached(app_env, monkeypatch) -> None:
+    """没缓存时拖动进度条：Range 要透给音源，206 要原样转回给播放器。
+
+    以前这里不管 Range 一律 200 + ``Accept-Ranges: none``，播放器跳不动，
+    只能把进度条弹回 0——「拖一下就回到开头」就是这么来的。
+    """
+    from pathlib import Path
+
+    service = app_env["service"]
+    seen: dict = {}
+    fake = _FakeUpstream(
+        206,
+        b"xyz",
+        {"content-range": "bytes 100-102/1000", "content-length": "3"},
+    )
+
+    def fake_open(item_id: str, *, range_header: str | None = None):
+        seen["range"] = range_header
+        return fake, Path("song.mp3"), Path("song.mp3.part")
+
+    monkeypatch.setattr(service, "cached_file", lambda item_id: None)
+    monkeypatch.setattr(service, "open_upstream", fake_open)
+
+    _login_via_web()
+    headers = {"X-API-Key": _status()["api_key"], "Range": "bytes=100-"}
+    resp = client.get("/api/stream/kw:1", headers=headers)
+
+    assert resp.status_code == 206, resp.text
+    assert resp.headers["content-range"] == "bytes 100-102/1000"
+    assert resp.headers["accept-ranges"] == "bytes"
+    assert seen["range"] == "bytes=100-"
+    assert fake.closed, "上游响应要关掉，别把连接池占着"
+
+
+def test_stream_first_request_is_still_cached(app_env, monkeypatch) -> None:
+    """``bytes=0-``（播放器的第一个请求）照旧整段拉取 + 写缓存，不能变成 206。"""
+    from pathlib import Path
+
+    service = app_env["service"]
+    seen: dict = {}
+    fake = _FakeUpstream(200, b"abc", {"content-length": "3"})
+
+    def fake_open(item_id: str, *, range_header: str | None = None):
+        seen["range"] = range_header
+        return fake, Path("song.mp3"), Path("song.mp3.part")
+
+    monkeypatch.setattr(service, "cached_file", lambda item_id: None)
+    monkeypatch.setattr(service, "open_upstream", fake_open)
+    monkeypatch.setattr(service, "relay", lambda response, target, temp: iter([b"abc"]))
+
+    _login_via_web()
+    headers = {"X-API-Key": _status()["api_key"], "Range": "bytes=0-"}
+    resp = client.get("/api/stream/kw:2", headers=headers)
+
+    assert resp.status_code == 200
+    assert seen["range"] is None, "整段请求不该带 Range 给音源"
+    assert resp.headers["accept-ranges"] == "none"
+
+
+def test_open_upstream_passes_range_to_source(app_env, monkeypatch) -> None:
+    """``open_upstream(range_header=...)`` 要把 Range 透给音源，否则 CDN 只会从头发。"""
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    service = app_env["service"]
+    seen: dict = {}
+
+    def fake_open(song, url, *, extra_headers=None, **_kwargs):
+        seen["extra"] = extra_headers
+        return _FakeUpstream(206, b"", {"content-range": "bytes 10-19/100"})
+
+    monkeypatch.setattr(service, "_open_url", fake_open)
+    monkeypatch.setattr(
+        service,
+        "get_song",
+        lambda item_id: SimpleNamespace(
+            download_url="http://example.com/a.mp3",
+            source="kuwo",
+            default_download_headers={},
+        ),
+    )
+    monkeypatch.setattr(service, "cache_path", lambda song: Path("song.mp3"))
+
+    service.open_upstream("kw:1", range_header="bytes=10-")
+    assert seen["extra"] == {"Range": "bytes=10-"}
+
+    service.open_upstream("kw:1")  # 整段请求不带 Range
+    assert seen["extra"] is None

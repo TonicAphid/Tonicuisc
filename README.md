@@ -1,8 +1,11 @@
 # Tonicuisc
 
-自用音乐软件：**Python 后端（FastAPI + musicdl，音源为酷我）** + **Flutter 客户端（Windows / Linux / macOS / iOS）**。
+自用音乐软件：**Python 后端（FastAPI + musicdl，音源为酷我，网页也由它托管）** + **Flutter 客户端（Windows / Linux / macOS / iOS）**。
 
 > 仅用于个人学习与自建服务，请勿商业使用或大规模分发。所有音频由第三方音源提供，本项目只做代理与整理。
+>
+> **一条命令跑全站**：`cd server && python -m tonicuisc_server` —— 接口、落地页、网页播放器、
+> 网页登录会话全在这一个进程里，不再需要 Node。
 
 ## 功能一览
 
@@ -17,6 +20,12 @@
 - 登录：**设备码流**（App 生成码，浏览器批准），每设备一把随机 API Key，服务端只存哈希
 - 安全：密码 PBKDF2-HMAC-SHA256、限速防爆破、按设备吊销、忘记密码用**恢复码**重置
 - 控制台：启动后底部常驻 `>` 提示符（像 MC 服务端），`h` 看命令、`q` 停服，设备 / 密码 / 恢复码 / 缓存都能直接操作
+
+**网页（内置在 Python 服务里，零额外依赖）**
+
+- 落地页 `/`：下载入口、功能介绍、和主站同一套白底浅蓝主题；不写死域名，下载走同源 `/download/{platform}`
+- 网页播放器 `/music`：搜索 / 分页 / 音源、队列与四种播放模式、逐字歌词、喜欢 / 收藏 / 历史、下载、设备管理、主题、Media Session、快捷键
+- 登录：网页生成设备码，浏览器用 **HttpOnly Cookie** 保存会话，**API Key 只在服务端内存里**；音频流同源直连，Range 拖动照常
 
 **客户端**
 
@@ -50,7 +59,7 @@ server/                            后端
     api/                           HTTP：app（装配）/ deps（服务与鉴权单例）/ middleware
                                    （鉴权闸门 + 访问日志）/ limiters / ranges /
                                    routes（health、account、library、media、search、update、login）
-    web/                           /login 网页：pages（怎么画）+ login（点了之后干什么）
+    web/                           网页：/login（pages + login）
     cli/                           命令行：commands（管理命令）/ console（`>` 控制台）/
                                    launch（uvicorn + 原生 TLS）
     __main__.py                    python -m tonicuisc_server
@@ -60,6 +69,12 @@ server/                            后端
   start.ps1 / start.sh             一键启动
   requirements.txt / requirements-dev.txt
   .env.example                     环境变量样例
+
+webapp/                            网页静态文件（由 Python 托管，不需要 Node）
+  public/                          落地页 index.html + style.css + app.js
+    music/                         网页播放器 index.html + music.css + music.js
+  server.js                        旧的 Node 入口（可选，TONICUISC_WEB_BUILTIN=0 时才用）
+  README.md                        静态文件怎么改、旧 Node 拓扑怎么跑
 
 redis/                             Redis 二进制（首次启动自动下载，不进版本库）
   win/                             Windows：redis-server.exe
@@ -116,7 +131,7 @@ tool/                              构建与自检脚本
   check_dart_imports.py            本地自检 Dart import 是否指到真实文件
   platform_patches/                原生配置补丁源文件
 
-deploy/                            家里部署（外部 v4 + v6 双栈 → 内部 IPv4）
+deploy/                            部署（Caddy 443 → Python 8000，外部 v4 + v6 双栈）
   Caddyfile.template               Caddy 配置模板（按当前环境生成实际配置）
   open-firewall.ps1                放行入站 80 / 443（管理员，可 -Remove 撤销）
   update_dns.py                    维护 A / AAAA 记录（阿里云解析；--update 才真改，--check 只读）
@@ -131,7 +146,7 @@ deploy/                            家里部署（外部 v4 + v6 双栈 → 内�
 ```bash
 cd server
 pip install -r requirements.txt
-python -m tonicuisc_server            # 默认 0.0.0.0:8000
+python -m tonicuisc_server            # 默认 127.0.0.1:8000
 ```
 
 Windows 也可以直接 `pwsh -File server/start.ps1`。启动后控制台会打印登录地址：
@@ -139,12 +154,32 @@ Windows 也可以直接 `pwsh -File server/start.ps1`。启动后控制台会打
 ```
 ========================================================
   Tonicuisc 服务已启动
+  主页:   https://uisc.tonicaphid.cn/
   登录页: https://uisc.tonicaphid.cn/login
   在 App 里点「登录」拿到设备码，再用手机浏览器打开上面的链接
 ========================================================
 ```
 
 打开 `http://<地址>:8000/docs` 可以直接看接口。
+
+### 网页（落地页 + 播放器）
+
+落地页 `/`、网页播放器 `/music`、网页登录会话都在 **Python 进程里**，`python -m tonicuisc_server`
+起完就能用，不需要再起第二个进程：
+
+```bash
+cd server
+python -m tonicuisc_server        # http://127.0.0.1:8000/ 和 /music 都能开
+```
+
+主页 `/` 就是落地页（下载 + 网页登录入口）。**页面不写死域名**：用哪个域名 / IP
+访问这台机器（`uisc`、`tuisc`、局域网 IP 都行），下载和版本接口就落在哪个地址上；
+下载按钮指向 `/download/windows`，由服务端查一次最新 Release 再 302。页面源文件在
+`webapp/public/`，改完刷新即可（无构建、无外部依赖）。
+
+> 以前的 Node 入口 `webapp/server.js` 还留着，但**默认不参与**：只有显式设
+> `TONICUISC_WEB_BUILTIN=0` + `TONICUISC_WEB_PORT=8080` 才回到「Caddy → Node → Python」
+> 的老拓扑。见 `webapp/README.md`。
 
 ### 客户端
 
@@ -190,17 +225,7 @@ flutter build windows --release
 
 另外一个**不用管**的噪音：控制台刷 `[ERROR:flutter/shell/platform/common/accessibility_bridge.cc(114)] Failed to update ui::AXTree, error: N will not be in the tree and is not the new root`。这是 Flutter 引擎在 Windows 上的已知 bug（[#98099](https://github.com/flutter/flutter/issues/98099)、[#182444](https://github.com/flutter/flutter/issues/182444)，后者给的复现条件是 **`ListView` + Material `Tooltip`**），**只是 debug 控制台的日志**，界面和功能都不受影响，release 版没有控制台。仓库里的 `Tooltip` 全部来自还没迁到 Cupertino 的 `IconButton(tooltip: ...)`，**逐页迁移做完它自然就没了**。
 
-**Windows 第三方输入法**：这是 Flutter Windows 嵌入层的已知问题（[#190042](https://github.com/flutter/flutter/issues/190042)、[#191196](https://github.com/flutter/flutter/issues/191196)，修复 PR [#190043](https://github.com/flutter/flutter/pull/190043) 至今仍是 draft），**换输入框 Widget（Material `TextField` ↔ `CupertinoTextField`）不会有任何区别**。踩过的三次：
-
-- 在窗口焦点变化时调 `ImmAssociateContextEx` 重置 IMM 上下文 → 候选窗直接错乱、打一个字就断，**补丁已删除**（`tool/patch_windows_ime.py` 一并删掉，CI 也不再跑）。
-- 模板自带的 `WM_ACTIVATE` 处理**不看 `wparam`**：窗口被别的程序（包括输入法候选窗 / 皮肤窗）抢走激活时也强行 `SetFocus` 回 Flutter 子窗口，等于在组字途中结束一次文本输入会话 → 现象就是「第一个字母上屏后输入法不动了，再点一次输入框才恢复」。现在**只在真正获得激活时**才设置焦点（`app/windows/runner/win32_window.cpp`）。
-- **框架自己在窗口失焦时收焦点**（这次才是主因）。引擎把「窗口失焦」分成两路告诉框架，两路都会把输入焦点收走：
-  1. `SystemChannels.lifecycle` → `AppLifecycleState.inactive` → `FocusManager._appLifecycleChange` 挂起 `primaryFocus`；
-  2. `PlatformDispatcher.onViewFocusChange` → `View.didChangeViewFocus` 收到 `unfocused` 后 `rootScope.requestScopeFocus()`，把焦点停到根作用域。
-
-  输入法弹出候选窗的一瞬间主窗口就短暂失焦，于是两路同时到达、组字被打断。`app/lib/core/desktop_lifecycle.dart` 在桌面端把这两路都拦下来（`hidden` / `paused` 照常透传），`foreground` 这个 notifier 继续给「播放时屏幕常亮」用。
-
-Debug 构建里两个输入框会把每一次文本 / 组字变化写进 `%LOCALAPPDATA%\Tonicuisc\logs\tonicuisc-ime.log`（`app/lib/core/ime_debug.dart`，Release 空操作；不放 `%TEMP%` 是因为它的 ACL 会被各种沙箱工具改坏）：`composing` 一直是 `(-1, -1)` = 引擎根本没收到组字消息（Dart 侧无解，只能等上游）；先有 `composing=(a, b)` 再突然变回 `(-1, -1)` 且字只上屏一个 = 组字被 App 打断，这类能在我们这边修。
+**Windows 第三方输入法**：Flutter Windows 嵌入层的已知问题（[#190042](https://github.com/flutter/flutter/issues/190042)、[#191196](https://github.com/flutter/flutter/issues/191196)，修复 PR [#190043](https://github.com/flutter/flutter/pull/190043) 至今仍是 draft）。仓库里**不再有任何输入法相关代码**：runner 与 Flutter 模板逐字一致（包括 `WM_ACTIVATE` 里的无条件 `SetFocus`），Dart 侧不碰生命周期、不碰 `onViewFocusChange`、不记 IME 日志。系统自带输入法（微软拼音）优先，第三方输入法的断续问题等上游修复。
 
 ### 第一次登录
 
@@ -217,7 +242,13 @@ Debug 构建里两个输入框会把每一次文本 / 组字变化写进 `%LOCAL
 | --- | --- | --- |
 | `TONICUISC_HOST` | `127.0.0.1` | 监听地址。默认**只监听 IPv4 回环**——家里部署时由 Caddy 反代过来，服务端不该直接对外。想让局域网 / 外网直连（不装 Caddy）再显式改成 `0.0.0.0` |
 | `TONICUISC_ENV` | 空 | 当前环境（`uisc` 正式 / `tuisc` 测试）。决定对外域名、启动横幅、DDNS 目标；不填时**首次启动会问一次**并写进 `server/.env`。改：`python -m tonicuisc_server env tuisc`，或 `env --ask` 现场问一遍 |
-| `TONICUISC_PORT` | `8000` | 端口 |
+| `TONICUISC_PORT` | `8000` | 端口（接口 + 网页都在这个端口上） |
+| `TONICUISC_WEB_BUILTIN` | `1` | 网页（`/`、`/music`、网页会话）由 Python 自己托管。设 `0` 才回到「Caddy → Node → Python」的老拓扑 |
+| `TONICUISC_WEB_PORT` | 空 | **只在 `TONICUISC_WEB_BUILTIN=0` 时有用**：Node 网页入口端口（Caddy 反代到这里）。不填就退回 `TONICUISC_PORT` |
+| `TONICUISC_WEB_PUBLIC` | `webapp/public` | 静态文件目录；单独打包部署时指过去 |
+| `TONICUISC_WEB_SESSION_TTL` | `604800` | 网页会话有效期（秒，默认 7 天）。进程重启会清空内存会话 |
+| `TONICUISC_WEB_REMEMBER` | `1` | 「记住这台浏览器」：长期指纹 Cookie（`tuisc_web_id`）绑到一条设备记录，重启后自动恢复登录，设备列表也不会越登越多。设 `0` 关掉 |
+| `TONICUISC_WEB_REMEMBER_TTL` | `2592000` | 指纹绑定的有效期（秒，默认 30 天），每次恢复自动续期 |
 | `TONICUISC_SOURCES` | `kuwo` | 启用音源（只保留酷我；代码里还留着 `migu` 别名兼容旧配置） |
 | `TONICUISC_GITHUB_REPO` | `TonicAphid/Tonicuisc` | 桌面更新检查查的 GitHub 仓库 |
 | `TONICUISC_GITHUB_TOKEN` | 空 | 可选 GitHub token；不填时匿名 API 只有 60 次/小时，超限会自动退回 `releases.atom`（结果缓存 5 分钟） |
@@ -281,6 +312,26 @@ Debug 构建里两个输入框会把每一次文本 / 组字变化写进 `%LOCAL
 除标注「免鉴权」的以外，所有 `/api` 接口都必须带请求头 `X-API-Key`。
 
 `{id}` 形如 `KuwoMusicClient:362538300`，由 `/api/search` 返回；内存缓存 3 小时，重启后从 Redis 恢复。
+
+### 网页（`/`、`/music`、网页会话）
+
+这些由 Python 内置托管（`api/routes/site.py`），和 `/api` 同一个端口：
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/` | 落地页 |
+| GET | `/music` | 网页播放器 |
+| GET / POST / DELETE | `/music/api/session` | 读会话 / 生成设备码 / 退出登录 |
+| POST | `/music/api/session/manual` | 手动粘贴 API Key 登录 |
+| POST | `/music/api/session/cancel` | 放弃当前设备码 |
+| GET | `/download/{platform}` | 查最新 Release 后 302 到安装包（`windows` / `macos` / `linux`） |
+| GET | `/<其余路径>` | 按 `webapp/public` 里的文件找，找不到给 404 页 |
+
+网页会话（`tuisc_session`）只存在进程内存里，**但重启不会掉线**：另有一枚长期指纹
+Cookie（`tuisc_web_id`）绑在设备记录上，重启后前端第一次轮询就自动重新签发 key 恢复登录。
+指纹同时作为 `device_id` 参与配对，所以同一个浏览器只占设备列表里的一条「网页播放器」。
+鉴权靠一个中间件把 Cookie 换成 `X-API-Key`（`api/middleware.py` 的 `web_session`），
+所以 `/api/*` 那条「必须带 key」的规则对网页同样成立，浏览器自己拿不到 key。
 
 ## 桌面更新
 
@@ -366,8 +417,14 @@ python -m tonicuisc_server cert <域名或IP>      # 生成**自签**证书（�
 h  帮助          l   看设备和账户        r <ID>  吊销设备（ID 可只输前几位，唯一即可）
 p <用户> 重置密码  c <用户> 生成恢复码    x   清理无主 / 已吊销的设备记录
 rd  Redis 状态    cc  清搜索缓存          log off 关掉请求日志（控制台更清净）
-q   停止服务（Ctrl+C 等价）
+restart  重启服务（重新读代码 / .env）     q   停止服务（Ctrl+C 等价）
 ```
+
+`restart` 不是原地重建 uvicorn：交互终端下 `python -m tonicuisc_server` 本身只当守护进程，
+真正的服务跑在它的子进程里；`restart` 让子进程收完 uvicorn / Redis / Caddy 后以退出码 75
+退出，守护进程再拉起一个全新的子进程——代码、`.env`、环境切换都会真正重新加载，
+shell 也始终等在原来那条命令上（不会把提示符提前还回来）。非交互启动（systemd / 管道）
+不套守护进程，照旧原地跑。
 
 日志把 `>` 顶掉的问题也处理了：控制台空闲时，任何输出（uvicorn 的 `INFO:`、应用的
 `[access]` / `[timing]`）安静约 60ms 后都会把 `>` 自动补画回行尾——多行输出只在末尾
@@ -392,16 +449,18 @@ q   停止服务（Ctrl+C 等价）
 - 它解决「谁能调接口」+「按设备吊销」。**HTTP 明文下，链路上抓包的人可以直接拿走 key**——要真安全必须上 HTTPS。
 - 设备被物理接触（越狱 / root / 调试器）就能读出 key，这是所有客户端凭据的共性。
 
-## HTTPS（家里部署：外部 v4 + v6 双栈 → 内网 IPv4）
+## HTTPS（自建部署：外部 v4 + v6 双栈 → 回环 IPv4）
 
-家里部署、不买服务器，外面**同时**用 IPv4 和 IPv6（哪个通用哪个），内部转发走 IPv4 回环：
+云主机或家里机器都行，外面**同时**用 IPv4 和 IPv6（哪个通用哪个），内部转发走 IPv4 回环：
 
 ```
-手机 / 浏览器 ──公网 v4 或 v6 : 443──► Caddy（部署机）──IPv4 127.0.0.1:8000──► tonicuisc_server
+手机 / 浏览器 ──公网 v4 或 v6 : 443──► Caddy（部署机）
+    ──IPv4 127.0.0.1:8000──► tonicuisc_server（/api、/login、音频、/、/music）
 ```
 
-**服务端自己只监听 IPv4 回环，永远不直接对外；外面只能从 Caddy 的 443 进来。**
-`deploy/Caddyfile` 由 `deploy/Caddyfile.template` 按当前环境生成。
+**服务只监听 IPv4 回环，永远不直接对外；外面只能从 Caddy 的 443 进来。**
+`deploy/Caddyfile` 由 `deploy/Caddyfile.template` 按当前环境生成（默认反代到
+`TONICUISC_PORT`；只有 `TONICUISC_WEB_BUILTIN=0` 的老拓扑才反代到 Node 的 8080）。
 
 **Caddy 会跟着服务端一起启动**（`TONICUISC_CADDY_AUTOSTART`，默认开），不用再开第二个窗口：
 
@@ -640,7 +699,20 @@ python -m tonicuisc_server                        # 现在直接是 https://192.
 - 服务端按「歌名 + 歌手 + 时长」去酷狗找 KRC，解密（XOR + zlib）后解析成结构化时间轴；
 - KRC 自带 `type 0` 罗马音和 `type 1` 翻译，有就填；
 - 中文行没有罗马音时用 `pypinyin` 生成带声调的拼音（`qíng tiān`），**原文永远是主行，拼音只作为附加行**；
-- Redis 缓存 30 天，没找到的负缓存 6 小时；同一首歌并发只跑一个后台任务。
+- 注音有门槛，避免满屏噪音：一行至少 2 个汉字、汉字占有效字符 40% 以上才注（英语歌里夹一句中文不注）；
+  含假名的日文行不注（`pypinyin` 读的是中文音，日语歌该用 KRC 自带的 romaji）；
+- 头部只删「歌名 + 歌手」那一行，且**歌手按单个名字比**：`王力宏/谭维维`、`王力宏、谭维维`、
+  `王力宏 (Leehom Wang)/谭维维 (Sitar Tan)` 都认（整串比对会被中间的括号英文名卡住）；
+- **开头的制作名单整块不注音**（文字照留，一个字都不删）。判定不靠角色词表——`承制`、
+  `音乐发行`、`项目总统筹`、`海报设计团队` 这种词永远列不全——而是按结构：
+  「标签：内容」的短标签、`张三/李四` 名单行、`…工作团队` 小标题、整行带括号的声明，
+  并且**连续出现在最开头**（正文第一句就断）；旁证是 KRC 给「不唱的行」铺的是每字 ~27ms
+  的占位时间，而正文一行 3~9 秒；
+- **卡拉OK按「词」上色**，不是整行一条渐变：整行一条时，长句一旦折行，第二行会从左边重新填充，
+  看起来就像「一句歌词变成两段」（App 和网页都改成了逐词）；
+- 客户端**不再自己删歌词行**：网页以前有个 `dropCredits`，按正则把开头 10 行里像「词：xxx」的都丢掉，
+  经常连正文一起吞；现在统一由服务端处理（只删「歌名 - 歌手」那一行）；
+- Redis 缓存 30 天（key 带 `v4` 版本号，清洗规则改了就换 key，旧缓存自动失效），没找到的负缓存 6 小时；同一首歌并发只跑一个后台任务。
 
 `GET /api/lyric/{id}?format=enhanced` 是两段式：第一次通常返回 `ready: false`，App 隔 2 秒再问，拿到后替换逐行歌词。播放页的填充进度按**每个字自己的起止时间**算，不是整行匀速；所以短字扫得快、长字扫得慢，字间空隙会停住。
 
@@ -750,6 +822,7 @@ python -m tonicuisc_server                        # 现在直接是 https://192.
 1. 先请求 `/api/url/{id}` 拿音源直链，直接连 CDN 播放（最快出声，服务端不中转）；请求时带上返回的 headers（部分 CDN 需要 UA / Cookie）。
 2. 直链拿不到、或播放器报错，自动回退 `/api/stream/{id}`；**回退请求带着 `X-API-Key`**（`just_audio` 自己发 HTTP，不带的话开着鉴权的服务端会回 401，整首歌放不出来）。
 3. `/api/stream/{id}` 未缓存时**边下边播**：从音源拉数据的同时写缓存并吐给播放器（实测首字节 ~0.5s）；中断会丢掉半截文件；缓存完成后转为按 Range 读本地文件。
+4. **未缓存时也能拖进度条**：播放器发来的 `Range` 会原样透给音源，直接从中途开始拉（`206 Partial Content` 透传，这段不写缓存——从中间开始的字节拼进去会错位）。只有 `bytes=0-`（播放器的第一个请求）才走「整段 + 写缓存」那条路。以前这里不管 `Range` 一律返回 200 + `Accept-Ranges: none`，播放器跳不动，拖一下就被弹回开头。
 
 播放后端：iOS / macOS 用 just_audio 原生实现，Windows / Linux 通过 `just_audio_media_kit`（media_kit）。
 

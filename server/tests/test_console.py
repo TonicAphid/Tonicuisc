@@ -6,6 +6,7 @@ import io
 import logging
 import sys
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -70,6 +71,185 @@ def test_unknown_and_ambiguous_hints(server, capsys) -> None:
 def test_stop_sets_flag(server) -> None:
     assert _console_command("q", server, None) is True
     assert server.should_exit is True
+    assert getattr(server, "restart_requested", False) is False, "q 只停，不重启"
+
+
+def test_restart_sets_flags(server, capsys) -> None:
+    """restart 和 stop 都让 server.run() 收尾，但 restart 还要立一个「换进程」的标记。"""
+    assert _console_command("restart", server, None) is True
+    assert server.should_exit is True
+    assert server.restart_requested is True
+    assert "正在重启" in capsys.readouterr().out
+
+
+def test_restart_aliases_and_prefix() -> None:
+    assert _resolve_command("rs") == ("restart", [])
+    assert _resolve_command("rt") == ("restart", [])
+    assert _resolve_command("rest") == ("restart", [])
+    assert _resolve_command("restart") == ("restart", [])
+
+
+def test_restart_argv_uses_module_launch(monkeypatch) -> None:
+    """重新拉起的命令必须是 `python -m tonicuisc_server`，不能直接执行 __main__.py。"""
+    from tonicuisc_server.cli import launch
+
+    monkeypatch.setattr(launch.sys, "orig_argv", [launch.sys.executable, "-m", "pytest"], raising=False)
+    monkeypatch.setattr(launch.sys, "argv", ["...\\__main__.py", "--some-flag"])
+    assert launch.restart_argv() == [launch.sys.executable, "-m", "tonicuisc_server", "--some-flag"]
+
+
+def test_restart_argv_keeps_interpreter_flags(monkeypatch) -> None:
+    """真实启动时 sys.orig_argv 带着 -u / -X 之类，重启要原样保留。"""
+    from tonicuisc_server.cli import launch
+
+    monkeypatch.setattr(
+        launch.sys,
+        "orig_argv",
+        [launch.sys.executable, "-u", "-m", "tonicuisc_server", "--some-flag"],
+        raising=False,
+    )
+    assert launch.restart_argv() == [
+        launch.sys.executable,
+        "-u",
+        "-m",
+        "tonicuisc_server",
+        "--some-flag",
+    ]
+
+
+def test_should_supervise_only_in_interactive_terminal(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from tonicuisc_server.cli import launch
+
+    monkeypatch.delenv(launch.SUPERVISED_ENV, raising=False)
+    monkeypatch.delenv("TONICUISC_RELOAD", raising=False)
+    monkeypatch.setattr(launch.sys, "stdin", SimpleNamespace(isatty=lambda: True))
+    assert launch.should_supervise() is True
+
+    monkeypatch.setenv(launch.SUPERVISED_ENV, "1")
+    assert launch.should_supervise() is False, "子进程不能再套一层守护"
+
+    monkeypatch.delenv(launch.SUPERVISED_ENV)
+    monkeypatch.setenv("TONICUISC_RELOAD", "1")
+    assert launch.should_supervise() is False, "uvicorn reloader 自己管子进程"
+
+
+def test_child_env_rereads_dotenv_but_keeps_external_overrides(monkeypatch) -> None:
+    """重启子进程要能读到改过的 .env；shell 里显式设的变量仍然优先。"""
+    import shutil
+    import uuid
+
+    from tonicuisc_server.cli import launch
+
+    scratch = Path(__file__).resolve().parent / "_scratch" / "env" / uuid.uuid4().hex
+    scratch.mkdir(parents=True, exist_ok=True)
+    env_file = scratch / ".env"
+    try:
+        env_file.write_text(
+            "TONICUISC_ENV=uisc\n"
+            "TONICUISC_PUBLIC_URL=https://uisc.tonicaphid.cn\n"
+            "TONICUISC_PORT=8000\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(launch, "ENV_PATH", env_file)
+        monkeypatch.setattr(launch, "EXTERNAL_ENV_KEYS", frozenset({"TONICUISC_PORT"}))
+        monkeypatch.setenv("TONICUISC_PORT", "9000")  # 外部覆盖
+        monkeypatch.setenv("TONICUISC_ENV", "tuisc")  # 旧 .env 灌进来的
+        monkeypatch.setenv("TONICUISC_PUBLIC_URL", "https://tuisc.tonicaphid.cn")
+
+        env = launch.child_env()
+
+        assert env["TONICUISC_PORT"] == "9000", "shell 里的临时覆盖不能被文件盖掉"
+        assert "TONICUISC_ENV" not in env, "来自旧 .env 的键要摘掉，让子进程重读文件"
+        assert "TONICUISC_PUBLIC_URL" not in env
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
+def test_supervise_respawns_on_restart_exit_code(monkeypatch, capsys) -> None:
+    """守护循环看到 75 就再拉一次；看到 0 才退出。"""
+    from tonicuisc_server.cli import launch
+
+    class FakeProc:
+        def __init__(self, code: int) -> None:
+            self.returncode = code
+
+        def wait(self) -> int:
+            return self.returncode
+
+        def poll(self) -> int:
+            return self.returncode
+
+    codes = iter([launch.RESTART_EXIT_CODE, 0])
+    spawned: list[tuple[list[str], str | None]] = []
+
+    def fake_popen(argv, env=None):
+        spawned.append((argv, env.get(launch.SUPERVISED_ENV)))
+        return FakeProc(next(codes))
+
+    monkeypatch.setattr(launch.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(launch, "restart_argv", lambda: ["python", "-m", "tonicuisc_server"])
+
+    with pytest.raises(SystemExit) as info:
+        launch.supervise()
+
+    assert info.value.code == 0
+    assert len(spawned) == 2, "第一次 75 后要再拉一次，第二次 0 才收工"
+    assert all(marker == "1" for _, marker in spawned)
+    assert spawned[0][0] == spawned[1][0]
+    assert "正在重新启动" in capsys.readouterr().out
+
+
+def test_run_server_supervises_interactive(monkeypatch) -> None:
+    """交互终端里 run_server 只当守护，不再自己 import app / 起 uvicorn。"""
+    from tonicuisc_server.cli import launch
+
+    calls: list[str] = []
+    monkeypatch.setattr(launch, "choose_environment", lambda **kw: False)
+    monkeypatch.setattr(launch, "should_supervise", lambda: True)
+    monkeypatch.setattr(launch, "supervise", lambda: calls.append("supervise"))
+
+    launch.run_server(interactive=True)
+    assert calls == ["supervise"]
+
+
+def test_run_server_restarts_after_clean_shutdown(monkeypatch, capsys) -> None:
+    """run_server：重启标记要在 uvicorn、Caddy 都收干净之后才变成退出码 75。"""
+    from types import SimpleNamespace
+
+    from tonicuisc_server.cli import launch
+    from tonicuisc_server.core import caddy as caddy_runtime
+    from tonicuisc_server.core import config as config_module
+
+    calls: list[object] = []
+    settings = SimpleNamespace(host="127.0.0.1", port=8000, reload=False, caddy_autostart=True)
+    env = SimpleNamespace(key="tuisc", label="测试", public_url="https://tuisc.tonicaphid.cn")
+
+    class FakeServer:
+        def __init__(self, config) -> None:
+            self.should_exit = False
+            self.restart_requested = True
+
+        def run(self) -> None:
+            calls.append("run")
+
+    monkeypatch.setattr(launch, "choose_environment", lambda **kw: False)
+    monkeypatch.setattr(launch, "should_supervise", lambda: False)
+    monkeypatch.setattr(config_module, "apply_runtime_env", lambda: settings)
+    monkeypatch.setattr(config_module, "ENVIRONMENT", env)
+    monkeypatch.setattr(launch, "ssl_kwargs", lambda s: {})
+    monkeypatch.setattr(launch.uvicorn, "Server", FakeServer)
+    monkeypatch.setattr(launch, "attach", lambda s: calls.append("attach"))
+    monkeypatch.setattr(launch, "detach", lambda p: calls.append("detach"))
+    monkeypatch.setattr(caddy_runtime, "ensure_running", lambda: calls.append("caddy") or "caddy-proc")
+    monkeypatch.setattr(caddy_runtime, "stop_caddy", lambda p: calls.append(("stop-caddy", p)))
+
+    with pytest.raises(SystemExit) as info:
+        launch.run_server(interactive=False)
+
+    assert info.value.code == launch.RESTART_EXIT_CODE
+    assert calls == ["caddy", "attach", "run", "detach", ("stop-caddy", "caddy-proc")]
 
 
 def test_list_and_cleanup_on_empty_store(server, store, capsys) -> None:

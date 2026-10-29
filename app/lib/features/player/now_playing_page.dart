@@ -448,10 +448,11 @@ class _NowPlayingPageState extends State<NowPlayingPage> with SingleTickerProvid
     );
   }
 
-  /// 原文：有逐字时间轴时，用一条从左往右扫的硬边渐变模拟卡拉OK进度条。
+  /// 原文：有逐字时间轴时，按**每个字/词**自己的时间上色。
   ///
-  /// 不用「每个字单独变红」是因为那样是一格一格的；这里给整行做 ShaderMask，
-  /// 填充边界跟着 position 连续移动，看起来才是进度条。
+  /// 以前是整行一个 ShaderMask 横扫；长句一旦折成两行，那条渐变是横跨整个文本框的，
+  /// 第二行会从左边重新填充，看起来就像「一句歌词变成两段」。现在每个词各画各的，
+  /// 折行也不影响。
   Widget _lyricMain(BuildContext context, LyricLine line, bool active) {
     final scheme = Theme.of(context).colorScheme;
     final text = line.text.isEmpty ? '♪' : line.text;
@@ -470,48 +471,54 @@ class _NowPlayingPageState extends State<NowPlayingPage> with SingleTickerProvid
       );
     }
 
-    final progress = line.progressAt(_displayPosition).clamp(0.0, 1.0);
-    if (progress <= 0) {
-      return Text(
-        text,
-        textAlign: TextAlign.center,
-        maxLines: 2,
-        overflow: TextOverflow.ellipsis,
-        style: style.copyWith(color: scheme.onSurfaceVariant),
-      );
-    }
-    if (progress >= 1) {
-      return Text(
-        text,
-        textAlign: TextAlign.center,
-        maxLines: 2,
-        overflow: TextOverflow.ellipsis,
-        style: style.copyWith(color: scheme.primary),
-      );
-    }
-
-    return ShaderMask(
-      blendMode: BlendMode.srcIn,
-      shaderCallback: (bounds) => LinearGradient(
-        begin: Alignment.centerLeft,
-        end: Alignment.centerRight,
-        colors: [
-          scheme.primary,
-          scheme.primary,
-          scheme.onSurfaceVariant,
-          scheme.onSurfaceVariant,
-        ],
-        // 两个相同 stop 之间就是硬边界：左边已唱、右边未唱
-        stops: [0.0, progress, progress, 1.0],
-      ).createShader(bounds),
-      child: Text(
-        text,
-        textAlign: TextAlign.center,
-        maxLines: 2,
-        overflow: TextOverflow.ellipsis,
-        style: style.copyWith(color: Colors.white),
-      ),
+    return Text.rich(
+      TextSpan(children: _karaokeSpans(line, scheme, style)),
+      textAlign: TextAlign.center,
+      maxLines: 2,
+      overflow: TextOverflow.ellipsis,
     );
+  }
+
+  /// 把一行拆成「已唱 / 正在唱 / 还没唱」三种 span。
+  ///
+  /// 正在唱的那个词用 WidgetSpan + ShaderMask 单独扫，既保留了连续填充的观感，
+  /// 又不会因为折行把整行的进度画歪。
+  List<InlineSpan> _karaokeSpans(LyricLine line, ColorScheme scheme, TextStyle style) {
+    final position = _displayPosition;
+    final spans = <InlineSpan>[];
+    for (final word in line.words) {
+      if (word.text.isEmpty) continue;
+      final progress = word.progressAt(position);
+      if (progress >= 1) {
+        spans.add(TextSpan(text: word.text, style: style.copyWith(color: scheme.primary)));
+      } else if (progress <= 0) {
+        spans.add(TextSpan(text: word.text, style: style.copyWith(color: scheme.onSurfaceVariant)));
+      } else {
+        spans.add(
+          WidgetSpan(
+            alignment: PlaceholderAlignment.baseline,
+            baseline: TextBaseline.alphabetic,
+            child: ShaderMask(
+              blendMode: BlendMode.srcIn,
+              shaderCallback: (bounds) => LinearGradient(
+                begin: Alignment.centerLeft,
+                end: Alignment.centerRight,
+                colors: [
+                  scheme.primary,
+                  scheme.primary,
+                  scheme.onSurfaceVariant,
+                  scheme.onSurfaceVariant,
+                ],
+                // 两个相同 stop 之间就是硬边界：左边已唱、右边未唱
+                stops: [0.0, progress, progress, 1.0],
+              ).createShader(bounds),
+              child: Text(word.text, style: style.copyWith(color: Colors.white)),
+            ),
+          ),
+        );
+      }
+    }
+    return spans;
   }
 
   Widget _lyricSub(BuildContext context, String text, Color color) => Padding(

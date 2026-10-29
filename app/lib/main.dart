@@ -5,17 +5,12 @@ import 'package:just_audio_background/just_audio_background.dart';
 import 'package:just_audio_media_kit/just_audio_media_kit.dart';
 
 import 'app/app.dart';
-import 'core/desktop_lifecycle.dart';
 import 'core/self_signed.dart';
 import 'core/temp_dir.dart';
 
 /// 入口：只做「平台相关的初始化」，界面本身在 `app/app.dart`。
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-
-  // 桌面端：窗口被输入法候选窗「抢一下激活」时不要收掉焦点，
-  // 否则组字会在第一个字母之后被打断（详见 core/desktop_lifecycle.dart）。
-  DesktopLifecycle.install();
 
   // 内网 HTTPS 自签证书的开关：默认关，用户在「我的」页长按版本号那里打开。
   // 公网域名走 Let's Encrypt，用不到它。

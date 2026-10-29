@@ -14,6 +14,18 @@ class LyricWord {
 
   /// 这一小段对应的拼音 / 罗马音；没有就是空串。
   final String roman;
+
+  /// 这个词唱到哪了（0~1）。
+  ///
+  /// 卡拉OK按**词**上色，不按整行：整行一条渐变时，长句折行后第二行会从左边
+  /// 重新填充，看起来就像「一句歌词变成两段」。
+  double progressAt(Duration position) {
+    final span = (end - start).inMilliseconds;
+    if (span <= 0) return position >= start ? 1 : 0;
+    if (position <= start) return 0;
+    if (position >= end) return 1;
+    return (position - start).inMilliseconds / span;
+  }
 }
 
 class LyricLine {
