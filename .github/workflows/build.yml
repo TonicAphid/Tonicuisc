@@ -161,9 +161,21 @@ jobs:
         working-directory: app
         run: flutter pub get
 
-      - name: 构建
+      - name: 构建 (Linux)
+        if: matrix.platform == 'linux'
         working-directory: app
-        run: flutter build ${{ matrix.platform }} --release
+        env:
+          # flutter_secure_storage_linux 1.2.3 里打包的 nlohmann/json 3.11.2 写的是
+          # `operator"" _json`（标识符前带空格），clang 18+ 判成 deprecated；插件 CMake 里
+          # 又有 `-Wall -Werror`（Flutter 的 APPLY_STANDARD_SETTINGS），于是整条 Linux 构建直接挂。
+          # CXXFLAGS 排在 target_compile_options 之前，具体警告的 -Wno 不会被后面的 -Werror 翻回来。
+          CXXFLAGS: -Wno-unknown-warning-option -Wno-deprecated-literal-operator
+        run: flutter build linux --release
+
+      - name: 构建 (Windows)
+        if: matrix.platform == 'windows'
+        working-directory: app
+        run: flutter build windows --release
 
       - name: 打包 (Windows)
         if: matrix.platform == 'windows'
@@ -499,12 +511,18 @@ jobs:
             cp "$src/$from" "dist/${names[$from]}"
           done
 
-          # 打印签名证书指纹：换 keystore 后能一眼看出来（同一份证书才能覆盖安装）
-          apksigner=$(ls "$ANDROID_HOME"/build-tools/*/apksigner 2>/dev/null | tail -1 || true)
+          # 打印签名证书指纹：换 keystore 后能一眼看出来（同一份证书才能覆盖安装）。
+          # apksigner 在 build-tools 里（路径随版本变，用 find 找）；找不到就退回 JDK 的 keytool。
+          # 两个都可能因为签名方案（只有 v2/v3 时 keytool 读不出）打不出来，所以全部 || true。
+          sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          apksigner=$(find "$sdk/build-tools" -maxdepth 2 -name 'apksigner' -type f 2>/dev/null | sort -V | tail -1 || true)
+          echo "apksigner: ${apksigner:-（没找到，改用 keytool）}"
           for apk in dist/*.apk; do
             echo "== $apk  $(du -h "$apk" | cut -f1)"
             if [ -n "$apksigner" ]; then
-              "$apksigner" verify --print-certs "$apk" | grep -E "Signer #1 certificate (DN|SHA-256)" || true
+              "$apksigner" verify --print-certs "$apk" 2>/dev/null | grep -E "Signer #1 certificate SHA-256" | head -1 || true
+            else
+              keytool -printcert -jarfile "$apk" 2>/dev/null | grep -E "^[[:space:]]*SHA256:" | head -1 || true
             fi
           done
 
