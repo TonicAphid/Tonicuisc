@@ -374,3 +374,26 @@ def test_download_unknown_platform(app_env) -> None:
     resp = client.get("/download/beos")
     assert resp.status_code == 404
     assert "beos" in resp.text
+
+
+# ------------------------------------------------------------------ 爬虫
+def test_robots_txt(app_env) -> None:
+    """``/robots.txt`` 是真路由，不是 404 兜底里捞静态文件捞出来的。"""
+    resp = client.get("/robots.txt")
+
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/plain")
+    lines = resp.text.splitlines()
+    assert lines[0] == "User-agent: *"
+    assert "Disallow: /api/" in lines
+    assert "Disallow: /music/api/" in lines
+    assert "Disallow: /login" in lines
+    assert "Allow: /" in lines
+
+
+def test_robots_txt_supports_head(app_env) -> None:
+    """Starlette 给 GET 自动加 HEAD，爬虫和 CDN 探测都靠它。"""
+    resp = client.head("/robots.txt")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/plain")
+

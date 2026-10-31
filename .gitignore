@@ -56,3 +56,5 @@ dist/
 .DS_Store
 Thumbs.db
 *.log
+.workbuddy/
+.workbuddy-ai/

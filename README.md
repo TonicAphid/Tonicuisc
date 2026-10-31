@@ -229,7 +229,31 @@ flutter build apk --release --split-per-abi
 
 另外一个**不用管**的噪音：控制台刷 `[ERROR:flutter/shell/platform/common/accessibility_bridge.cc(114)] Failed to update ui::AXTree, error: N will not be in the tree and is not the new root`。这是 Flutter 引擎在 Windows 上的已知 bug（[#98099](https://github.com/flutter/flutter/issues/98099)、[#182444](https://github.com/flutter/flutter/issues/182444)，后者给的复现条件是 **`ListView` + Material `Tooltip`**），**只是 debug 控制台的日志**，界面和功能都不受影响，release 版没有控制台。仓库里的 `Tooltip` 全部来自还没迁到 Cupertino 的 `IconButton(tooltip: ...)`，**逐页迁移做完它自然就没了**。
 
-**Windows 第三方输入法**：Flutter Windows 嵌入层的已知问题（[#190042](https://github.com/flutter/flutter/issues/190042)、[#191196](https://github.com/flutter/flutter/issues/191196)，修复 PR [#190043](https://github.com/flutter/flutter/pull/190043) 至今仍是 draft）。仓库里**不再有任何输入法相关代码**：runner 与 Flutter 模板逐字一致（包括 `WM_ACTIVATE` 里的无条件 `SetFocus`），Dart 侧不碰生命周期、不碰 `onViewFocusChange`、不记 IME 日志。系统自带输入法（微软拼音）优先，第三方输入法的断续问题等上游修复。
+**Windows 第三方输入法**：Flutter Windows 嵌入层的已知问题，**到 2026-10-31 还没修**。仓库里**不再有任何输入法相关代码**：runner 与 Flutter 模板逐字一致（包括 `WM_ACTIVATE` 里的无条件 `SetFocus`），Dart 侧不碰生命周期、不碰 `onViewFocusChange`、不记 IME 日志。系统自带输入法（微软拼音）优先，第三方输入法的断续问题等上游修复。
+
+上游现状（2026-10-31 查）：
+
+| 项 | 状态 |
+| --- | --- |
+| [#190042](https://github.com/flutter/flutter/issues/190042) 失去焦点再回来输入法不工作 | **被机器人以「信息不足」关掉**（2026-08-18），没修 |
+| [#191196](https://github.com/flutter/flutter/issues/191196) 组字泄漏到下一个 TextField | 仍 open（`AbortComposing` 在 `ime_active_` 为 false 时被跳过） |
+| [#190043](https://github.com/flutter/flutter/pull/190043) 主修复 PR | 仍是 **draft**，2026-07-28 之后没动过 |
+| [#189968](https://github.com/flutter/flutter/pull/189968) `setEditingState` 读错字段 | **已合并**（2026-10-02），但只进了 beta |
+
+实测对比：`engine/.../windows/text_input_plugin.cc` 里
+
+```cpp
+// 3.47.9（最新稳定版）—— 还是错的：extent 从 base 读
+int composing_extent = base->value.GetInt();
+// 3.50.0-0.3.pre（beta）—— 已修
+int composing_extent = extent->value.GetInt();
+active_model_->SetText(text, TextRange(...), TextRange(composing_base, composing_extent));
+```
+
+`setEditingState` 正是「框架重新同步编辑状态」走的那条路（切焦点、重建输入连接都会走），所以这条修复**有可能**缓解「切回来就不能打字」，但上游没拿它去对 #190042，也没有人验证过。还有三个 Windows 输入法 PR 都还开着（[#194270](https://github.com/flutter/flutter/pull/194270) 韩文丢空格/数字、[#192624](https://github.com/flutter/flutter/pull/192624) 重复上屏、[#192105](https://github.com/flutter/flutter/pull/192105) Alt+Space 后空格失效）。
+
+**结论**：想现在就试，只能切 beta（`flutter channel beta`，3.50.0-0.3.pre）；稳定版 3.47.9 里一行都没改。
+
 
 ### 第一次登录
 
@@ -329,6 +353,7 @@ flutter build apk --release --split-per-abi
 | POST | `/music/api/session/manual` | 手动粘贴 API Key 登录 |
 | POST | `/music/api/session/cancel` | 放弃当前设备码 |
 | GET | `/download/{platform}` | 查最新 Release 后 302 到安装包（`windows` / `macos` / `linux`） |
+| GET / HEAD | `/robots.txt` | 爬虫规则（接口和 `/login` 不给抓，其余放行；写在路由里，不依赖 `webapp/public`） |
 | GET | `/<其余路径>` | 按 `webapp/public` 里的文件找，找不到给 404 页 |
 
 网页会话（`tuisc_session`）只存在进程内存里，**但重启不会掉线**：另有一枚长期指纹

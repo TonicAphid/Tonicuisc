@@ -32,7 +32,14 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    PlainTextResponse,
+    RedirectResponse,
+    Response,
+)
 
 from ...auth import CODE_ALPHABET, DEVICE_ID_RE, DeviceStatus, hash_key, new_api_key, normalize_user_code
 from ...core.config import SETTINGS
@@ -425,6 +432,32 @@ async def download_latest(platform: str, request: Request, arch: str = ""):
 @router.get("/download")
 async def download_root():
     return RedirectResponse("/", status_code=302)
+
+
+# ---------------------------------------------------------------- 爬虫
+@router.api_route(
+    "/robots.txt",
+    methods=["GET", "HEAD"],
+    response_class=PlainTextResponse,
+    include_in_schema=False,
+)
+async def robots_txt() -> PlainTextResponse:
+    """给爬虫看的规则：接口和登录页别抓，其余随意。
+
+    写在路由里而不是往 ``webapp/public`` 丢一个文件：``TONICUISC_WEB_PUBLIC`` 指到别处、
+    或者只部署了后端时也照样有；改规则也不用动前端目录。
+    内容是纯文本，别让 FastAPI 按 JSON 序列化，所以显式给 ``PlainTextResponse``。
+    方法显式列了 ``HEAD``：FastAPI 不像 Starlette 那样给 GET 自动补 HEAD（爬虫和 CDN 会探）。
+    """
+    body = (
+        "User-agent: *\n"
+        "Disallow: /api/\n"
+        "Disallow: /music/api/\n"
+        "Disallow: /login\n"
+        "Allow: /\n"
+    )
+    # 爬虫不会频繁回来，给 1 小时缓存，省得每次都被打一遍
+    return PlainTextResponse(body, headers={"cache-control": "public, max-age=3600"})
 
 
 # ---------------------------------------------------------------- 静态文件
