@@ -336,7 +336,9 @@ def test_stream_first_request_is_still_cached(app_env, monkeypatch) -> None:
 
     assert resp.status_code == 200
     assert seen["range"] is None, "整段请求不该带 Range 给音源"
-    assert resp.headers["accept-ranges"] == "none"
+    # 关键：整段流也要声明「可跳」，否则浏览器认定不可跳，拖进度条只能从头重来
+    assert resp.headers["accept-ranges"] == "bytes"
+    assert resp.headers["content-length"] == "3"
 
 
 def test_open_upstream_passes_range_to_source(app_env, monkeypatch) -> None:

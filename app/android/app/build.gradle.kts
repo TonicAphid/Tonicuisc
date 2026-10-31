@@ -1,7 +1,32 @@
+import java.io.FileInputStream
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
     id("dev.flutter.flutter-gradle-plugin")
+}
+
+// 正式签名：放一个 app/android/key.properties（已在 .gitignore 里）就自动用；
+// 没有就退回 debug 签名，本地 `flutter build apk --release` 照常能跑。
+//
+// key.properties 的内容（storeFile 相对 app/android/app/ 解析）：
+//   storeFile=../tonicuisc.jks
+//   storePassword=***
+//   keyAlias=tonicuisc
+//   keyPassword=***
+val keystorePropsFile = rootProject.file("key.properties")
+val keystoreProps = Properties().apply {
+    if (keystorePropsFile.exists()) {
+        FileInputStream(keystorePropsFile).use { load(it) }
+    }
+}
+val hasReleaseKey = keystorePropsFile.exists()
+if (!hasReleaseKey) {
+    logger.lifecycle(
+        "没有 android/key.properties，release 包使用 debug 签名。" +
+            "注意：CI runner 每次生成的 debug key 都不一样，跨版本覆盖安装会报「签名不一致」。"
+    )
 }
 
 android {
@@ -29,11 +54,23 @@ android {
         versionName = flutter.versionName
     }
 
+    signingConfigs {
+        if (hasReleaseKey) {
+            create("release") {
+                storeFile = file(keystoreProps.getProperty("storeFile"))
+                storePassword = keystoreProps.getProperty("storePassword")
+                keyAlias = keystoreProps.getProperty("keyAlias")
+                keyPassword = keystoreProps.getProperty("keyPassword")
+            }
+        }
+    }
+
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.getByName("debug")
+            // 有正式 keystore 就用它，否则退回 debug（能装能跑，但不能上架）
+            signingConfig =
+                if (hasReleaseKey) signingConfigs.getByName("release")
+                else signingConfigs.getByName("debug")
         }
     }
 }

@@ -134,10 +134,17 @@ async def stream(item_id: str, request: Request) -> StreamingResponse:
 
     if upstream is not None:
         response, target, temp_path = upstream
+        # 必须告诉播放器「这个流可以按字节跳」。以前这里写的是 ``Accept-Ranges: none``，
+        # 浏览器据此认定整段不可跳，拖动 / 点击进度条时直接从头重来（表现就是「回到 0」）。
+        # 顺带把 Content-Length 透出去：知道总长度，浏览器才敢发 Range 来跳。
+        headers = {"Accept-Ranges": "bytes"}
+        length = response.headers.get("content-length")
+        if length and str(length).isdigit():
+            headers["Content-Length"] = str(length)
         return StreamingResponse(
             service.relay(response, target, temp_path),
             media_type=_mime_of(target),
-            headers={"Accept-Ranges": "none"},
+            headers=headers,
         )
 
     size = 0

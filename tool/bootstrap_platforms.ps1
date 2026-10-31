@@ -1,5 +1,7 @@
 # Generate the missing native platform projects under app/ (windows / linux /
 # macos / ios), then apply the native patches and fetch dependencies.
+# Android is NOT in this list: app/android/ is committed (manifest and signing
+# config are edited by hand), regenerating it would overwrite them.
 # Existing files are never overwritten by "flutter create", so lib/ is safe.
 # ASCII-only on purpose: Windows PowerShell 5.1 reads .ps1 as ANSI.
 param(

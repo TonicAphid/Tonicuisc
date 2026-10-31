@@ -28,6 +28,7 @@
   <symbol id="i-queue" viewBox="0 0 24 24"><path d="M4 6h11M4 12h11M4 18h7"/><path d="M17 14v5"/><circle cx="15.5" cy="19" r="1.8"/></symbol>
   <symbol id="i-volume" viewBox="0 0 24 24"><path d="M4 10v4h4l5 4V6L8 10H4z"/><path d="M16 9a4 4 0 0 1 0 6"/><path d="M18.5 6.5a8 8 0 0 1 0 11"/></symbol>
   <symbol id="i-mute" viewBox="0 0 24 24"><path d="M4 10v4h4l5 4V6L8 10H4z"/><path d="m16 10 4 4M20 10l-4 4"/></symbol>
+  <symbol id="i-disc" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3.2"/><circle cx="12" cy="12" r=".9" fill="currentColor" stroke="none"/></symbol>
   <symbol id="i-chevron-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
   <symbol id="i-chevron-right" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></symbol>
   <symbol id="i-close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></symbol>
@@ -412,9 +413,12 @@
 
     <div class="now-body">
       <div class="now-cover" id="nowCoverWrap">
-        <span class="cover-fallback"><svg class="ic"><use href="#i-music"></use></svg></span>
-        <img id="nowCover" alt="" hidden>
+        <span class="vinyl-disc" aria-hidden="true">
+          <span class="cover-fallback"><svg class="ic"><use href="#i-music"></use></svg></span>
+          <img id="nowCover" alt="" hidden>
+        </span>
         <span class="now-vinyl" aria-hidden="true"></span>
+        <span class="now-tonearm" aria-hidden="true"></span>
       </div>
 
       <div class="now-meta">
@@ -468,6 +472,16 @@
         <button class="icon-btn" type="button" id="nowQueue2" title="播放队列">
           <svg class="ic"><use href="#i-queue"></use></svg>
         </button>
+        <button class="icon-btn" type="button" id="nowStyle" title="切换唱片样式">
+          <svg class="ic"><use href="#i-disc"></use></svg>
+        </button>
+      </div>
+
+      <div class="now-volume">
+        <button class="icon-btn" type="button" id="nowMute" title="静音">
+          <svg class="ic"><use href="#i-volume"></use></svg>
+        </button>
+        <input type="range" id="nowVolume" min="0" max="100" value="100" step="1" aria-label="音量">
       </div>
     </div>
   </aside>

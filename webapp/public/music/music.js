@@ -123,6 +123,7 @@
     themeLabel: $('#themeLabel'),
 
     nowCover: $('#nowCover'),
+    nowCoverWrap: $('#nowCoverWrap'),
     nowTitle: $('#nowTitle'),
     nowSinger: $('#nowSinger'),
     nowLike: $('#nowLike'),
@@ -130,6 +131,9 @@
     nowDownload: $('#nowDownload'),
     nowQueue: $('#nowQueue'),
     nowQueue2: $('#nowQueue2'),
+    nowStyle: $('#nowStyle'),
+    nowVolume: $('#nowVolume'),
+    nowMute: $('#nowMute'),
     lyrics: $('#lyrics'),
     lyricEmpty: $('#lyricEmpty'),
     lyricLines: $('#lyricLines'),
@@ -225,6 +229,10 @@
     duration: 0,
     seekDragging: false,
     seekValue: 0,
+    //: 刚跳转到的位置。`audio.currentTime` 要过几帧才真的变过去，
+    //: 这段时间进度条先用这个值，不然会「跳过去又弹回来」闪一下。
+    seekPending: null,
+    seekPendingAt: 0,
     volume: 1,
     muted: false,
     audioSongId: null,
@@ -253,10 +261,40 @@
   };
 
   let lyricFrame = 0;
+  let lyricScrollFrame = 0;
+  let nowCloseTimer = 0;
+
+  //: `audio.currentTime` 的采样锚点。浏览器给的不一定每帧都变（有的实现是「台阶值」），
+  //: 中间那几十毫秒用真实经过的时间补上——App 端 `_displayPosition` 就是这么做的。
+  //: 不补的话，歌词会一顿一顿地追人声，看起来就是「慢半拍」。
+  let clockPos = -1;
+  let clockAt = 0;
 
   // ------------------------------------------------------------------ 工具
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  //: 宽屏下页面本身不滚（见 music.css 的「桌面：页面本身不滚」），滚的是 `.main`。
+  //: 窄屏还是整页滚。判断只写在这一处，别的地方都用 scrollHost()。
+  const DESKTOP_MQ = window.matchMedia('(min-width: 1201px)');
+
+  function scrollHost() {
+    return DESKTOP_MQ.matches && el.main ? el.main : null;
+  }
+
+  function scrollHostToTop() {
+    const host = scrollHost();
+    if (host) host.scrollTop = 0;
+    else window.scrollTo(0, 0);
+  }
+
+  /// 是否快滚到底了（触底加载更多用）。
+  function scrollHostNearBottom(threshold) {
+    const host = scrollHost();
+    if (host) return host.scrollTop + host.clientHeight >= host.scrollHeight - threshold;
+    const doc = document.documentElement;
+    return window.innerHeight + window.scrollY >= doc.scrollHeight - threshold;
+  }
 
   function esc(value) {
     return String(value == null ? '' : value).replace(/[&<>"']/g, (ch) => {
@@ -848,7 +886,7 @@
       button.classList.toggle('is-active', button.dataset.nav === target);
     });
     closeNowPanel();
-    window.scrollTo(0, 0);
+    scrollHostToTop();
     if (name === 'library') {
       loadSummary();
       updateQueueSub();
@@ -1634,14 +1672,45 @@
     const target = Math.max(0, Math.min(Number(seconds) || 0, total));
     try { audio.currentTime = target; } catch { /* ignore */ }
     state.position = target;
+    // 乐观值：浏览器真的把 currentTime 挪过去之前，进度条先停在这儿
+    state.seekPending = target;
+    state.seekPendingAt = performance.now();
     renderProgress();
     updateLyricActive(true);
     updateMediaSessionPosition();
   }
 
+  /// 播放位置的连续值（秒）。
+  ///
+  /// 直接读 `audio.currentTime` 时，如果它几帧才更新一次，歌词就会「跳着追」；
+  /// 这里在两次采样之间按真实时间往前推（最多 0.3s，真卡住时不会一直跑）。
+  function playbackClock() {
+    const live = Number(audio.currentTime) || 0;
+    const now = performance.now();
+    if (audio.paused || live !== clockPos) {
+      clockPos = live;
+      clockAt = now;
+      return live;
+    }
+    return live + Math.min(0.3, (now - clockAt) / 1000);
+  }
+
+  /// 进度条当前该显示的位置：拖动中 → 拖到哪算哪；刚跳转 → 用乐观值；否则读播放器。
+  function progressPosition() {
+    if (state.seekDragging) return state.seekValue;
+    const live = playbackClock();
+    if (state.seekPending != null) {
+      const settled = Math.abs(live - state.seekPending) < 0.8;
+      const expired = performance.now() - state.seekPendingAt > 1500;
+      if (settled || expired) state.seekPending = null;
+      else return state.seekPending;
+    }
+    return live;
+  }
+
   function renderProgress() {
     const total = durationOf();
-    const position = state.seekDragging ? state.seekValue : (Number(audio.currentTime) || 0);
+    const position = progressPosition();
     const pct = total > 0 ? Math.max(0, Math.min(100, (position / total) * 100)) : 0;
     const value = total > 0 ? Math.round((position / total) * 1000) : 0;
     [el.pbSeek, el.nowSeek].forEach((input) => {
@@ -1655,14 +1724,27 @@
     el.pbDur.textContent = fmtTime(total);
     el.nowCur.textContent = fmtTime(position);
     el.nowDur.textContent = fmtTime(total);
+
+    // 黑胶模式的唱臂：跟着播放进度从唱片外圈往里扫
+    if (el.nowCoverWrap) {
+      const arm = total > 0 ? Math.max(0, Math.min(1, position / total)) : 0;
+      el.nowCoverWrap.style.setProperty('--arm', arm.toFixed(4));
+    }
   }
 
   function renderVolume() {
     const pct = Math.round((state.muted ? 0 : state.volume) * 100);
-    el.pbVolume.value = String(pct);
-    el.pbVolume.style.setProperty('--p', pct + '%');
-    setUse(el.pbMute, state.muted || state.volume <= 0 ? 'i-mute' : 'i-volume');
-    el.pbMute.title = state.muted ? '取消静音' : '静音';
+    const muted = state.muted || state.volume <= 0;
+    [el.pbVolume, el.nowVolume].forEach((input) => {
+      if (!input) return;
+      input.value = String(pct);
+      input.style.setProperty('--p', pct + '%');
+    });
+    [el.pbMute, el.nowMute].forEach((button) => {
+      if (!button) return;
+      setUse(button, muted ? 'i-mute' : 'i-volume');
+      button.title = state.muted ? '取消静音' : '静音';
+    });
   }
 
   function persistQueue() {
@@ -1742,6 +1824,9 @@
     el.pbSinger.textContent = song ? (song.singers || '未知歌手') : '搜一首歌开始';
 
     document.title = song ? `${song.name} · Tonicuisc` : '网页播放器 · Tonicuisc';
+
+    // 黑胶模式的唱片只在播放时转
+    el.nowPanel.classList.toggle('is-playing', state.playing);
 
     updateNowButtons();
     updatePlayButtons();
@@ -1849,13 +1934,63 @@
   }
 
   function openNowPanel() {
+    clearTimeout(nowCloseTimer);
+    el.nowPanel.classList.remove('is-closing');
     el.nowPanel.classList.add('is-open');
     document.body.classList.add('lock');
+    recenterLyric();
   }
 
   function closeNowPanel() {
-    el.nowPanel.classList.remove('is-open');
+    if (!el.nowPanel.classList.contains('is-open')) {
+      if (el.queueDrawer.hidden) document.body.classList.remove('lock');
+      return;
+    }
+    // 宽屏是全屏铺满：先播「从上往下滑走」再摘掉 is-open，否则会硬切回侧栏
+    if (DESKTOP_MQ.matches) {
+      if (el.nowPanel.classList.contains('is-closing')) return;
+      el.nowPanel.classList.add('is-closing');
+      clearTimeout(nowCloseTimer);
+      nowCloseTimer = window.setTimeout(() => {
+        el.nowPanel.classList.remove('is-open', 'is-closing');
+        if (el.queueDrawer.hidden) document.body.classList.remove('lock');
+        recenterLyric();
+      }, 300);
+      return;
+    }
+    el.nowPanel.classList.remove('is-open', 'is-closing');
     if (el.queueDrawer.hidden) document.body.classList.remove('lock');
+    recenterLyric();
+  }
+
+  /// 全屏播放页的封面样式：方形封面 / 黑胶唱片（会转 + 唱臂跟着进度扫）
+  const NOW_STYLE_KEY = 'tonicuisc.nowStyle';
+
+  function applyNowStyle(style) {
+    const vinyl = style === 'vinyl';
+    el.nowPanel.classList.toggle('is-vinyl', vinyl);
+    if (el.nowStyle) {
+      el.nowStyle.classList.toggle('is-on', vinyl);
+      el.nowStyle.title = vinyl ? '切换回方形封面' : '切换黑胶唱片';
+    }
+    try { localStorage.setItem(NOW_STYLE_KEY, vinyl ? 'vinyl' : 'cover'); } catch { /* ignore */ }
+    recenterLyric();
+  }
+
+  function toggleVinyl() {
+    applyNowStyle(el.nowPanel.classList.contains('is-vinyl') ? 'cover' : 'vinyl');
+  }
+
+  function initNowStyle() {
+    let style = 'cover';
+    try { style = localStorage.getItem(NOW_STYLE_KEY) || 'cover'; } catch { /* ignore */ }
+    applyNowStyle(style);
+  }
+
+  /// 面板尺寸变了（展开成全屏 / 收回侧栏），当前这句要重新居中。
+  /// 等一帧再量，否则量到的还是旧布局。
+  function recenterLyric() {
+    requestAnimationFrame(() => updateLyricActive(true));
   }
 
   // ------------------------------------------------------------------ Media Session
@@ -2168,7 +2303,8 @@
   function updateLyricActive(force = false) {
     const lyric = state.lyric;
     if (!lyric.lines.length || !lyric.synced) return;
-    const position = (Number(audio.currentTime) || 0) * 1000;
+    // 和进度条用同一个位置：点了歌词/拖了进度条，高亮立刻跟过去，不用等 currentTime 真的挪好
+    const position = progressPosition() * 1000;
     let index = -1;
     for (let i = 0; i < lyric.lines.length; i += 1) {
       if (lyric.lines[i].time <= position) index = i;
@@ -2198,20 +2334,52 @@
     if (!node) return;
     const target = Math.max(0, node.offsetTop - el.lyrics.clientHeight / 2 + node.offsetHeight / 2);
     if (jump) {
+      // 跳转 / 刚加载：直接落位，别让歌词慢慢飘过去
+      stopLyricScroll();
       el.lyrics.scrollTop = target;
-    } else {
-      el.lyrics.scrollTo({ top: target, behavior: 'smooth' });
+      return;
     }
+    tweenLyricScroll(target);
+  }
+
+  /// 自己补间，不用浏览器自带的 `behavior: 'smooth'`：
+  /// 那条动画又短又硬（~300ms 匀速），下一句来得快时还会被硬生生打断，看着一顿一顿的。
+  function tweenLyricScroll(target) {
+    const start = el.lyrics.scrollTop;
+    const distance = target - start;
+    if (Math.abs(distance) < 1) return;
+    stopLyricScroll();
+    // 距离越远走得越久，但都压在 200~460ms：太长会「慢半拍」，太短又硬
+    const duration = Math.min(460, Math.max(200, Math.abs(distance) * 2.6));
+    const startedAt = performance.now();
+    const step = (now) => {
+      const t = Math.min(1, (now - startedAt) / duration);
+      const eased = 1 - Math.pow(1 - t, 3); // easeOutCubic：起步快、收尾软
+      el.lyrics.scrollTop = start + distance * eased;
+      lyricScrollFrame = t < 1 ? requestAnimationFrame(step) : 0;
+    };
+    lyricScrollFrame = requestAnimationFrame(step);
+  }
+
+  function stopLyricScroll() {
+    if (lyricScrollFrame) cancelAnimationFrame(lyricScrollFrame);
+    lyricScrollFrame = 0;
   }
 
   function startLyricLoop() {
     if (lyricFrame) return;
-    const step = () => {
+    let progressAt = 0;
+    const step = (now) => {
       if (audio.paused) {
         lyricFrame = 0;
         return;
       }
       updateLyricActive();
+      // 进度条 / 时间文字 15fps 足够，别跟歌词抢每一帧
+      if (now - progressAt >= 66) {
+        progressAt = now;
+        renderProgress();
+      }
       lyricFrame = requestAnimationFrame(step);
     };
     lyricFrame = requestAnimationFrame(step);
@@ -2387,18 +2555,24 @@
     el.searchMoreBtn.addEventListener('click', () => loadMore());
 
     let scrollTick = 0;
-    window.addEventListener('scroll', () => {
+    const onScroll = () => {
       if (scrollTick) return;
       scrollTick = window.setTimeout(() => {
         scrollTick = 0;
         if (state.view !== 'search') return;
-        const doc = document.documentElement;
-        if (window.innerHeight + window.scrollY >= doc.scrollHeight - 700) loadMore();
+        if (scrollHostNearBottom(700)) loadMore();
       }, 160);
-    }, { passive: true });
+    };
+    // 宽屏滚的是 `.main`（它自己的 scroll 事件不会冒到 window），两边都挂
+    window.addEventListener('scroll', onScroll, { passive: true });
+    if (el.main) el.main.addEventListener('scroll', onScroll, { passive: true });
   }
 
   function bindPlayer() {
+    // 用户自己滚歌词时别跟他抢：一滚就停掉自动补间
+    el.lyrics.addEventListener('wheel', stopLyricScroll, { passive: true });
+    el.lyrics.addEventListener('touchstart', stopLyricScroll, { passive: true });
+
     el.pbPlay.addEventListener('click', togglePlay);
     el.nowPlay.addEventListener('click', togglePlay);
     el.pbPrev.addEventListener('click', previous);
@@ -2486,6 +2660,29 @@
       renderVolume();
       persistQueue();
     });
+
+    // 全屏播放页里那套音量（和播放条上的共用同一份 state）
+    el.nowVolume.addEventListener('input', () => {
+      state.volume = Math.max(0, Math.min(1, Number(el.nowVolume.value) / 100));
+      state.muted = state.volume <= 0;
+      audio.volume = state.volume;
+      audio.muted = state.muted;
+      renderVolume();
+      persistQueue();
+    });
+
+    el.nowMute.addEventListener('click', () => {
+      state.muted = !state.muted;
+      audio.muted = state.muted;
+      if (!state.muted && state.volume <= 0) {
+        state.volume = 0.6;
+        audio.volume = state.volume;
+      }
+      renderVolume();
+      persistQueue();
+    });
+
+    el.nowStyle.addEventListener('click', toggleVinyl);
   }
 
   function bindAudio() {
@@ -2519,6 +2716,9 @@
     audio.addEventListener('timeupdate', () => {
       if (!state.seekDragging) state.position = Number(audio.currentTime) || 0;
       renderProgress();
+      // 兜底：万一 rAF 循环中途断了（比如某次 paused 判断），这里把它拉回来，
+      // 否则歌词会退化成一秒四跳
+      if (state.playing) startLyricLoop();
       updateLyricActive();
       updateMediaSessionPosition();
     });
@@ -2641,6 +2841,7 @@
   function init() {
     el.modalHost.hidden = true;
     initTheme();
+    initNowStyle();
     bindGate();
     bindSearch();
     bindPlayer();

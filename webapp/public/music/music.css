@@ -975,6 +975,16 @@ h1 {
 .now-cover .cover-fallback .ic { width: 58px; height: 58px; }
 
 .now-cover img[hidden] ~ .now-vinyl { display: none; }
+.now-cover:has(img[hidden]) .now-vinyl { display: none; }
+
+/* 封面 + 唱片共用一层：黑胶模式下转的是这一层（唱臂在它外面，不跟着转） */
+.vinyl-disc {
+  position: absolute;
+  inset: 0;
+  display: block;
+  border-radius: inherit;
+  overflow: hidden;
+}
 
 .now-vinyl {
   position: absolute;
@@ -990,6 +1000,125 @@ h1 {
   opacity: .22;
   z-index: -1;
 }
+
+/* ---------------------------------------------------- 黑胶模式（全屏才有的样式切换） */
+
+/* 唱臂：不跟着唱片转，靠 --arm(0~1) 从左往右扫 */
+.now-tonearm {
+  position: absolute;
+  top: -5%;
+  right: 5%;
+  width: 7px;
+  height: 46%;
+  border-radius: 999px;
+  background: linear-gradient(180deg, #f2f5fa, #b6bfcb);
+  box-shadow: 0 8px 16px -8px rgba(0, 0, 0, .55), inset 0 0 0 1px rgba(255, 255, 255, .65);
+  transform-origin: 50% 7%;
+  transform: rotate(calc(10deg + var(--arm, 0) * 26deg));
+  transition: transform .25s linear;
+  opacity: 0;
+  pointer-events: none;
+  z-index: 4;
+}
+
+/* 转轴 */
+.now-tonearm::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 0;
+  width: 260%;
+  aspect-ratio: 1;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  background: radial-gradient(circle at 38% 32%, #fbfcfe, #aeb7c3);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, .35);
+}
+
+/* 唱头 */
+.now-tonearm::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: -5%;
+  width: 190%;
+  height: 10%;
+  transform: translateX(-50%);
+  border-radius: 3px;
+  background: linear-gradient(180deg, #e3e8f0, #a9b2be);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, .35);
+}
+
+.now-panel.is-open.is-vinyl .now-tonearm { opacity: 1; }
+.now-panel.is-open.is-vinyl .now-vinyl { display: none; }
+
+.now-panel.is-open.is-vinyl .now-cover {
+  border-radius: 50%;
+  /* 唱臂要伸到唱片外面去，别被裁掉（圆盘自己会裁） */
+  overflow: visible;
+  background: radial-gradient(circle at 50% 50%, #262626 0 34%, #0d0d0d 35% 100%);
+  box-shadow: 0 34px 64px -30px rgba(0, 0, 0, .7), inset 0 0 0 1px rgba(255, 255, 255, .07);
+}
+
+.now-panel.is-open.is-vinyl .vinyl-disc {
+  inset: 8%;
+  border-radius: 50%;
+  background:
+    repeating-radial-gradient(circle at 50% 50%, #191919 0 1.5px, #0b0b0b 1.5px 3px);
+  animation: vinyl-spin 9s linear infinite;
+  animation-play-state: paused;
+}
+
+.now-panel.is-open.is-vinyl.is-playing .vinyl-disc { animation-play-state: running; }
+
+@keyframes vinyl-spin { to { transform: rotate(360deg); } }
+
+/* 中间的圆标：封面缩成唱片标签 */
+.now-panel.is-open.is-vinyl .now-cover img {
+  position: absolute;
+  inset: 27%;
+  width: 46%;
+  height: 46%;
+  border-radius: 50%;
+  z-index: 2;
+}
+
+.now-panel.is-open.is-vinyl .vinyl-disc .cover-fallback {
+  inset: 27%;
+  border-radius: 50%;
+  background: radial-gradient(circle at 50% 45%, #2f6fd0, #17335e);
+  color: rgba(255, 255, 255, .8);
+}
+
+/* 唱片中心孔 */
+.now-panel.is-open.is-vinyl .vinyl-disc::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 5%;
+  aspect-ratio: 1;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  background: #05070b;
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, .14);
+  z-index: 3;
+}
+
+/* 音量（播放条在全屏下被盖住了，这页得自带一个） */
+.now-volume {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  max-width: 220px;
+  margin: 6px auto 0;
+}
+
+.now-volume input[type="range"] { flex: 1; min-width: 0; }
+
+/* 唱片样式按钮：黑胶模式下高亮 */
+.icon-btn.is-on { color: var(--blue); background: var(--blue-soft); }
 
 .now-meta { padding: 20px 2px 0; text-align: center; }
 .now-meta h2 {
@@ -1050,11 +1179,16 @@ h1 {
   min-height: 100px;
   margin-top: 8px;
   overflow-y: auto;
+  overflow-x: hidden;
   overscroll-behavior: contain;
-  scrollbar-width: thin;
+  /* 歌词区不要那根滚动条：它跟自动滚动一起看着特别毛糙 */
+  scrollbar-width: none;
+  -ms-overflow-style: none;
   mask-image: linear-gradient(180deg, transparent 0, #000 8%, #000 92%, transparent 100%);
   -webkit-mask-image: linear-gradient(180deg, transparent 0, #000 8%, #000 92%, transparent 100%);
 }
+
+.lyrics::-webkit-scrollbar { width: 0; height: 0; display: none; }
 
 .lyric-empty {
   position: absolute;
@@ -1081,7 +1215,8 @@ h1 {
   color: var(--muted-2);
   font-size: 14px;
   line-height: 1.45;
-  transition: color .2s ease, transform .2s ease, background .2s ease;
+  /* 换行时颜色要「啪」地一下到位：0.2s 的过渡会让新的一句看着像慢半拍才变蓝 */
+  transition: color .1s ease, transform .2s ease, background .2s ease;
   cursor: default;
 }
 
@@ -1844,6 +1979,139 @@ input[type="range"]::-moz-range-thumb {
 
 @media (hover: none) {
   .song-actions { opacity: 1; }
+}
+
+/* ------------------------------------------------------- 桌面：页面本身不滚 */
+
+/* 宽屏是「左列表 + 右正在播放」两栏。以前滚的是整个页面：鼠标放在右边歌词上滚，
+   动的却是整页（左边列表跟着走），右边还多一根页面滚动条。
+   现在页面锁死，滚的是各自的面板——鼠标在哪就滚哪，各滚各的。
+   窄屏（≤1200）还是整页滚，不受影响。 */
+@media (min-width: 1201px) {
+  html, body { height: 100%; overflow: hidden; }
+
+  .main {
+    height: 100dvh;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    /* 面板自己滚，但不要那根滚动条（滚轮 / 触控板照常） */
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+
+  .main::-webkit-scrollbar { width: 0; height: 0; display: none; }
+}
+
+/* --------------------------------------------------- 桌面：正在播放铺满全屏 */
+
+/* 「展开正在播放」在宽屏以前是个哑按钮：面板本来就一直显示，加个 is-open 什么也没变。
+   现在它真的铺满整屏——左边封面 + 信息 + 操作 + 进度/控制，右边歌词。 */
+@media (min-width: 1201px) {
+  .now-panel.is-open {
+    inset: 0;
+    width: auto;
+    z-index: 95;
+    padding: 22px clamp(28px, 5vw, 72px) 20px;
+    /* 铺满时要盖住后面的内容，玻璃底会透出来 */
+    background: var(--bg);
+    border-left: 0;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    /* 从下往上抽出来 */
+    animation: now-panel-in .34s cubic-bezier(.22, .85, .24, 1) both;
+  }
+
+  /* 收起：先播完「从上往下滑走」再真正摘掉 is-open（见 closeNowPanel） */
+  .now-panel.is-closing {
+    animation: now-panel-out .3s cubic-bezier(.4, 0, .7, .2) both;
+  }
+
+  @keyframes now-panel-in {
+    from { transform: translateY(100%); }
+    to { transform: translateY(0); }
+  }
+
+  @keyframes now-panel-out {
+    from { transform: translateY(0); }
+    to { transform: translateY(100%); }
+  }
+
+  .now-panel.is-open #nowClose { display: inline-flex; }
+
+  .now-panel.is-open .now-body {
+    display: grid;
+    /* 左栏跟着窗口走，但别超过 460：全屏下封面太小会显得空，太大又挤歌词 */
+    grid-template-columns: clamp(300px, 30vw, 460px) minmax(0, 1fr);
+    /* 上下各留一条 1fr，左栏那摞内容就自动垂直居中，不会全堆在顶上 */
+    grid-template-rows: minmax(0, 1fr) auto auto auto minmax(0, 1fr);
+    column-gap: clamp(24px, 4vw, 64px);
+    align-items: start;
+    padding-top: 10px;
+    /* 超宽屏别把两栏拉成一条长带：整块内容居中、收在 1280 以内 */
+    width: 100%;
+    max-width: 1280px;
+    margin: 0 auto;
+  }
+
+  .now-panel.is-open .now-cover { grid-area: 2 / 1 / 3 / 2; width: min(100%, 420px); }
+  .now-panel.is-open .now-meta { grid-area: 3 / 1 / 4 / 2; }
+  .now-panel.is-open .now-actions { grid-area: 4 / 1 / 5 / 2; }
+
+  .now-panel.is-open .lyrics {
+    grid-area: 1 / 2 / 6 / 3;
+    margin-top: 0;
+    height: 100%;
+    min-height: 0;
+  }
+
+  /* 歌词区上下留白是按**宽度**算的百分比，全屏右栏很宽会撑出巨大空白，换成视口高度；
+     再限一下宽度：不然一句话横跨 1300px、当前句那块底色也拉成一整条 */
+  .now-panel.is-open .lyric-lines {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 22vh 4px;
+    max-width: 720px;
+    margin: 0 auto;
+  }
+
+  /* 每句按内容宽度撑开，当前句的底色就贴着文字，不再是一条横贯全屏的色带 */
+  .now-panel.is-open .lyric-line { font-size: 15.5px; max-width: 100%; }
+  .now-panel.is-open .lyric-line.is-active { font-size: 18px; }
+
+  /* 播放条被全屏盖住了，把面板自带的那套进度/控制显示出来（原来只在窄屏出现） */
+  .now-panel.is-open .now-controls {
+    display: flex !important;
+    flex-direction: column;
+    gap: 6px;
+    padding-top: 16px;
+    /* 和上面那块内容对齐，别一条进度条横贯整个超宽屏 */
+    width: 100%;
+    max-width: 1280px;
+    margin: 0 auto;
+  }
+
+  .now-panel.is-open .mini-progress {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    color: var(--muted);
+    font-size: 11.5px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .now-panel.is-open .mini-progress span { width: 46px; text-align: center; flex: none; }
+
+  .now-panel.is-open .now-buttons {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 18px;
+  }
+
+  .now-panel.is-open .now-buttons .icon-btn.lg { width: 48px; height: 48px; }
+  .now-panel.is-open .now-buttons .icon-btn.lg .ic { width: 24px; height: 24px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

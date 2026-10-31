@@ -404,9 +404,131 @@ jobs:
           path: tonicuisc-ios-unsigned.ipa
           if-no-files-found: error
 
+  android:
+    name: Android (APK)
+    needs: [gate, analyze]
+    if: needs.gate.outputs.full == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+
+      # AGP 9 / Gradle 9 要求 JDK 17+；这里用 21，runner 自带，装一次几秒钟
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: 环境自检
+        run: |
+          java -version
+          flutter doctor -v || true
+          echo "ANDROID_HOME=$ANDROID_HOME"
+
+      # Gradle 缓存能省掉一大半时间（AGP / Kotlin / 依赖都在 ~/.gradle 里）
+      - name: 缓存 Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('app/android/**/*.gradle*', 'app/android/gradle/wrapper/gradle-wrapper.properties', 'app/pubspec.lock') }}
+          restore-keys: gradle-${{ runner.os }}-
+
+      # 有 ANDROID_KEYSTORE_BASE64 这个 secret 才用正式签名；
+      # 没有就用 debug 签名（能装能跑，但每次 runner 的 debug key 不同，跨版本覆盖安装会报签名不一致）
+      - name: 准备签名
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            echo "⚠ 没有 ANDROID_KEYSTORE_BASE64，本次用 debug 签名" >> "$GITHUB_STEP_SUMMARY"
+            echo "没有 keystore secret，本次用 debug 签名"
+            exit 0
+          fi
+          printf '%s' "$KEYSTORE_BASE64" | base64 -d > app/android/tonicuisc.jks
+          cat > app/android/key.properties <<EOF
+          storeFile=../tonicuisc.jks
+          storePassword=$STORE_PASSWORD
+          keyAlias=$KEY_ALIAS
+          keyPassword=$KEY_PASSWORD
+          EOF
+          echo "已配置正式签名（alias=$KEY_ALIAS）"
+
+      - name: 写入版本号
+        env:
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+        run: python3 tool/apply_version.py "${{ github.ref_name }}" --build=${{ github.run_number }}
+
+      - name: 安装依赖
+        working-directory: app
+        run: flutter pub get
+
+      # 按 ABI 拆包：arm64 给真机、v7a 给老机器、x86_64 给模拟器。
+      # 不拆的话一个包 ~100MB，拆完每个只有三分之一。
+      - name: 构建 APK
+        working-directory: app
+        run: |
+          flutter build apk --release --split-per-abi \
+            --target-platform android-arm,android-arm64,android-x64
+
+      - name: 改名 + 校验
+        run: |
+          src=app/build/app/outputs/flutter-apk
+          mkdir -p dist
+          declare -A names=(
+            [app-arm64-v8a-release.apk]=tonicuisc-android-arm64-v8a.apk
+            [app-armeabi-v7a-release.apk]=tonicuisc-android-armeabi-v7a.apk
+            [app-x86_64-release.apk]=tonicuisc-android-x86_64.apk
+          )
+          for from in "${!names[@]}"; do
+            if [ ! -f "$src/$from" ]; then
+              echo "缺少产物 $src/$from"
+              ls -l "$src" || true
+              exit 1
+            fi
+            cp "$src/$from" "dist/${names[$from]}"
+          done
+
+          # 打印签名证书指纹：换 keystore 后能一眼看出来（同一份证书才能覆盖安装）
+          apksigner=$(ls "$ANDROID_HOME"/build-tools/*/apksigner 2>/dev/null | tail -1 || true)
+          for apk in dist/*.apk; do
+            echo "== $apk  $(du -h "$apk" | cut -f1)"
+            if [ -n "$apksigner" ]; then
+              "$apksigner" verify --print-certs "$apk" | grep -E "Signer #1 certificate (DN|SHA-256)" || true
+            fi
+          done
+
+      - name: 写使用说明
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+          ### 装到安卓手机上
+
+          1. 按手机 CPU 选包：绝大多数真机用 `arm64-v8a`，很老的机器用 `armeabi-v7a`，模拟器用 `x86_64`；
+          2. 手机上打开「允许安装未知来源应用」，点 APK 安装；
+          3. 首次启动在「我的」页长按版本号，填服务器地址（内网可以直接 `http://192.168.x.x:端口`）。
+
+          覆盖安装报「签名不一致」= 换了签名证书，先卸载旧版再装。
+          EOF
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: tonicuisc-android-apk
+          path: dist/*.apk
+          if-no-files-found: error
+
   release:
     name: 发布 Release
-    needs: [gate, analyze, desktop, ios, macos]
+    needs: [gate, analyze, desktop, ios, macos, android]
     # macOS 现在是 Build 里的一个 job，Release 会等它跑完，
     # 所以三个平台（Windows / Linux / macOS）的安装包会一次性上传。
     if: >-

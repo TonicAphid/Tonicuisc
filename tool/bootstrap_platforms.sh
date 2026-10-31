@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # 生成 app/ 下缺失的原生平台工程（windows / linux / macos / ios），然后打补丁并装依赖。
+# android 不在这个列表里：app/android/ 本身入库（清单、签名配置都手改过），重新生成会盖掉它们。
 set -euo pipefail
 
 platforms="${1:-windows,linux,macos,ios}"

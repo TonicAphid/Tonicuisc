@@ -1,6 +1,6 @@
 # Tonicuisc
 
-自用音乐软件：**Python 后端（FastAPI + musicdl，音源为酷我，网页也由它托管）** + **Flutter 客户端（Windows / Linux / macOS / iOS）**。
+自用音乐软件：**Python 后端（FastAPI + musicdl，音源为酷我，网页也由它托管）** + **Flutter 客户端（Windows / Linux / macOS / iOS / Android）**。
 
 > 仅用于个人学习与自建服务，请勿商业使用或大规模分发。所有音频由第三方音源提供，本项目只做代理与整理。
 >
@@ -184,6 +184,7 @@ python -m tonicuisc_server        # http://127.0.0.1:8000/ 和 /music 都能开
 ### 客户端
 
 原生工程目录（`app/windows`、`app/linux`、`app/macos`、`app/ios`）不入库，用脚本生成；`flutter create` 不会覆盖已有的 `lib/` 代码。
+**Android 是例外**：`app/android/` 在仓库里（清单要手改、签名要配），CI 不再生成它，直接构建。
 
 ```bash
 # Windows
@@ -194,6 +195,9 @@ bash tool/bootstrap_platforms.sh
 cd app
 flutter run -d windows     # 或 linux / macos
 flutter build windows --release
+
+# Android（不用 bootstrap：工程本来就在仓库里）
+flutter build apk --release --split-per-abi
 ```
 
 **默认服务器地址是 `https://uisc.tonicaphid.cn`（不带端口）**，定义在 `app/lib/core/server_config.dart` 的 `kDefaultServerUrl`——要换服务器改这一行即可。用户在本机改过之后会存在本地设置里，不会再回到默认值；改地址的入口是「我的」页**长按版本号**（平时隐藏，App 不再要求用户填 IP）。同一个弹窗里还有「**允许自签证书**」开关，内网自签 HTTPS 时才需要打开。
@@ -859,11 +863,11 @@ python -m tonicuisc_server                        # 现在直接是 https://192.
 - **`server-ci.yml`**：安装依赖 → `compileall` → 模块 import 检查 → `pytest`（264 个用例，不联网、不需要 musicdl）。
 - **`build.yml`**：
   1. 每个分支 push 都会进来，但先跑一个几秒钟的 `gate`：**手动触发 / tag / 提交标题最前面是 `vX.Y.Z(fix)`** 才构建；
-     普通 push 只跑 gate，**静态检查、Windows、Linux、macOS、iOS 全部跳过**；
+     普通 push 只跑 gate，**静态检查、Windows、Linux、macOS、iOS、Android 全部跳过**；
   2. `静态检查` job 跑 `flutter analyze` + `flutter test`（只在版本构建时跑）；
-  3. `Windows / Linux / iOS / macOS` 都需要 `gate.full == true`；
+  3. `Windows / Linux / iOS / macOS / Android` 都需要 `gate.full == true`；
   4. Flutter 版本固定在 `env.FLUTTER_VERSION`（固定版本缓存才会命中，否则每次都要重新保存 1GB+ 缓存）；
-  5. 全平台构建成功后由 `发布 Release` job 汇总产物上传到 GitHub Release；它会等 macOS 一起跑完。
+  5. 全平台构建成功后由 `发布 Release` job 汇总产物上传到 GitHub Release；它会等 macOS / Android 一起跑完。
 
 ### macOS 在 Build 里
 
@@ -875,6 +879,30 @@ macOS 不再单独开 workflow，直接是 `Build` 的一个 job：
 3. Intel 版默认不跑：手动触发 `Build` 时勾 `intel` 才加 `macos-13` 那条腿（容量紧张，排队很久）。
 4. 产物是 DMG：里面是 `tonicuisc.app` + 指向 `/Applications` 的快捷方式；打包前做 **ad-hoc 签名**
    （保留沙盒/网络 entitlements），再用 `lipo -archs` 校验架构。
+
+### Android（APK）
+
+`android` 是 `Build` 里独立的一条 job（`ubuntu-latest` + JDK 21），和别的平台一起跑、一起进 Release：
+
+1. **不用 `flutter create` 生成工程**：`app/android/` 在仓库里（清单、签名、图标都是版本控制的），
+   CI 直接 `flutter build apk`；Gradle wrapper 缺文件时 Flutter 会自己从 SDK 模板补上。
+2. **按 ABI 拆包**，产物三个：`tonicuisc-android-arm64-v8a.apk`（真机基本都是这个）、
+   `tonicuisc-android-armeabi-v7a.apk`（很老的机器）、`tonicuisc-android-x86_64.apk`（模拟器）。
+3. **签名**：有 `ANDROID_KEYSTORE_BASE64` 这个 secret 就用正式 keystore，没有就退回 debug 签名。
+   debug 签名**每次 runner 生成的 key 都不一样**，跨版本覆盖安装会报「签名不一致」——想连续升级就配 secrets：
+
+   | secret | 内容 |
+   | --- | --- |
+   | `ANDROID_KEYSTORE_BASE64` | `base64 -w0 tonicuisc.jks` 的结果 |
+   | `ANDROID_STORE_PASSWORD` | keystore 密码 |
+   | `ANDROID_KEY_ALIAS` | key 别名（如 `tonicuisc`） |
+   | `ANDROID_KEY_PASSWORD` | key 密码 |
+
+   本地构建同理：在 `app/android/` 放一个 `key.properties`（已 gitignore）就行，字段见 `app/android/app/build.gradle.kts` 顶部注释。
+4. **清单**（`app/android/app/src/main/AndroidManifest.xml`）里该有的都补齐了：release 包的 `INTERNET`、
+   `WAKE_LOCK` / `FOREGROUND_SERVICE(_MEDIA_PLAYBACK)`、`audio_service` 的前台服务与耳机线控 receiver、
+   以及 `usesCleartextTraffic`（内网直连 `http://192.168.x.x:端口` 用）。
+5. 移动端**不参与** `/api/update` 那条自更新链路（和 iOS 一样，直接去 Release 下新 APK 覆盖安装）。
 
 触发方式与产物：
 
