@@ -34,6 +34,17 @@ class PlayerController extends ChangeNotifier {
     // 流回调还可能在 ChangeNotifier 已经销毁之后调 notifyListeners()（debug 下直接断言崩溃）
     _subscriptions.addAll([
       _player.positionStream.listen((value) {
+        // 换歌装载期间（中间还夹着上一首 stop 出来的 0）不采信：
+        // 这些位置属于上一首，会让新歌词一上来就按旧进度定位。
+        if (_loading) return;
+        // seek 生效之前的几个残留位置：收下来会让进度条/歌词「先跳回去、再跳过来」，
+        // 看着就是「点了歌词之后对不上」。等真的落位（或超过 2 秒）再认。
+        final seekTarget = _seekTarget;
+        if (seekTarget != null) {
+          final fresh = DateTime.now().difference(_seekAt!) < const Duration(seconds: 2);
+          if (fresh && (value - seekTarget).abs() > const Duration(seconds: 2)) return;
+          _seekTarget = null;
+        }
         // 真的走起来了：把「起播看门狗」撤掉（0 是刚 setAudioSource 后的正常值）
         if (value > Duration.zero) _watchdog?.cancel();
         _position = value;
@@ -73,6 +84,14 @@ class PlayerController extends ChangeNotifier {
   /// 点歌代次：每点一次 +1。上一次点歌还没加载完就被下一次接管时，
   /// 旧的那次必须直接退出，否则它会把过期的音频塞进播放器（播出来的和列表高亮不是同一首）。
   int _generation = 0;
+
+  /// 上一次处理「播完」的时间：completed 会被重复上报，1 秒内只认第一次。
+  /// （用时间戳而不是「代次」：单曲循环同一首不换代次，按代次去重会把第二次播完挡住。）
+  DateTime? _lastCompletionAt;
+
+  /// 最近一次 seek 的目标与时间：用来丢掉 seek 生效前吐出来的旧位置。
+  Duration? _seekTarget;
+  DateTime? _seekAt;
 
   bool _disposed = false;
   Timer? _watchdog;
@@ -142,6 +161,18 @@ class PlayerController extends ChangeNotifier {
     _position = Duration.zero;
     _loading = true;
     _notify();
+    // 先把上一首停掉，三个理由：
+    // 1. 不 stop 的话，点「下一首」之后旧歌还会响一两秒（直链要现查、还要验一遍）；
+    // 2. 这一两秒里 positionStream 还在报旧位置 —— 新歌词一到就按旧进度定位，
+    //    看起来就是「下一首继承了上一首的进度」；
+    // 3. just_audio 的 `play()` 在 `playing == true` 时直接 return（见 just_audio.dart），
+    //    不把 playing 置回 false 的话，下面 `_resume()` 可能是空操作。
+    try {
+      await _player.stop();
+    } catch (_) {
+      // 停不下来也得继续换歌
+    }
+    if (gen != _generation) return; // stop 期间又被点了一首，交给新的那次
     try {
       await _start(song, api);
     } catch (err) {
@@ -359,13 +390,13 @@ class PlayerController extends ChangeNotifier {
     await _playCurrent();
   }
 
+  /// 上一首：**永远**切到上一首。
+  ///
+  /// 以前抄了「播够 3 秒就先回到开头」那套常见做法，结果播到一半点「上一首」，
+  /// 它把**当前这首**从头又放一遍，看着就像按钮坏了（网页版同一个毛病）。
+  /// 想重听当前这首，拖进度条或者点歌词。
   Future<void> previous() async {
     if (_queue.isEmpty) return;
-    // 播了 3 秒以上先回到开头，符合一般播放器习惯
-    if (_position.inSeconds > 3) {
-      await _player.seek(Duration.zero);
-      return;
-    }
     _index = _index <= 0 ? _queue.length - 1 : _index - 1;
     await _playCurrent();
   }
@@ -377,6 +408,24 @@ class PlayerController extends ChangeNotifier {
   }
 
   Future<void> _handleCompleted() async {
+    // 换歌装载期间收到的 completed 是上一首的余波，直接丢；
+    // 同一次播完会被上报好几遍（playing / processingState 各触发一次），1 秒内只认一次。
+    if (_loading) return;
+    final now = DateTime.now();
+    final last = _lastCompletionAt;
+    if (last != null && now.difference(last) < const Duration(seconds: 1)) return;
+    _lastCompletionAt = now;
+    // ⚠️ 必须先 pause。just_audio 的 `play()` 第一行是 `if (playing) return;`，
+    // 而一首歌播完之后 playing **仍然是 true**（官方文档：一直保持 true 直到
+    // pause / stop）。不 pause 的话，下面单曲循环的 `_resume()`、换歌之后
+    // `_playCurrent()` 里的 `_resume()` 全是空操作 —— 这就是「播完就停住，
+    // 只有手动点一下才动」的根因，播放模式自然等于没用。
+    try {
+      await _player.pause();
+    } catch (_) {
+      // 暂停失败也继续往下走
+    }
+    if (_disposed) return;
     if (_mode == PlayMode.loopOne) {
       await _player.seek(Duration.zero);
       _resume();
@@ -384,7 +433,7 @@ class PlayerController extends ChangeNotifier {
     }
     final target = _nextIndex(auto: true);
     if (target == null) {
-      await _player.pause();
+      // 顺序播放到底：停在开头，等用户自己点
       await _player.seek(Duration.zero);
       _notify();
       return;
@@ -431,12 +480,14 @@ class PlayerController extends ChangeNotifier {
     }
   }
 
-  Future<void> seek(Duration position) {
+  Future<void> seek(Duration position) async {
     // 乐观先把滑块挪过去：松手到 positionStream 真的跳过去之间有几帧，
     // 不然滑块会「先跳过去、又倒着退回来」才落位
     _position = position;
+    _seekTarget = position;
+    _seekAt = DateTime.now();
     _notify();
-    return _player.seek(position);
+    await _player.seek(position);
   }
 
   /// 换服务器 / 重新登录 / 退出登录之后调用：新的请求要用新的地址和 key。

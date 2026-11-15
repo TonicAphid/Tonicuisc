@@ -229,30 +229,32 @@ flutter build apk --release --split-per-abi
 
 另外一个**不用管**的噪音：控制台刷 `[ERROR:flutter/shell/platform/common/accessibility_bridge.cc(114)] Failed to update ui::AXTree, error: N will not be in the tree and is not the new root`。这是 Flutter 引擎在 Windows 上的已知 bug（[#98099](https://github.com/flutter/flutter/issues/98099)、[#182444](https://github.com/flutter/flutter/issues/182444)，后者给的复现条件是 **`ListView` + Material `Tooltip`**），**只是 debug 控制台的日志**，界面和功能都不受影响，release 版没有控制台。仓库里的 `Tooltip` 全部来自还没迁到 Cupertino 的 `IconButton(tooltip: ...)`，**逐页迁移做完它自然就没了**。
 
-**Windows 第三方输入法**：Flutter Windows 嵌入层的已知问题，**到 2026-10-31 还没修**。仓库里**不再有任何输入法相关代码**：runner 与 Flutter 模板逐字一致（包括 `WM_ACTIVATE` 里的无条件 `SetFocus`），Dart 侧不碰生命周期、不碰 `onViewFocusChange`、不记 IME 日志。系统自带输入法（微软拼音）优先，第三方输入法的断续问题等上游修复。
+**Windows 第三方输入法**：Flutter Windows 嵌入层的已知问题，**到 2026-11-15 还没修**。仓库里**不再有任何输入法相关代码**：runner 与 Flutter 模板逐字一致（包括 `WM_ACTIVATE` 里的无条件 `SetFocus`），Dart 侧不碰生命周期、不碰 `onViewFocusChange`、不记 IME 日志。系统自带输入法（微软拼音）优先，第三方输入法的断续问题等上游修复。
 
-上游现状（2026-10-31 查）：
+上游现状（2026-11-15 查）：
 
 | 项 | 状态 |
 | --- | --- |
-| [#190042](https://github.com/flutter/flutter/issues/190042) 失去焦点再回来输入法不工作 | **被机器人以「信息不足」关掉**（2026-08-18），没修 |
-| [#191196](https://github.com/flutter/flutter/issues/191196) 组字泄漏到下一个 TextField | 仍 open（`AbortComposing` 在 `ime_active_` 为 false 时被跳过） |
-| [#190043](https://github.com/flutter/flutter/pull/190043) 主修复 PR | 仍是 **draft**，2026-07-28 之后没动过 |
-| [#189968](https://github.com/flutter/flutter/pull/189968) `setEditingState` 读错字段 | **已合并**（2026-10-02），但只进了 beta |
+| [#190042](https://github.com/flutter/flutter/issues/190042) 失去焦点再回来输入法不工作 | **被机器人以「信息不足」关掉**（2026-08-18，`state_reason=completed` 且已锁），没修 |
+| [#191196](https://github.com/flutter/flutter/issues/191196) 组字泄漏到下一个 TextField | 仍 open（`AbortComposing` 在 `ime_active_` 为 false 时被跳过）；P3 / `triaged-windows`，最后动 2026-09-17 |
+| [#190043](https://github.com/flutter/flutter/pull/190043) 主修复 PR | 仍 **draft**（2026-11-02 有过一次更新，没合并） |
+| [#189968](https://github.com/flutter/flutter/pull/189968) `setEditingState` 读错字段 | **已合并**（2026-10-02），**已随 3.50.0 进稳定版**（3.50 分支 cutoff 是 10-06） |
+| [#192105](https://github.com/flutter/flutter/pull/192105) Alt+Space 后空格失效 | **已合并**（2026-11-12，比 3.50.0 晚一天，进下一个版本） |
+| [#194270](https://github.com/flutter/flutter/pull/194270) 韩文丢空格/数字 · [#192624](https://github.com/flutter/flutter/pull/192624) 重复上屏 | 仍 open |
 
 实测对比：`engine/.../windows/text_input_plugin.cc` 里
 
 ```cpp
-// 3.47.9（最新稳定版）—— 还是错的：extent 从 base 读
+// 3.47.x —— 还是错的：extent 从 base 读
 int composing_extent = base->value.GetInt();
-// 3.50.0-0.3.pre（beta）—— 已修
+// 3.50.0（2026-11-11 起是稳定版）—— 已修
 int composing_extent = extent->value.GetInt();
 active_model_->SetText(text, TextRange(...), TextRange(composing_base, composing_extent));
 ```
 
-`setEditingState` 正是「框架重新同步编辑状态」走的那条路（切焦点、重建输入连接都会走），所以这条修复**有可能**缓解「切回来就不能打字」，但上游没拿它去对 #190042，也没有人验证过。还有三个 Windows 输入法 PR 都还开着（[#194270](https://github.com/flutter/flutter/pull/194270) 韩文丢空格/数字、[#192624](https://github.com/flutter/flutter/pull/192624) 重复上屏、[#192105](https://github.com/flutter/flutter/pull/192105) Alt+Space 后空格失效）。
+`setEditingState` 正是「框架重新同步编辑状态」走的那条路（切焦点、重建输入连接都会走），所以这条修复**有可能**缓解「切回来就不能打字」，但上游没拿它去对 #190042，也没有人验证过。
 
-**结论**：想现在就试，只能切 beta（`flutter channel beta`，3.50.0-0.3.pre）；稳定版 3.47.9 里一行都没改。
+**结论**：稳定版已经是 3.50.0（2026-11-11，Dart 3.14），但**核心那条（IMM32/TSF 上下文不随输入连接生命周期重置）一行没修**——#190042 被关了、#190043 还是 draft。所以升到 3.50 不会让「第三方输入法断续」消失，只能顺带拿到 `setEditingState` 这条。CI 里仍钉着 `FLUTTER_VERSION: 3.47.5`。
 
 
 ### 第一次登录
@@ -876,9 +878,14 @@ python -m tonicuisc_server                        # 现在直接是 https://192.
 - **列表 tab**（`lib/features/library/library_page.dart`）：最上面是**播放列表**（显示正在播放的歌、队列长度、播放模式），下面是 **我喜欢 / 收藏 / 播放历史**，各自显示数量，点进去可播放、单条移除、清空。
 - **播放队列**（`lib/features/player/queue_page.dart`）：全屏播放页点列表按钮弹出，或在「列表」tab 里整页打开。
 - **播放模式**：顺序播放 / 列表循环 / 单曲循环 / 随机播放，在播放页和队列页都能切；播完自动按模式走下一首（队列只有一首时随机播放也重头再来，顺序播放才停下）。快速连点「下一首」只会让最后一次点歌生效，不会被上一次没加载完的覆盖。
+  - ⚠️ **播完切歌前必须先 `pause()`**：just_audio 的 `play()` 第一行是 `if (playing) return;`，而一首歌播完之后 `playing` **仍然是 true**（官方文档：一直保持到 `pause`/`stop`）。不 pause 的话，单曲循环的 `seek(0)+play` 和自动下一首的 `_resume()` 全是空操作 —— 表现就是「播完停住，只有手动点一下才动」，播放模式等于没用。
+  - **上一首永远切上一首**：不再走「播过 3 秒就先回到开头」那套（网页版 `previous()` 同一处，一起改了）。想重听当前这首请拖进度条 / 点歌词。
+  - 换歌先 `_player.stop()` 再装载：否则旧歌还会响一两秒，那段时间 `positionStream` 还在报旧位置，新歌词一到就按旧进度定位（「下一首继承了上一首的进度」）。
 - **我的 tab**（`lib/features/profile/profile_page.dart`）：账户名、本机设备名与设备 ID、重新登录、退出登录、版本号（**长按改服务器地址 + 允许自签证书**，入口平时隐藏）、**检查更新**（桌面端，走 `/api/update` + gh-proxy）、已登录设备列表（可逐台吊销，删完即从列表消失）。
 - **底部播放条**：封面缩略图、播放/暂停、进度拖动；点一下展开全屏播放页。
 - **全屏播放页**（`lib/features/player/now_playing_page.dart`）：大封面 + 喜欢/收藏 + **进度条式卡拉OK歌词**（逐字时间轴 + 翻译 + 拼音/罗马音，点歌词跳转）+ 进度条 + 上一首 / 播放暂停 / 下一首。**拖进度条时音频继续播，滑块跟手指走，松手才跳到那个位置**。打开页面时会直接 `jumpTo` 到当前行，不会从第一行慢慢滚。
+  - 逐字进度的插值**封顶 350ms**（`_maxExtrapolate`）：`position` 流一停更（缓冲、卡顿），无上限补时间会让歌词跑到人声前面。网页版 `playbackClock()` 早就是 0.3s 封顶，App 这边原先漏了。
+  - 行高逐行量（`_extentAt` + `ListView.itemExtentBuilder`），不再全页一刀切 40/46/72。
 - **键盘收起**：iOS 上点输入框以外的空白处会主动 `unfocus`（`app.dart` 根部一层透明 `GestureDetector`），不用先点「完成」再点别处。
 - **封面**：所有列表都用搜到的 `cover_url`（`lib/shared/song_avatar.dart`），QQ 补的封面到了会自动换上去；加载失败或没有封面才退回音源首字。
 - **屏幕常亮**：App 在前台时不让系统自动息屏（`wakelock_plus`），切到后台自动放开，不会后台耗电。

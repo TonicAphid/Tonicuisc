@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/gestures.dart' show PointerDeviceKind;
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 
@@ -76,11 +77,35 @@ class _NowPlayingPageState extends State<NowPlayingPage> with SingleTickerProvid
   DateTime _lastRawAt = DateTime.now();
   bool _lastPlaying = false;
 
-  /// 有逐字歌词时每行要显示原文 + 翻译 + 拼音，但别留太多空。
-  double get _lineExtent {
-    if (!_sheet.hasWords) return 40;
-    return _sheet.lines.any((line) => line.hasExtra) ? 72 : 46;
-  }
+  /// 插值最多补这么多：再长就当位置流卡住了，宁可不补也不让歌词跑前面。
+  static const Duration _maxExtrapolate = Duration(milliseconds: 350);
+
+  /// 歌词排版参数。**测量（[_extentAt]）和渲染必须用同一套尺寸**，否则算出来的
+  /// 行高和真实高度差一截，滚动位置会一点点跑偏。
+  static const double _mainSize = 17; // 统一按「当前行」的字号算高，切行时不会跳
+  static const double _mainHeight = 1.2;
+  static const double _subSize = 12;
+  static const double _subHeight = _subSize * _mainHeight;
+  static const double _subGap = 2;
+  static const double _lineGap = 10; // 行与行之间的留白
+  static const double _itemVPad = 1;
+  static const double _listPad = 4; // 列表上下留白（定位时要算进去）
+
+  /// 用户自己滚过歌词后，这段时间内先别自动抢滚动。
+  static const Duration _resumeDelay = Duration(seconds: 4);
+
+  /// 行高缓存（index → 外层高度）；宽度一变整张作废。
+  final Map<int, double> _extents = {};
+  double _extentWidth = 0;
+
+  /// 用户正按着歌词拖动；松手后靠 [_userTouchedAt] 再压 [_resumeDelay]。
+  bool _userDragging = false;
+  DateTime? _userTouchedAt;
+  double? _touchStartOffset;
+
+  /// 卡拉OK 逐字上色只让「当前行」自己重绘（以前是整页 30fps setState，
+  /// 拖动歌词时整棵树跟着重建，手感又卡又硬）。
+  final ValueNotifier<int> _karaoke = ValueNotifier<int>(0);
 
   /// 手指拖进度条时的位置（毫秒）；不为 null 时进度条不跟播放进度。
   double? _dragMilliseconds;
@@ -97,26 +122,71 @@ class _NowPlayingPageState extends State<NowPlayingPage> with SingleTickerProvid
   void dispose() {
     _ticker.dispose();
     widget.controller.removeListener(_handlePlayer);
+    _karaoke.dispose();
     _scroll.dispose();
     super.dispose();
   }
 
   /// 两次 position 上报之间按真实时间插值，让进度条 30fps 连续走。
+  ///
+  /// **插值有上限**（[_maxExtrapolate]）：position 流一旦停更（缓冲、卡顿、
+  /// 后端不再报位置），无上限地加时间会让逐字歌词一路跑到人声前面去——
+  /// 这就是「歌词比歌快」的来源。网页版那边早就按 0.3s 封顶了，这里是漏的。
   Duration get _displayPosition {
     final raw = widget.controller.position;
     if (!widget.controller.playing || raw == Duration.zero) return raw;
-    final value = raw + DateTime.now().difference(_lastRawAt);
+    final elapsed = DateTime.now().difference(_lastRawAt);
+    final value = raw + (elapsed > _maxExtrapolate ? _maxExtrapolate : elapsed);
     final total = widget.controller.duration;
     if (total != null && value > total) return total;
     return value;
   }
 
+  /// 30fps 只让当前行重绘逐字进度，**不再整页 setState**。
   void _onTick(Duration _) {
     if (!mounted || !widget.controller.playing || !_sheet.hasWords) return;
     final now = DateTime.now().millisecondsSinceEpoch;
     if (now - _lastPaintMs < 33) return;
     _lastPaintMs = now;
-    setState(() {});
+    _karaoke.value++;
+  }
+
+  /// 第 [index] 行实际要占多高：按内容量出来，而不是全页一刀切。
+  ///
+  /// 以前只有 40 / 46 / 72 三档，只要整首歌里有一行带拼音，**所有**行都按 72 排，
+  /// 于是「一行原文 + 一行拼音」中间能空出 30 多像素。现在逐行量：
+  /// 没译文没拼音的行就一个行高，有的才往上加。
+  double _extentAt(int index, double textWidth) {
+    if (textWidth != _extentWidth) {
+      // 窗口宽度变了（或第一次进来）：缓存整张作废，否则行高是按旧宽度折行的
+      _extents.clear();
+      _extentWidth = textWidth;
+    }
+    final cached = _extents[index];
+    if (cached != null) return cached;
+    final line = _sheet.lines[index];
+    // 宽度可能是 0（还没布局 / 窗口被压扁）：给个下限，免得 TextPainter 算出怪值
+    final width = textWidth < 40 ? 40.0 : textWidth;
+    final painter = TextPainter(
+      text: TextSpan(
+        text: line.text.isEmpty ? '♪' : line.text,
+        // 用当前行的字号/字重量：只会算得比非当前行**更大**，不会算小导致裁字
+        style: const TextStyle(
+          fontSize: _mainSize,
+          fontWeight: FontWeight.w600,
+          height: _mainHeight,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+      textAlign: TextAlign.center,
+      maxLines: 2,
+      ellipsis: '…',
+    )..layout(maxWidth: width);
+    var height = painter.height + _itemVPad * 2 + _lineGap;
+    painter.dispose();
+    if (line.translation.isNotEmpty) height += _subGap + _subHeight;
+    if (line.roman.isNotEmpty) height += _subGap + _subHeight;
+    return _extents[index] = height;
   }
 
   void _handlePlayer() {
@@ -154,6 +224,8 @@ class _NowPlayingPageState extends State<NowPlayingPage> with SingleTickerProvid
       _sheet = LyricSheet.empty;
       _active = -1;
       _enhancedReady = false;
+      _extents.clear();
+      _extentWidth = 0;
     });
     // 逐行 LRC 先出（音源自带、一般很快），逐字歌词在后台轮询，不挡页面。
     unawaited(_loadEnhanced(song.id));
@@ -182,9 +254,14 @@ class _NowPlayingPageState extends State<NowPlayingPage> with SingleTickerProvid
   void _applySheet(LyricSheet sheet) {
     setState(() {
       _sheet = sheet;
-      _active = sheet.indexOf(widget.controller.position);
+      // 还在装载这一首（音频没起来）时不要拿 position 定位：那会儿它可能是
+      // 上一首的残值，歌曲一换、歌词先到，就会出现「继承了上一首的进度」。
+      _active = widget.controller.loading ? -1 : sheet.indexOf(widget.controller.position);
       _loading = false;
       _error = null;
+      // 换了一份歌词：行高缓存作废（行数、内容都变了）
+      _extents.clear();
+      _extentWidth = 0;
     });
     _autoScroll(_active, jump: true);
   }
@@ -214,8 +291,18 @@ class _NowPlayingPageState extends State<NowPlayingPage> with SingleTickerProvid
     }
   }
 
+  /// 用户刚摸过歌词（正在拖 / 松手不满 [_resumeDelay]）：这段时间别抢滚动。
+  bool get _userInterfering {
+    if (_userDragging) return true;
+    final at = _userTouchedAt;
+    return at != null && DateTime.now().difference(at) < _resumeDelay;
+  }
+
   void _autoScroll(int index, {bool jump = false, int attempt = 0}) {
     if (!_sheet.synced || index < 0 || index >= _sheet.lines.length) return;
+    // 用户自己在看某一段：不许把画面拽回去。等他自己停手 [_resumeDelay] 之后，
+    // 下一句切行时才悄悄跟上（以前是无条件 animateTo，一拖就被抢，很硬）。
+    if (!jump && _userInterfering) return;
     // 列表可能在歌词刚 setState 的这一帧还没挂上 ScrollController；
     // 等这一帧画完再滚，必要时再补几帧。
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -229,14 +316,25 @@ class _NowPlayingPageState extends State<NowPlayingPage> with SingleTickerProvid
         return;
       }
       final viewport = _scroll.position.viewportDimension;
-      final target = (index * _lineExtent + _lineExtent / 2 - viewport / 2)
+      final width = _extentWidth > 0 ? _extentWidth : MediaQuery.sizeOf(context).width - 48;
+      // 行高是逐行量的，目标位置就得把前面每一行加起来（不能 index * 定值）
+      var above = 0.0;
+      for (var i = 0; i < index; i++) {
+        above += _extentAt(i, width);
+      }
+      final target = (_listPad + above + _extentAt(index, width) / 2 - viewport / 2)
           .clamp(0.0, _scroll.position.maxScrollExtent)
           .toDouble();
       if (jump) {
         // 刚打开播放页：直接落到当前行，不要从第一行一路滚下来
         _scroll.jumpTo(target);
       } else {
-        _scroll.animateTo(target, duration: const Duration(milliseconds: 300), curve: Curves.easeOut);
+        // 曲线比默认的 easeOut 收得更慢，落位时不至于「一顿就停」
+        _scroll.animateTo(
+          target,
+          duration: const Duration(milliseconds: 380),
+          curve: Curves.easeOutCubic,
+        );
       }
     });
   }
@@ -418,34 +516,91 @@ class _NowPlayingPageState extends State<NowPlayingPage> with SingleTickerProvid
     if (_error != null) return Center(child: Text(_error!));
     if (_sheet.lines.isEmpty) return const Center(child: Text('暂无歌词'));
 
-    return ListView.builder(
-      controller: _scroll,
-      itemExtent: _lineExtent,
-      padding: const EdgeInsets.symmetric(vertical: 4),
-      itemCount: _sheet.lines.length,
-      itemBuilder: (context, index) {
-        final line = _sheet.lines[index];
-        final active = index == _active;
-        return GestureDetector(
-          onTap: _sheet.synced ? () => widget.controller.seek(line.time) : null,
-          child: Center(
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 1),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  _lyricMain(context, line, active),
-                  if (line.translation.isNotEmpty)
-                    _lyricSub(context, line.translation, scheme.onSurfaceVariant.withValues(alpha: 0.85)),
-                  if (line.roman.isNotEmpty)
-                    _lyricSub(context, line.roman, scheme.primary.withValues(alpha: 0.8)),
-                ],
-              ),
-            ),
-          ),
-        );
+    // 桌面端的 ScrollBehavior 会自动在最右边挂一条滚动条——这里关掉，但**不影响**
+    // 滚轮和拖动。顺手把鼠标也加进 dragDevices：Windows 上默认鼠标是拖不动列表的，
+    // 只能滚轮，想按住往回翻做不到，手感就很「死」。
+    final behavior = ScrollConfiguration.of(context).copyWith(
+      scrollbars: false,
+      dragDevices: {
+        PointerDeviceKind.touch,
+        PointerDeviceKind.mouse,
+        PointerDeviceKind.trackpad,
+        PointerDeviceKind.stylus,
+        PointerDeviceKind.invertedStylus,
       },
     );
+
+    return ScrollConfiguration(
+      behavior: behavior,
+      child: Listener(
+        // 用户一动手就记下来：拖动期间不自动滚，松手后再压 [_resumeDelay]。
+        // 用指针事件而不是 ScrollNotification：后者分不清「用户滚」和「我们自己
+        // animateTo」，会被自己的动画触发自我封锁。
+        onPointerDown: (_) {
+          _touchStartOffset = _scroll.hasClients ? _scroll.offset : null;
+          _userDragging = true;
+          _userTouchedAt = DateTime.now();
+        },
+        onPointerUp: (_) => _releaseDrag(),
+        onPointerCancel: (_) => _releaseDrag(),
+        onPointerSignal: (_) {
+          // 滚轮 / 触控板滚动：没有按下-抬起，只更新时间戳
+          _userTouchedAt = DateTime.now();
+        },
+        child: ListView.builder(
+          controller: _scroll,
+          // 逐行量高度（见 `_extentAt`）：带译文/拼音的行才高一点，光一行原文就矮一点。
+          // 以前是一刀切 40/46/72，只要歌里有一行带拼音，整页都按 72 排，行距大得离谱。
+          itemExtentBuilder: (index, dims) => _extentAt(index, dims.crossAxisExtent - 48),
+          // 桌面默认 ClampingScrollPhysics：到边硬停、没惯性，拖起来很「脆」。
+          // 换成带阻尼的回弹，跟 iOS 手感一致。
+          physics: const BouncingScrollPhysics(parent: AlwaysScrollableScrollPhysics()),
+          padding: const EdgeInsets.symmetric(vertical: _listPad),
+          itemCount: _sheet.lines.length,
+          itemBuilder: (context, index) {
+            final line = _sheet.lines[index];
+            final active = index == _active;
+            return GestureDetector(
+              // 整行（含上下留白）都能点，不然只有字上点得到，跳转很难点
+              behavior: HitTestBehavior.opaque,
+              onTap: !_sheet.synced
+                  ? null
+                  : () {
+                      // 点行 = 「我要跳到这一句」：先解除压制，让画面立刻对齐过去
+                      _userDragging = false;
+                      _userTouchedAt = null;
+                      widget.controller.seek(line.time);
+                    },
+              child: Center(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 24, vertical: _itemVPad),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      _lyricMain(context, line, active),
+                      if (line.translation.isNotEmpty)
+                        _lyricSub(context, line.translation, scheme.onSurfaceVariant.withValues(alpha: 0.85)),
+                      if (line.roman.isNotEmpty)
+                        _lyricSub(context, line.roman, scheme.primary.withValues(alpha: 0.8)),
+                    ],
+                  ),
+                ),
+              ),
+            );
+          },
+        ),
+      ),
+    );
+  }
+
+  /// 松手 / 取消：结束拖动。**只有真的滚过才压 [_resumeDelay]**——
+  /// 单纯点一下某一行（跳转）不该让自动跟随停 4 秒。
+  void _releaseDrag() {
+    _userDragging = false;
+    final start = _touchStartOffset;
+    final moved = start != null && _scroll.hasClients && (_scroll.offset - start).abs() > 0.5;
+    _userTouchedAt = moved ? DateTime.now() : null;
+    _touchStartOffset = null;
   }
 
   /// 原文：有逐字时间轴时，按**每个字/词**自己的时间上色。
@@ -457,7 +612,9 @@ class _NowPlayingPageState extends State<NowPlayingPage> with SingleTickerProvid
     final scheme = Theme.of(context).colorScheme;
     final text = line.text.isEmpty ? '♪' : line.text;
     final style = TextStyle(
-      fontSize: active ? 17 : 15,
+      fontSize: active ? _mainSize : _mainSize - 2,
+      // 行高写死成和 [_extentAt] 里测量时一致，否则量出来的高度和实际排版对不上
+      height: _mainHeight,
       fontWeight: active ? FontWeight.w600 : FontWeight.normal,
       color: active ? scheme.primary : scheme.onSurfaceVariant,
     );
@@ -471,11 +628,16 @@ class _NowPlayingPageState extends State<NowPlayingPage> with SingleTickerProvid
       );
     }
 
-    return Text.rich(
-      TextSpan(children: _karaokeSpans(line, scheme, style)),
-      textAlign: TextAlign.center,
-      maxLines: 2,
-      overflow: TextOverflow.ellipsis,
+    // 只有「当前行」需要跟着 30fps 重绘逐字进度：用 ValueListenable 把这层
+    // 单独拎出来，父级 ListView 和别的行都不重建。
+    return ValueListenableBuilder<int>(
+      valueListenable: _karaoke,
+      builder: (context, _, __) => Text.rich(
+        TextSpan(children: _karaokeSpans(line, scheme, style)),
+        textAlign: TextAlign.center,
+        maxLines: 2,
+        overflow: TextOverflow.ellipsis,
+      ),
     );
   }
 
@@ -522,13 +684,14 @@ class _NowPlayingPageState extends State<NowPlayingPage> with SingleTickerProvid
   }
 
   Widget _lyricSub(BuildContext context, String text, Color color) => Padding(
-        padding: const EdgeInsets.only(top: 1),
+        padding: const EdgeInsets.only(top: _subGap),
         child: Text(
           text,
           textAlign: TextAlign.center,
           maxLines: 1,
           overflow: TextOverflow.ellipsis,
-          style: TextStyle(fontSize: 12, color: color),
+          // 同样写死行高：`_extentAt` 按 `_subSize * _mainHeight` 加高
+          style: TextStyle(fontSize: _subSize, height: _mainHeight, color: color),
         ),
       );
 

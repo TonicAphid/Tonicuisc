@@ -2,10 +2,12 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/services.dart' show LogicalKeyboardKey, TextEditingValue;
 // 搜索框用 Material 的 `TextField`（见 `_searchRow` 的注释）：只引这几个符号，
 // 避免和 Cupertino 里同名的 `showDialog` / `TextTheme` 之类撞车。
+// 图标改用 `CupertinoIcons`，所以不再需要 Material 的 `Icons` / `Icon` 字体。
 import 'package:flutter/material.dart'
-    show Icon, Icons, InputDecoration, OutlineInputBorder, TextField, TextInputAction;
+    show BorderSide, InputDecoration, OutlineInputBorder, TextField, TextInputAction;
 
 import '../../core/api_client.dart';
 import '../../core/download_target.dart';
@@ -44,8 +46,19 @@ class _SearchPageState extends State<SearchPage> {
   /// 一次要多少条；滑到底再要同样多（服务端会去重，不会给重复的）。
   static const int _pageSize = 15;
 
+  /// 打字停手多久才自动搜。太短会把每个字都发出去，太长像没反应。
+  static const Duration _typingPause = Duration(milliseconds: 500);
+
+  /// 自动搜至少几个字：单字命中太多，而且拼音组字中途容易误触发。
+  /// 单个字照样能搜——按回车就行。
+  static const int _minAutoLength = 2;
+
   final TextEditingController _keyword = TextEditingController();
+  final FocusNode _focus = FocusNode();
   final ScrollController _scroll = ScrollController();
+
+  /// 打字防抖计时器；`null` = 当前没有待发的搜索。
+  Timer? _typing;
 
   List<Song> _results = const [];
 
@@ -72,7 +85,9 @@ class _SearchPageState extends State<SearchPage> {
 
   @override
   void dispose() {
+    _typing?.cancel();
     _scroll.dispose();
+    _focus.dispose();
     _keyword.dispose();
     super.dispose();
   }
@@ -83,12 +98,69 @@ class _SearchPageState extends State<SearchPage> {
     if (remaining < 400) _loadMore();
   }
 
+  /// 输入变化：组字中不搜（否则拼音还没上屏就拿半截字母去查），停手再搜。
+  ///
+  /// 注意先 `cancel` 再判断组字：已经排好的那个计时器不会自己看输入法状态，
+  /// 不取消的话「打完两个字、接着打第三个字的拼音」会被上一次的计时器
+  /// 拿「周杰lun」这种半截内容去查。
+  void _onChanged(String _) {
+    _typing?.cancel();
+    if (!_keyword.value.composing.isCollapsed) return;
+    final keyword = _keyword.text.trim();
+    if (keyword.isEmpty) {
+      // 清空输入框 = 回到初始态，不该再发一个空关键词的请求
+      _reset();
+      return;
+    }
+    if (keyword == _lastKeyword) return; // 改了又改回来，没必要再搜一遍
+    if (keyword.length < _minAutoLength) return;
+    _typing = Timer(_typingPause, _search);
+  }
+
+  /// 回车 / 键盘上的「搜索」：立刻搜，不等防抖。
+  void _submit() {
+    _typing?.cancel();
+    if (_keyword.text.trim().isEmpty) {
+      _reset();
+      return;
+    }
+    _search();
+  }
+
+  /// 点 × 或按 Esc：清输入、清结果，焦点留在框里（方便接着打下一首）。
+  void _clear() {
+    _typing?.cancel();
+    _keyword.clear();
+    _reset();
+    _focus.requestFocus();
+  }
+
+  /// 回到「还没搜过」的状态，同时让还在飞的请求作废。
+  void _reset() {
+    _epoch++;
+    setState(() {
+      _results = const [];
+      _offset = 0;
+      _hasMore = false;
+      _loadingMore = false;
+      _searching = false;
+      _lastKeyword = '';
+      _error = null;
+      _elapsed = null;
+      _serverElapsed = null;
+    });
+  }
+
   Future<void> _search() async {
     final keyword = _keyword.text.trim();
-    if (keyword.isEmpty || _searching) return;
-    final epoch = ++_epoch; // 让上一轮还没回来的翻页请求作废
+    if (keyword.isEmpty) return;
+    // 每次搜索换一代：旧请求回来时 epoch 对不上就丢掉。
+    // 以前这里是 `if (_searching) return;`——搜着的时候改词再回车**毫无反应**，
+    // 看着像卡死；现在改成「新的永远顶掉旧的」。
+    final epoch = ++_epoch;
     setState(() {
       _searching = true;
+      _loadingMore = false;
       _error = null;
       _elapsed = null;
       _serverElapsed = null;
@@ -104,8 +176,7 @@ class _SearchPageState extends State<SearchPage> {
         refresh: true,
       );
       stopwatch.stop();
-      if (!mounted) return;
-      if (epoch != _epoch) return; // 不该走到这（_searching 挡着）；真发生了也别拿旧结果覆盖新一轮
+      if (!mounted || epoch != _epoch) return; // 已经被更新的搜索顶掉了
       setState(() {
         _results = result.items;
         _offset = result.items.length;
@@ -116,7 +187,7 @@ class _SearchPageState extends State<SearchPage> {
       unawaited(CoverCache.resolve(widget.api, result.items));
     } catch (err) {
       stopwatch.stop();
-      if (!mounted) return;
+      if (!mounted || epoch != _epoch) return; // 旧请求的失败不该盖掉新结果
       if (err is UnauthorizedException) {
         await widget.onUnauthorized('$err');
         return;
@@ -127,7 +198,7 @@ class _SearchPageState extends State<SearchPage> {
         _error = friendlyError(err, widget.api.baseUrl);
       });
     } finally {
-      if (mounted) setState(() => _searching = false);
+      if (mounted && epoch == _epoch) setState(() => _searching = false);
     }
   }
 
@@ -215,111 +286,190 @@ class _SearchPageState extends State<SearchPage> {
         children: [
           _searchRow(context),
           _statusRow(context),
-          if (_error != null)
-            Padding(
-              padding: const EdgeInsets.all(16),
-              child: Text(
-                _error!,
-                style: TextStyle(
-                  fontSize: 13,
-                  color: CupertinoColors.systemRed.resolveFrom(context),
-                ),
-              ),
-            ),
           Expanded(child: _body(context)),
         ],
       ),
     );
   }
 
-  /// 搜索框 + 搜索按钮。
+  /// 搜索框。
   ///
   /// 输入框用 **Material 的 `TextField`**，不是 `CupertinoSearchTextField`：
   /// 0.2.x 把搜索框换成 Cupertino 版本之后，Windows 上焦点 / 键盘输入就不正常
   /// （点进输入框打不出字、输入法组字不生效），换回 Material 输入框才恢复。
-  /// 外观上仍按苹果风画（圆角、填充底色、无边框），观感不变。
+  /// 外观仍按苹果风画（圆角、填充底色、无边框），只借它的文本编辑能力。
+  ///
+  /// 交互（这轮重写的重点）：
+  /// - 打字停手 [_typingPause] 自动搜（≥ [_minAutoLength] 字），组字中不搜；
+  /// - 回车 / 键盘上的「搜索」立刻搜，不等防抖；
+  /// - 有内容时右侧出现 ×，点一下清空回到初始态；Esc 同效；
+  /// - 搜索中左侧放大镜换成小转圈，右侧 × 仍在（点它 = 清空并作废这轮请求）；
+  /// - 聚焦时描一圈主色细边——以前四条边都是 `none`，压根看不出焦点在哪。
   Widget _searchRow(BuildContext context) {
-    final fill = CupertinoColors.tertiarySystemFill.resolveFrom(context);
-    final border = OutlineInputBorder(
-      borderRadius: BorderRadius.circular(12),
-      borderSide: BorderSide.none,
-    );
+    final accent = CupertinoTheme.of(context).primaryColor;
+    final secondary = CupertinoColors.secondaryLabel.resolveFrom(context);
+    final label = CupertinoColors.label.resolveFrom(context);
+    final radius = BorderRadius.circular(12);
+    final idle = OutlineInputBorder(borderRadius: radius, borderSide: BorderSide.none);
     return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 12, 12, 4),
-      child: Row(
-        children: [
-          Expanded(
-            child: TextField(
-              controller: _keyword,
-              textInputAction: TextInputAction.search,
-              onSubmitted: (_) => _search(),
-              style: const TextStyle(fontSize: 15),
-              decoration: InputDecoration(
-                hintText: '搜索歌曲 / 歌手',
-                prefixIcon: const Icon(Icons.search, size: 20),
-                isDense: true,
-                filled: true,
-                fillColor: fill,
-                contentPadding: const EdgeInsets.symmetric(vertical: 12),
-                border: border,
-                enabledBorder: border,
-                focusedBorder: border,
-                disabledBorder: border,
+      padding: const EdgeInsets.fromLTRB(12, 12, 12, 6),
+      child: CallbackShortcuts(
+        bindings: {
+          // Esc：框里有字就清空，已经空了就退出输入（桌面端习惯）
+          const SingleActivator(LogicalKeyboardKey.escape): () {
+            if (_keyword.text.isEmpty) {
+              _focus.unfocus();
+            } else {
+              _clear();
+            }
+          },
+        },
+        // 输入框要在「有字 / 没字」「搜索中 / 空闲」之间换右侧图标，
+        // 所以跟着 controller 重建这一层（只重建输入框，不碰下面的列表）。
+        child: ValueListenableBuilder<TextEditingValue>(
+          valueListenable: _keyword,
+          builder: (context, value, _) => TextField(
+            controller: _keyword,
+            focusNode: _focus,
+            textInputAction: TextInputAction.search,
+            onSubmitted: (_) => _submit(),
+            onChanged: _onChanged,
+            cursorColor: accent,
+            style: TextStyle(fontSize: 15, color: label),
+            decoration: InputDecoration(
+              hintText: '搜索歌曲 / 歌手',
+              hintStyle: TextStyle(fontSize: 15, color: secondary),
+              // 搜索中把放大镜换成小转圈，右侧的 × 始终留着——
+              // 一边搜一边想清空时，不至于「点了没反应」（× 会顺手作废这轮请求）
+              prefixIcon: _searching
+                  ? const CupertinoActivityIndicator(radius: 7)
+                  : Icon(CupertinoIcons.search, size: 18, color: secondary),
+              prefixIconConstraints: const BoxConstraints(minWidth: 38, minHeight: 38),
+              suffixIcon: _trailing(context, value.text),
+              suffixIconConstraints: const BoxConstraints(minWidth: 38, minHeight: 38),
+              isDense: true,
+              filled: true,
+              fillColor: CupertinoColors.tertiarySystemFill.resolveFrom(context),
+              contentPadding: const EdgeInsets.symmetric(vertical: 12),
+              border: idle,
+              enabledBorder: idle,
+              disabledBorder: idle,
+              focusedBorder: OutlineInputBorder(
+                borderRadius: radius,
+                borderSide: BorderSide(color: accent.withValues(alpha: 0.55), width: 1.5),
               ),
             ),
           ),
-          const SizedBox(width: 8),
-          CupertinoButton.filled(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-            borderRadius: BorderRadius.circular(20),
-            onPressed: _searching ? null : _search,
-            child: const Text('搜索'),
-          ),
-        ],
+        ),
       ),
     );
   }
 
-  /// 「正在进行…」/「搜索完成 · 用时 …」。
+  /// 搜索框右侧：有内容就显示 ×（搜索中也留着，点了等于取消这轮）。
+  Widget? _trailing(BuildContext context, String text) {
+    if (text.isEmpty) return null;
+    return CupertinoButton(
+      padding: const EdgeInsets.all(6),
+      minimumSize: Size.zero,
+      pressedOpacity: 0.4,
+      borderRadius: BorderRadius.circular(12),
+      onPressed: _clear,
+      child: Icon(
+        CupertinoIcons.xmark_circle_fill,
+        size: 16,
+        color: CupertinoColors.secondaryLabel.resolveFrom(context),
+      ),
+    );
+  }
+
+  /// 状态行：搜索中 / 搜索完成 / 出错（带「重试」）。
+  ///
+  /// 以前错误是状态行下面另起一块红字，出错时既挤又没法一键重来；
+  /// 现在合成一行，错误直接跟一个「重试」。
   Widget _statusRow(BuildContext context) {
     final secondary = CupertinoColors.secondaryLabel.resolveFrom(context);
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 2, 16, 6),
-      child: Row(
+    final red = CupertinoColors.systemRed.resolveFrom(context);
+    final Widget child;
+    if (_error != null) {
+      child = Row(
         children: [
-          if (_searching) ...[
-            const CupertinoActivityIndicator(radius: 7),
-            const SizedBox(width: 10),
-            Text('正在进行…', style: TextStyle(fontSize: 13, color: secondary)),
-          ] else if (_elapsed != null)
-            Expanded(
-              child: Text(
-                '搜索完成 · 用时 ${_elapsed!.toStringAsFixed(1)} 秒'
-                '${_serverElapsed == null ? '' : '（服务端 ${_serverElapsed!.toStringAsFixed(1)} 秒）'}'
-                ' · 共 ${_results.length} 首',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(fontSize: 12, color: secondary),
-              ),
+          Icon(CupertinoIcons.exclamationmark_circle, size: 13, color: red),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text(
+              _error!,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(fontSize: 12, color: red),
             ),
+          ),
+          CupertinoButton(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+            minimumSize: Size.zero,
+            onPressed: _search,
+            child: const Text('重试', style: TextStyle(fontSize: 12)),
+          ),
         ],
-      ),
+      );
+    } else if (_searching) {
+      child = Row(
+        children: [
+          const CupertinoActivityIndicator(radius: 7),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              _lastKeyword.isEmpty ? '正在搜索…' : '正在搜索「$_lastKeyword」…',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(fontSize: 13, color: secondary),
+            ),
+          ),
+        ],
+      );
+    } else if (_elapsed != null) {
+      child = Text(
+        '${_results.length} 首 · 用时 ${_elapsed!.toStringAsFixed(1)} 秒'
+        '${_serverElapsed == null ? '' : '（服务端 ${_serverElapsed!.toStringAsFixed(1)} 秒）'}',
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(fontSize: 12, color: secondary),
+      );
+    } else {
+      // 空闲时不留字（提示语在列表区的空状态里），但高度留着，免得一搜就跳
+      child = const SizedBox(height: 14);
+    }
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 6),
+      child: child,
     );
   }
 
   Widget _body(BuildContext context) {
     if (_results.isEmpty) {
+      final secondary = CupertinoColors.secondaryLabel.resolveFrom(context);
+      final String hint;
+      if (_error != null) {
+        // 技术性错误在状态行里，这里只说该干什么
+        hint = '检查一下网络或服务器地址，然后点上面的「重试」';
+      } else if (_searching) {
+        hint = '正在搜索…';
+      } else if (_lastKeyword.isNotEmpty) {
+        // 以前搜完没结果还显示「输入关键词开始搜索」，看着像没搜
+        hint = '没找到「$_lastKeyword」相关的歌\n换个说法，或者少打几个字试试';
+      } else {
+        hint = '输入关键词开始搜索\n停手 0.5 秒自动搜，回车也可以';
+      }
       return Center(
         child: Text(
-          _searching ? '正在进行…' : '输入关键词开始搜索',
-          style: TextStyle(
-            fontSize: 14,
-            color: CupertinoColors.secondaryLabel.resolveFrom(context),
-          ),
+          hint,
+          textAlign: TextAlign.center,
+          style: TextStyle(fontSize: 14, height: 1.6, color: secondary),
         ),
       );
     }
     return ListView.separated(
+      // 换 epoch 就换 key：新一轮搜索从列表顶部开始，不会停在上一轮的滚动位置
+      key: ValueKey<int>(_epoch),
       controller: _scroll,
       // 最后多一格：加载中 / 没有更多了
       itemCount: _results.length + 1,

@@ -1568,12 +1568,12 @@
     playAt(target);
   }
 
+  //: 上一首：**永远**切到上一首。
+  //:
+  //: 以前抄了「播够 3 秒就先回到开头」那套做法，结果播到一半点「上一首」，
+  //: 它把当前这首从头又放一遍，看着像按钮坏了（App 端同一个毛病，一起改掉）。
   function previous() {
     if (!state.queue.length) return;
-    if (audio.currentTime > 3) {
-      seekTo(0);
-      return;
-    }
     const target = state.index <= 0 ? state.queue.length - 1 : state.index - 1;
     playAt(target);
   }
